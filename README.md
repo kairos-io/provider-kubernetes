@@ -4,7 +4,7 @@ A [Kairos](https://kairos.io) cluster provider that bootstraps **upstream
 Kubernetes** using `kubeadm`, while remaining native to the Kairos ecosystem
 (the `clusterplugin` / `yip` contract).
 
-> ## ⚠️ Under active development — NOT ready for field testing
+> ## Under active development — NOT ready for field testing
 >
 > This project is in **early, pre-alpha development**. It is **not** ready for
 > field testing, staging, or production use. Interfaces, configuration, and
@@ -37,10 +37,10 @@ starting point, notably:
 
 | Area | State |
 |------|-------|
-| Project bootstrap | ✅ in place |
-| Architecture / design | 🚧 in progress |
-| Cluster bootstrap logic | ⛔ not implemented |
-| Field readiness | ⛔ not ready |
+| Project bootstrap | in place |
+| Architecture / design | in progress |
+| Cluster bootstrap logic | not implemented |
+| Field readiness | not ready |
 
 ## Building
 
