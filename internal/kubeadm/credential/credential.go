@@ -117,6 +117,32 @@ func (m Minter) GenerateCertificateKey(ctx context.Context) (string, error) {
 	return key, nil
 }
 
+// MintJoinMaterial assembles fresh join material on a control-plane node (ADR-10
+// N3 auto-propagation): a bounded-TTL bootstrap token, the cluster CA SPKI pin
+// computed from the local ca.crt, and (for control-plane joins) a fresh
+// certificate key. The operator/management plane surfaces this to a joining node
+// out-of-band; this function only mints, it does not transmit. controlPlane=true
+// includes the certificate key.
+func (m Minter) MintJoinMaterial(ctx context.Context, controlPlane bool, ttl time.Duration) (*JoinMaterial, error) {
+	token, _, err := m.CreateToken(ctx, ttl)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := m.CACertHashFromFile()
+	if err != nil {
+		return nil, err
+	}
+	jm := &JoinMaterial{Token: token, CACertHashes: []string{hash}}
+	if controlPlane {
+		key, err := m.GenerateCertificateKey(ctx)
+		if err != nil {
+			return nil, err
+		}
+		jm.CertificateKey = key
+	}
+	return jm, nil
+}
+
 // CACertHashFromFile computes the SPKI pin of the cluster CA at the default path
 // under RootPath (the Kairos-bootstrapped-CP case). For externally-managed control
 // planes the hash/anchor is operator-supplied instead.

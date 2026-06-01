@@ -1,9 +1,12 @@
-// Command agent-provider-kubernetes is a Kairos cluster provider that
-// bootstraps upstream Kubernetes clusters with kubeadm.
+// Command agent-provider-kubernetes is a Kairos cluster provider that bootstraps
+// upstream Kubernetes clusters with kubeadm. It is shipped inside a Kairos image;
+// kairos-agent discovers it (agent-provider-* prefix) and invokes it over the
+// clusterplugin event bus.
 //
-// STATUS: under active development. The provider is wired into the Kairos
-// clusterplugin contract and parses/validates input, but does not yet generate
-// bootstrap stages. See PROJECT_CONTEXT.md (local, not committed) for the roadmap.
+// STATUS: under active development. The provider is wired into the clusterplugin
+// contract and implements input parsing/validation and cluster reset; the
+// boot-time reconcile stage emission (OQ-3) is not yet wired. See PROJECT_CONTEXT.md
+// (local, not committed) for the roadmap.
 package main
 
 import (
@@ -24,16 +27,8 @@ func main() {
 
 	if err := plugin.Run(pluggable.FactoryPlugin{
 		EventType:     clusterplugin.EventClusterReset,
-		PluginHandler: handleClusterReset,
+		PluginHandler: provider.HandleClusterReset,
 	}); err != nil {
 		logrus.Fatal(err)
 	}
-}
-
-// handleClusterReset handles the Kairos "cluster.reset" event.
-//
-// NOT YET IMPLEMENTED: currently a logged no-op.
-func handleClusterReset(_ *pluggable.Event) pluggable.EventResponse {
-	logrus.Warn("cluster reset handling is under active development and is currently a no-op")
-	return pluggable.EventResponse{}
 }

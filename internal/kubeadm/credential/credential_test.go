@@ -9,6 +9,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -16,6 +18,14 @@ import (
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 )
+
+type respondRunner struct {
+	respond func(args []string) (kubeadm.Result, error)
+}
+
+func (r respondRunner) Run(_ context.Context, args ...string) (kubeadm.Result, error) {
+	return r.respond(args)
+}
 
 // fakeRunner records args and returns canned output.
 type fakeRunner struct {
@@ -108,6 +118,48 @@ func TestCreateTokenRejectsZeroTTL(t *testing.T) {
 	m := Minter{Runner: &fakeRunner{}, RootPath: "/"}
 	if _, _, err := m.CreateToken(context.Background(), 0); err == nil {
 		t.Fatal("expected error for zero TTL (never non-expiring)")
+	}
+}
+
+func TestMintJoinMaterial(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc/kubernetes/pki"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc/kubernetes/pki/ca.crt"), selfSignedPEM(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := respondRunner{respond: func(args []string) (kubeadm.Result, error) {
+		switch {
+		case args[0] == "token" && args[1] == "create":
+			return kubeadm.Result{Stdout: "abcdef.0123456789abcdef\n"}, nil
+		case args[0] == "certs":
+			return kubeadm.Result{Stdout: strings.Repeat("a", 64) + "\n"}, nil
+		}
+		return kubeadm.Result{}, nil
+	}}
+	m := Minter{Runner: rr, RootPath: root}
+
+	// Worker: token + CA hash, no cert key.
+	jm, err := m.MintJoinMaterial(context.Background(), false, time.Hour)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if jm.Token == "" || len(jm.CACertHashes) != 1 || !strings.HasPrefix(jm.CACertHashes[0], "sha256:") {
+		t.Fatalf("unexpected worker join material: %+v", jm)
+	}
+	if jm.CertificateKey != "" {
+		t.Fatalf("worker join material must not include a certificate key")
+	}
+
+	// Control plane: also a cert key.
+	jmCP, err := m.MintJoinMaterial(context.Background(), true, time.Hour)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if jmCP.CertificateKey == "" {
+		t.Fatalf("control-plane join material must include a certificate key")
 	}
 }
 
