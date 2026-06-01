@@ -83,6 +83,13 @@ func TestRunInitMaterializesAndShreds(t *testing.T) {
 	if strings.Join(last, " ") != "init --config "+initConfigPath+" --upload-certs" {
 		t.Fatalf("unexpected init argv: %v", last)
 	}
+	// M2: the certificate key must never be passed on argv (it flows through the
+	// 0600 config), and no expiry-mutation of kubeadm-certs is invoked.
+	for _, c := range fr.calls {
+		if strings.Contains(strings.Join(c, " "), "--certificate-key") {
+			t.Fatalf("certificate key must not appear on argv: %v", c)
+		}
+	}
 	// The transient config must be shredded after exec.
 	if _, err := os.Stat(initConfigPath); !os.IsNotExist(err) {
 		t.Fatalf("transient init config was not shredded: stat err=%v", err)

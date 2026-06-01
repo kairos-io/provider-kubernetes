@@ -29,7 +29,6 @@ import (
 // by a joiner (OQ-7) and never logged (ADR-2).
 type JoinMaterial struct {
 	Token             string   // bootstrap token "id.secret"
-	TTL               string   // bounded TTL string, e.g. "1h0m0s"
 	CACertHashes      []string // SPKI "sha256:..." pins
 	CertificateKey    string   // control-plane joins only
 	Endpoint          string   // controlPlaneEndpoint host:port

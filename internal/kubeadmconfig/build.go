@@ -78,7 +78,9 @@ func BuildJoinConfiguration(in Input) (JoinConfiguration, error) {
 	switch {
 	case in.DiscoveryFilePath != "":
 		// File discovery: the CA is pinned by the (out-of-band, CA-embedded)
-		// discovery kubeconfig itself.
+		// discovery kubeconfig itself. kubeadm validates that embedded CA at join
+		// time; this builder does not parse the file, so the by-construction CA
+		// guarantee here covers only the token path.
 		j.Discovery = Discovery{File: &FileDiscovery{KubeConfigPath: in.DiscoveryFilePath}}
 	case in.JoinToken != "":
 		if len(in.CACertHashes) == 0 {

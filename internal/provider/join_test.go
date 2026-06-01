@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
@@ -77,6 +78,21 @@ func TestBuildJoinMaterialOQ9CrossValidate(t *testing.T) {
 	bad.JoinConfiguration.Discovery.BootstrapToken.CACertHashes = []string{"sha256:deadbeef"}
 	if _, err := BuildJoinMaterial(Context{CACerts: []string{pemStr}}, bad); err == nil {
 		t.Fatal("expected OQ-9 cross-validation mismatch to be a hard error")
+	}
+}
+
+func TestBuildJoinMaterialOQ9NormalizesCase(t *testing.T) {
+	pemStr := caPEM(t)
+	derived, err := credential.SPKIHashFromPEM([]byte(pemStr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Operator supplies the same hash but upper-cased / padded; must still match.
+	var uc UserConfig
+	uc.JoinConfiguration.Discovery.BootstrapToken.Token = "abcdef.0123456789abcdef"
+	uc.JoinConfiguration.Discovery.BootstrapToken.CACertHashes = []string{"  " + strings.ToUpper(derived) + "  "}
+	if _, err := BuildJoinMaterial(Context{CACerts: []string{pemStr}}, uc); err != nil {
+		t.Fatalf("case/whitespace-only difference must still match, got: %v", err)
 	}
 }
 

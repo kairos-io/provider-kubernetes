@@ -3,6 +3,7 @@ package provider
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 )
@@ -54,21 +55,31 @@ func resolveCACertHashes(caCerts, explicit []string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("derive CA hash from ca_certs[%d]: %w", i, err)
 		}
-		derived = append(derived, h)
+		derived = append(derived, normalizeHash(h))
+	}
+
+	explicitN := make([]string, 0, len(explicit))
+	for _, h := range explicit {
+		explicitN = append(explicitN, normalizeHash(h))
 	}
 
 	switch {
-	case len(derived) > 0 && len(explicit) > 0:
-		if !hashSetsEqual(derived, explicit) {
+	case len(derived) > 0 && len(explicitN) > 0:
+		if !hashSetsEqual(derived, explicitN) {
 			return nil, fmt.Errorf("CA trust mismatch: explicit caCertHashes do not match the hashes derived from ca_certs")
 		}
 		return derived, nil
 	case len(derived) > 0:
 		return derived, nil
 	default:
-		return explicit, nil
+		return explicitN, nil
 	}
 }
+
+// normalizeHash canonicalizes a CA cert hash for comparison: lowercase, trimmed.
+// SPKIHashFromPEM already emits canonical "sha256:<lowerhex>"; this makes operator
+// -supplied hashes match regardless of case/whitespace (still fail-closed).
+func normalizeHash(h string) string { return strings.ToLower(strings.TrimSpace(h)) }
 
 func hashSetsEqual(a, b []string) bool {
 	if len(a) != len(b) {

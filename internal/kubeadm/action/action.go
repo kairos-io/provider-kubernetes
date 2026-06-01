@@ -11,6 +11,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
@@ -28,8 +30,9 @@ type KubeadmExecutor struct {
 	Runner   kubeadm.Runner
 	Minter   credential.Minter
 	RootPath string
-	// RunDir is the ephemeral directory for transient secret-bearing config; empty
-	// defaults to /run (tmpfs).
+	// RunDir is the directory for transient secret-bearing config. It MUST be an
+	// ephemeral (tmpfs) directory; empty defaults to /run. Pointing it at a
+	// persistent filesystem would defeat the shred guarantee (OQ-7).
 	RunDir string
 	Role   actualstate.Role
 	Input  kubeadmconfig.Input
@@ -188,5 +191,9 @@ func shred(path string) {
 	if info, err := os.Stat(path); err == nil {
 		_ = os.WriteFile(path, make([]byte, info.Size()), 0o600)
 	}
-	_ = os.Remove(path)
+	// A lingering secret file is a real risk, so do not fail silently if removal
+	// does not happen (Design Principle #6). The path is a filename, not content.
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		logrus.Debugf("provider-kubernetes: failed to remove transient secret file %s: %v", path, err)
+	}
 }
