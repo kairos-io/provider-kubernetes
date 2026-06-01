@@ -13,10 +13,14 @@ Kubernetes** using `kubeadm`, while remaining native to the Kairos ecosystem
 
 ## What this is
 
-`provider-kubernetes` is a ground-up, Go-first rewrite of the Kairos kubeadm
-provider. It is designed to address long-standing feedback
-([kairos-io/kairos#4099](https://github.com/kairos-io/kairos/issues/4099)),
-notably:
+`provider-kubernetes` gives Kairos users a first-class way to **create and
+manage kubeadm-based Kubernetes clusters**. It is a new, **fully Go-native**
+provider — no shell scripts driving the bootstrap — that plugs into the Kairos
+cluster lifecycle.
+
+Its design takes the feedback in
+[kairos-io/kairos#4099](https://github.com/kairos-io/kairos/issues/4099) as a
+starting point, notably:
 
 - **No more bash-driven orchestration** — kubeadm is driven through Go, so
   behavior is unit-testable rather than only verifiable end-to-end.
@@ -38,16 +42,9 @@ notably:
 | Cluster bootstrap logic | ⛔ not implemented |
 | Field readiness | ⛔ not ready |
 
-## Relationship to provider-kubeadm
-
-This repository supersedes
-[`kairos-io/provider-kubeadm`](https://github.com/kairos-io/provider-kubeadm).
-Until `provider-kubernetes` reaches a usable state, `provider-kubeadm` remains
-the reference implementation.
-
 ## Building
 
-Requires Go 1.24+.
+Requires Go 1.26.3+.
 
 ```sh
 make build      # produces ./bin/agent-provider-kubernetes
