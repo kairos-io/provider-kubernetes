@@ -122,6 +122,7 @@ func (e *KubeadmExecutor) runJoin(ctx context.Context) error {
 	in.JoinToken = e.Join.Token
 	in.CACertHashes = e.Join.CACertHashes
 	in.CertificateKey = e.Join.CertificateKey
+	in.DiscoveryFilePath = e.Join.DiscoveryFilePath
 	in.JoinAsControlPlane = e.Role == actualstate.RoleControlPlane
 
 	joinCfg, err := kubeadmconfig.BuildJoinConfiguration(in) // enforces CA pinning

@@ -28,11 +28,12 @@ import (
 // JoinMaterial is transient, credential-bearing join input. It is never persisted
 // by a joiner (OQ-7) and never logged (ADR-2).
 type JoinMaterial struct {
-	Token          string   // bootstrap token "id.secret"
-	TTL            string   // bounded TTL string, e.g. "1h0m0s"
-	CACertHashes   []string // SPKI "sha256:..." pins
-	CertificateKey string   // control-plane joins only
-	Endpoint       string   // controlPlaneEndpoint host:port
+	Token             string   // bootstrap token "id.secret"
+	TTL               string   // bounded TTL string, e.g. "1h0m0s"
+	CACertHashes      []string // SPKI "sha256:..." pins
+	CertificateKey    string   // control-plane joins only
+	Endpoint          string   // controlPlaneEndpoint host:port
+	DiscoveryFilePath string   // discovery kubeconfig path (externally-managed CP); alternative to token+hashes
 }
 
 // SPKIHashFromPEM computes the kubeadm-style Subject Public Key Info SHA-256 pin

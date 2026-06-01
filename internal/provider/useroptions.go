@@ -45,6 +45,25 @@ type UserConfig struct {
 			Taints           []kubeadmconfig.Taint `json:"taints,omitempty"`
 		} `json:"nodeRegistration,omitempty"`
 	} `json:"initConfiguration,omitempty"`
+
+	// JoinConfiguration carries the operator-delivered join material (ADR-10:
+	// minted on a CP and delivered out-of-band via this config). Read for
+	// controlplane/worker roles.
+	JoinConfiguration struct {
+		Discovery struct {
+			BootstrapToken struct {
+				Token             string   `json:"token,omitempty"`
+				APIServerEndpoint string   `json:"apiServerEndpoint,omitempty"`
+				CACertHashes      []string `json:"caCertHashes,omitempty"`
+			} `json:"bootstrapToken,omitempty"`
+			File struct {
+				KubeConfigPath string `json:"kubeConfigPath,omitempty"`
+			} `json:"file,omitempty"`
+		} `json:"discovery,omitempty"`
+		ControlPlane struct {
+			CertificateKey string `json:"certificateKey,omitempty"`
+		} `json:"controlPlane,omitempty"`
+	} `json:"joinConfiguration,omitempty"`
 }
 
 // ParseUserConfig parses the raw `cluster.config` YAML string. An empty string
