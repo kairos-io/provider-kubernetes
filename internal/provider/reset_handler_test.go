@@ -67,6 +67,18 @@ func TestHandleClusterResetNoClusterIsNoop(t *testing.T) {
 	}
 }
 
+func TestHandleClusterResetRejectsOversizedPayload(t *testing.T) {
+	// Construct an oversized event.Data (>1 MiB) without unmarshaling.
+	big := make([]byte, (1<<20)+1)
+	for i := range big {
+		big[i] = 'a'
+	}
+	resp := handleClusterReset(&pluggable.Event{Data: string(big)}, &resetFakeRunner{})
+	if resp.Error == "" {
+		t.Fatal("expected reset to reject oversized payload, got nil error")
+	}
+}
+
 func TestHandleClusterResetIgnoresTokenValidation(t *testing.T) {
 	// Reset must work even with an empty/invalid cluster_token (no token gate).
 	root := t.TempDir()

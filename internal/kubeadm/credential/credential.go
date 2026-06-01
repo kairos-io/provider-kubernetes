@@ -35,6 +35,12 @@ type JoinMaterial struct {
 	DiscoveryFilePath string   // discovery kubeconfig path (externally-managed CP); alternative to token+hashes
 }
 
+// String implements fmt.Stringer with a redacted form, so an accidental
+// log/printf of a JoinMaterial value never leaks the token or cert key.
+// Callers that legitimately need the secret values must read the fields directly.
+func (j JoinMaterial) String() string   { return "JoinMaterial{REDACTED}" }
+func (j JoinMaterial) GoString() string { return "JoinMaterial{REDACTED}" }
+
 // SPKIHashFromPEM computes the kubeadm-style Subject Public Key Info SHA-256 pin
 // ("sha256:<hex>") of the (first) certificate in pemData. This is the value used
 // for CACertHashes (ADR-2 CA pinning). Pure function.

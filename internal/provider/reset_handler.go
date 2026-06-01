@@ -22,16 +22,28 @@ func HandleClusterReset(event *pluggable.Event) pluggable.EventResponse {
 	return handleClusterReset(event, kubeadm.ExecRunner{})
 }
 
+// maxResetPayloadBytes caps the event payload size before unmarshaling, to bound
+// CPU/memory of (in-process but still untrusted-by-shape) YAML/JSON parsing.
+const maxResetPayloadBytes = 1 << 20 // 1 MiB
+
 // handleClusterReset is the testable core (runner injected).
 func handleClusterReset(event *pluggable.Event, runner kubeadm.Runner) pluggable.EventResponse {
 	var resp pluggable.EventResponse
 	if event == nil {
 		return resp
 	}
+	if len(event.Data) > maxResetPayloadBytes {
+		resp.Error = fmt.Sprintf("reset event payload too large (%d bytes; max %d)", len(event.Data), maxResetPayloadBytes)
+		return resp
+	}
 
 	var payload bus.EventPayload
 	if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
 		resp.Error = fmt.Sprintf("parse reset event: %s", err)
+		return resp
+	}
+	if len(payload.Config) > maxResetPayloadBytes {
+		resp.Error = fmt.Sprintf("reset config payload too large (%d bytes; max %d)", len(payload.Config), maxResetPayloadBytes)
 		return resp
 	}
 	var config clusterplugin.Config
@@ -50,7 +62,9 @@ func handleClusterReset(event *pluggable.Event, runner kubeadm.Runner) pluggable
 
 	// Best-effort CRI socket from the user config (optional).
 	var criSocket string
-	if uc, err := ParseUserConfig(config.Cluster.Options); err == nil {
+	if uc, err := ParseUserConfig(config.Cluster.Options); err != nil {
+		logrus.Warnf("provider-kubernetes: reset could not parse user config for CRI socket (continuing without): %v", err)
+	} else {
 		criSocket = uc.InitConfiguration.NodeRegistration.CRISocket
 	}
 

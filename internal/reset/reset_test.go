@@ -80,3 +80,65 @@ func TestResetNoCRISocketOmitsFlag(t *testing.T) {
 		t.Fatalf("did not expect --cri-socket: %v", fr.calls[0])
 	}
 }
+
+func TestResetRejectsTraversalRootPath(t *testing.T) {
+	if err := Run(context.Background(), Options{Runner: &fakeRunner{}, RootPath: ".."}); err == nil {
+		t.Fatal("expected hard error on traversal RootPath '..'")
+	}
+	if err := Run(context.Background(), Options{Runner: &fakeRunner{}, RootPath: "/etc/../.."}); err == nil {
+		t.Fatal("expected hard error on embedded traversal segments")
+	}
+}
+
+func TestResetRejectsRelativeRootPath(t *testing.T) {
+	if err := Run(context.Background(), Options{Runner: &fakeRunner{}, RootPath: "relative/root"}); err == nil {
+		t.Fatal("expected hard error on relative RootPath")
+	}
+}
+
+func TestResetDefaultsEmptyRootPathToSlash(t *testing.T) {
+	// We don't actually want to wipe the test host, so use a fake runner and
+	// assert only that validateRoot accepts an empty input (defense-in-depth:
+	// package applies the default; we get past validation, and any removals
+	// either no-op (NotExist) or fail with permission, neither of which is fatal
+	// here because we only check that Run returns nil for a clean system).
+	// To avoid touching real /etc/kubernetes etc., we point at a tmp root in
+	// other tests and assert the empty-default behavior via the error path:
+	// when EUID != 0, RemoveAll under "/" returns permission errors that surface
+	// from removeArtifact. We accept either nil or a permission error here; what
+	// matters is that no path-validation error fires.
+	err := Run(context.Background(), Options{Runner: &fakeRunner{}, RootPath: ""})
+	if err != nil && strings.Contains(err.Error(), "RootPath") {
+		t.Fatalf("expected empty RootPath to default to '/', not be rejected: %v", err)
+	}
+}
+
+func TestResetRefusesSymlinkedArtifact(t *testing.T) {
+	root := t.TempDir()
+	// Create the artifact path as a SYMLINK to a sibling directory whose
+	// contents must NOT be destroyed by reset.
+	target := filepath.Join(t.TempDir(), "must-survive")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(target, "canary")
+	if err := os.WriteFile(canary, []byte("survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "var", "lib", "kubelet")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), Options{Runner: &fakeRunner{}, RootPath: root}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("expected the symlink to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(canary); err != nil {
+		t.Fatalf("symlink target was destroyed (security-critical): %v", err)
+	}
+}

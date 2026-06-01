@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -160,6 +161,22 @@ func TestMintJoinMaterial(t *testing.T) {
 	}
 	if jmCP.CertificateKey == "" {
 		t.Fatalf("control-plane join material must include a certificate key")
+	}
+}
+
+func TestJoinMaterialIsSelfRedacting(t *testing.T) {
+	jm := JoinMaterial{
+		Token:          "abcdef.0123456789abcdef",
+		CertificateKey: strings.Repeat("k", 64),
+	}
+	for _, s := range []string{jm.String(), jm.GoString(), "as Stringer: " + jm.String()} {
+		if strings.Contains(s, jm.Token) || strings.Contains(s, jm.CertificateKey) {
+			t.Fatalf("JoinMaterial must not expose secrets via String/GoString, got: %q", s)
+		}
+	}
+	// Verbose Printf-style formatting via %v / %s also routes through String().
+	if v := fmt.Sprintf("%v", jm); strings.Contains(v, jm.Token) || strings.Contains(v, jm.CertificateKey) {
+		t.Fatalf("%%v formatting leaked secrets: %q", v)
 	}
 }
 
