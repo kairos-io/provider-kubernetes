@@ -16,7 +16,7 @@
 # Versions: pinned by default. Bump together via build args; CI should pin via
 # image digest as well once a release pipeline lands.
 # ----------------------------------------------------------------------------
-ARG KAIROS_BASE_IMAGE=quay.io/kairos/ubuntu:24.04-standard-amd64-generic-v3.5.1
+ARG KAIROS_BASE_IMAGE=quay.io/kairos/ubuntu:24.04-core-amd64-generic-v3.5.1
 ARG GO_BUILDER_IMAGE=golang:1.26.3-alpine
 ARG TARGETARCH=amd64
 
@@ -106,13 +106,16 @@ RUN set -eux; \
     mkdir containerd && tar -xzf "${file}" -C containerd; \
     rm "${file}" sha256sums
 
-# runc: ships runc.sha256sum alongside the binary.
+# runc: ships a PGP-signed runc.sha256sum that names files like "runc.amd64",
+# so we download under that name (matching the sha256sum line), verify, then
+# rename to plain "runc" for the final image.
 RUN set -eux; \
     base="https://github.com/opencontainers/runc/releases/download/${RUNC_VERSION}"; \
-    curl -fsSL -o runc "${base}/runc.${TARGETARCH}"; \
-    curl -fsSL -o runc.sha256sum "${base}/runc.sha256sum"; \
-    grep "runc.${TARGETARCH}$" runc.sha256sum | sha256sum -c -; \
+    curl -fsSL -o "runc.${TARGETARCH}"      "${base}/runc.${TARGETARCH}"; \
+    curl -fsSL -o runc.sha256sum            "${base}/runc.sha256sum"; \
+    grep "  runc.${TARGETARCH}$" runc.sha256sum | sha256sum -c -; \
     rm runc.sha256sum; \
+    mv "runc.${TARGETARCH}" runc; \
     chmod +x runc
 
 # CNI plugins: each release tarball has a matching <file>.sha256 sibling.
