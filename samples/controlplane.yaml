@@ -1,0 +1,45 @@
+#cloud-config
+# Kairos cloud-config for an ADDITIONAL control-plane node joining a kubeadm
+# cluster bootstrapped by provider-kubernetes.
+#
+# STATUS: this provider is under active development and is NOT field-ready.
+#
+# As with workers, join material is delivered HERE by the operator / management
+# plane. A control-plane join additionally needs a fresh certificate key, minted
+# on an existing CP with: kubeadm init phase upload-certs --upload-certs
+
+install:
+  device: "auto"
+  auto: true
+  reboot: true
+
+users:
+  - name: kairos
+    groups: ["sudo"]
+    passwd: kairos
+
+cluster:
+  cluster_token: "CHANGE-ME-to-a-long-high-entropy-cluster-correlation-string"
+  control_plane_host: "192.168.1.10"
+  role: controlplane
+
+  providerConfig:
+    cluster_root_path: "/"
+
+  config: |
+    joinConfiguration:
+      discovery:
+        bootstrapToken:
+          token: "abcdef.0123456789abcdef"
+          apiServerEndpoint: "192.168.1.10:6443"
+          caCertHashes:
+            - "sha256:REPLACE-WITH-CA-SPKI-PIN"
+      controlPlane:
+        # Fresh per join; the upstream kubeadm-certs secret carries a 2h expiry
+        # that the provider deliberately does NOT strip.
+        certificateKey: "REPLACE-WITH-FRESH-CERT-KEY"
+
+stages:
+  initramfs:
+    - commands:
+        - true

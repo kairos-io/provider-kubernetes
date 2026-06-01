@@ -1,0 +1,15 @@
+# containerd configuration for kubeadm clusters built with provider-kubernetes.
+# - sandbox image pinned to registry.k8s.io (NOT the dead k8s.gcr.io).
+# - SystemdCgroup = true, matching the kubelet's default cgroup driver
+#   ("systemd"); see https://kubernetes.io/docs/setup/production-environment/container-runtimes/.
+version = 2
+root = "/var/lib/containerd"
+
+[plugins."io.containerd.grpc.v1.cri"]
+  sandbox_image = "registry.k8s.io/pause:3.10"
+
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+    runtime_type = "io.containerd.runc.v2"
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+      BinaryName = "/usr/bin/runc"
+      SystemdCgroup = true

@@ -1,0 +1,18 @@
+# kubelet systemd unit aligned with the upstream kubeadm pattern. The kubelet is
+# started here; kubeadm init/join writes the additional drop-in
+# /etc/systemd/system/kubelet.service.d/10-kubeadm.conf with --kubeconfig and the
+# config flag pointing at /var/lib/kubelet/config.yaml.
+[Unit]
+Description=kubelet: The Kubernetes Node Agent
+Documentation=https://kubernetes.io/docs/
+Wants=network-online.target containerd.service
+After=network-online.target containerd.service
+
+[Service]
+ExecStart=/usr/bin/kubelet
+Restart=always
+StartLimitInterval=0
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,65 @@
+#cloud-config
+# Kairos cloud-config for a WORKER node joining a kubeadm cluster bootstrapped
+# by provider-kubernetes.
+#
+# STATUS: this provider is under active development and is NOT field-ready.
+#
+# Join material (token + CA cert hash) is delivered HERE by the
+# operator / management plane that already holds control-plane access. The node
+# does NOT issue a mint request to the control plane (no node-pull RPC); join
+# material is short-TTL (1h default) and the provider persists none of it. If a
+# token expires before the node boots, re-mint and redeliver. See ADR-10 in
+# PROJECT_CONTEXT.md.
+#
+# Mint on a control-plane node, near boot of this worker:
+#   kubeadm token create --ttl 1h
+#   openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin \
+#       -outform der 2>/dev/null | openssl dgst -sha256 -hex | awk '{print "sha256:"$2}'
+
+install:
+  device: "auto"
+  auto: true
+  reboot: true
+
+users:
+  - name: kairos
+    groups: ["sudo"]
+    passwd: kairos
+
+cluster:
+  # Must match the master's cluster_token (the provider uses it as a correlation
+  # value only).
+  cluster_token: "CHANGE-ME-to-a-long-high-entropy-cluster-correlation-string"
+
+  control_plane_host: "192.168.1.10"
+
+  role: worker
+
+  providerConfig:
+    cluster_root_path: "/"
+
+  # Optional: an externally-managed CP's CA in PEM form. The provider can derive
+  # the CA hash from this; if joinConfiguration.discovery.bootstrapToken.caCertHashes
+  # is also set, the two are cross-validated and must match.
+  # ca_certs:
+  #   - |
+  #     -----BEGIN CERTIFICATE-----
+  #     ...
+  #     -----END CERTIFICATE-----
+
+  config: |
+    joinConfiguration:
+      discovery:
+        bootstrapToken:
+          # CHANGE THIS to a freshly-minted, bounded-TTL token from the CP.
+          token: "abcdef.0123456789abcdef"
+          apiServerEndpoint: "192.168.1.10:6443"
+          # CA pinning is MANDATORY. The provider refuses to join without a CA
+          # anchor and never sets unsafeSkipCAVerification.
+          caCertHashes:
+            - "sha256:REPLACE-WITH-CA-SPKI-PIN"
+
+stages:
+  initramfs:
+    - commands:
+        - true

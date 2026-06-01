@@ -57,6 +57,29 @@ The provider binary follows the Kairos naming convention
 (`agent-provider-*`) and is intended to be installed under
 `/system/providers/` inside a Kairos image.
 
+## Building a Kairos image
+
+The `Dockerfile` at the repo root builds a Kairos image that bundles the
+provider plus kubeadm, kubelet, kubectl, containerd, runc and the CNI
+plugins. Every external binary download is **checksum-verified** against the
+publisher's HTTPS-served `.sha256` file:
+
+```sh
+make image KUBERNETES_VERSION=v1.34.0 VERSION=dev
+# or:
+docker build \
+  --build-arg KUBERNETES_VERSION=v1.34.0 \
+  --build-arg PROVIDER_VERSION=$(git describe --always) \
+  -t kairos-kubeadm:dev .
+```
+
+Convert the resulting Docker image into a bootable ISO/raw artifact with
+[auroraboot](https://kairos.io/docs/reference/auroraboot/), and provision it
+with one of the sample cloud-configs in [`samples/`](./samples/) (`master.yaml`,
+`controlplane.yaml`, `worker.yaml`). The samples directory's
+[README](./samples/README.md) walks through the end-to-end cluster-creation
+flow.
+
 ## Contributing
 
 This project is moving quickly and its architecture is still being defined.

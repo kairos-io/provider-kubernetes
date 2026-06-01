@@ -7,7 +7,10 @@ VERSION ?= dev
 GO      ?= go
 LDFLAGS := -X github.com/kairos-io/provider-kubernetes/version.Version=$(VERSION) -w -s
 
-.PHONY: all build test vet fmt fmt-check lint tidy clean
+KUBERNETES_VERSION ?= v1.34.0
+IMAGE              ?= kairos-kubeadm:$(VERSION)
+
+.PHONY: all build test vet fmt fmt-check lint tidy image clean
 
 all: build
 
@@ -38,6 +41,14 @@ lint:
 ## tidy: sync go.mod/go.sum
 tidy:
 	$(GO) mod tidy
+
+## image: build the Kairos image bundling provider + kubeadm + containerd
+## (requires Docker; supply-chain-verified downloads inside the Dockerfile).
+image:
+	docker build \
+	  --build-arg KUBERNETES_VERSION=$(KUBERNETES_VERSION) \
+	  --build-arg PROVIDER_VERSION=$(VERSION) \
+	  -t $(IMAGE) .
 
 ## clean: remove build artifacts
 clean:
