@@ -4,6 +4,8 @@
 // etcd membership, control-plane reachability) and performs no mutation.
 package actualstate
 
+import "context"
+
 // Role is the desired Kubernetes role for the node, from the Cluster definition.
 type Role string
 
@@ -36,7 +38,8 @@ type State struct {
 	ControlPlaneReachable bool
 }
 
-// Prober observes the node's actual state without mutating it.
+// Prober observes the node's actual state without mutating it. Implementations
+// MUST honor the context deadline so probing is bounded (issue #4099-1).
 type Prober interface {
-	Probe() (State, error)
+	Probe(ctx context.Context) (State, error)
 }
