@@ -7,6 +7,16 @@ import (
 const (
 	defaultRootPath        = "/"
 	providerOptRootPathKey = "cluster_root_path"
+
+	// ClusterStatePath is the tmpfs path where Provider() serializes the Cluster
+	// for the reconcile subcommand to consume at boot. /run is tmpfs on every
+	// supported distro, so this file is wiped on reboot (OQ-7: persist no
+	// bootstrap secrets). Permissions are 0600 root:root.
+	ClusterStatePath = "/run/provider-kubernetes/cluster.json"
+
+	// ReconcileLogPath is where the boot-time reconcile subcommand writes its
+	// stdout/stderr; surfacing failures to operators (OQ-4 logs-only for v1).
+	ReconcileLogPath = "/var/log/provider-kubernetes-reconcile.log"
 )
 
 // Context is the parsed, validated provider input derived from a Cluster. It is a

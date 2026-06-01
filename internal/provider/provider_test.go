@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
+	"gopkg.in/yaml.v3"
 )
 
 func validToken() string { return "Tok3n-with-pLENTY-of-entropy-0123456789" }
@@ -92,7 +93,7 @@ func TestNewContextRejectsBadToken(t *testing.T) {
 }
 
 func TestProviderReturnsPromptlyAndNamed(t *testing.T) {
-	// Valid input -> inert (foundation) config, named, no panic.
+	// Valid input -> a named YipConfig with the reconcile stage, no panic.
 	cfg := Provider(clusterplugin.Cluster{Role: clusterplugin.RoleInit, ClusterToken: validToken()})
 	if cfg.Name == "" {
 		t.Fatal("expected a named YipConfig")
@@ -101,5 +102,52 @@ func TestProviderReturnsPromptlyAndNamed(t *testing.T) {
 	bad := Provider(clusterplugin.Cluster{Role: clusterplugin.RoleInit})
 	if bad.Name == "" {
 		t.Fatal("expected a named YipConfig on bad input")
+	}
+	if len(bad.Stages) != 0 {
+		t.Fatal("Provider must NOT emit stages on invalid input")
+	}
+}
+
+func TestProviderEmitsBootStage(t *testing.T) {
+	cfg := Provider(clusterplugin.Cluster{
+		Role:             clusterplugin.RoleInit,
+		ClusterToken:     validToken(),
+		ControlPlaneHost: "10.0.0.1",
+	})
+	stages, ok := cfg.Stages["network.after"]
+	if !ok || len(stages) < 2 {
+		t.Fatalf("expected at least two stages under network.after, got: %+v", cfg.Stages)
+	}
+	// First stage writes the cluster state file at 0600 to the tmpfs path.
+	if len(stages[0].Files) != 1 {
+		t.Fatalf("expected first stage to write one File, got %+v", stages[0].Files)
+	}
+	f := stages[0].Files[0]
+	if f.Path != ClusterStatePath {
+		t.Fatalf("expected cluster file at %s, got %s", ClusterStatePath, f.Path)
+	}
+	if f.Permissions != 0o600 {
+		t.Fatalf("cluster state file must be 0600, got %o", f.Permissions)
+	}
+	// The serialized cluster must NOT contain the secret-equivalent bootstrap
+	// token or cert key (joiner samples may carry these via joinConfiguration,
+	// but they go through user-config; we just confirm the structure here).
+	var got clusterplugin.Cluster
+	if err := yaml.Unmarshal([]byte(f.Content), &got); err != nil {
+		t.Fatalf("cluster file is not valid YAML: %v", err)
+	}
+	if got.Role != clusterplugin.RoleInit {
+		t.Fatalf("cluster role round-trip failed: %q", got.Role)
+	}
+	// Second stage invokes the reconcile subcommand.
+	if len(stages[1].Commands) != 1 {
+		t.Fatalf("expected reconcile stage to have exactly one Command, got %+v", stages[1].Commands)
+	}
+	cmd := stages[1].Commands[0]
+	if !strings.Contains(cmd, ProviderBinaryPath+" reconcile") {
+		t.Fatalf("reconcile command shape wrong: %q", cmd)
+	}
+	if !strings.Contains(cmd, "--cluster-file="+ClusterStatePath) {
+		t.Fatalf("reconcile command must reference the cluster file: %q", cmd)
 	}
 }
