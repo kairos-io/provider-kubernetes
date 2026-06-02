@@ -9,6 +9,7 @@ import (
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 	"github.com/sirupsen/logrus"
 
+	"github.com/kairos-io/provider-kubernetes/internal/etcdsnapshot"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/action"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
@@ -27,6 +28,17 @@ type Options struct {
 	// reachability. When nil, a bounded TCP-dial to the controlPlaneEndpoint is
 	// used. Inject a custom probe in tests to avoid real network calls.
 	CPReachableProbe func(ctx context.Context) bool
+
+	// --- Upgrade probes (ADR-12); nil -> production exec defaults. Injectable for
+	// hardware-free tests. Only consulted when an upgrade target is pinned. ---
+	// ClusterVersionProbe reads the cluster's current version (kubeadm-config CM).
+	ClusterVersionProbe func(ctx context.Context) string
+	// RunningKubeletVersionProbe reads this node's running kubelet version.
+	RunningKubeletVersionProbe func(ctx context.Context) string
+	// EncryptionConfirmed reports whether the etcd-snapshot dir is encrypted.
+	EncryptionConfirmed func(ctx context.Context) bool
+	// KubeletRestart restarts the kubelet after an upgrade; nil -> systemctl.
+	KubeletRestart func(ctx context.Context) error
 }
 
 // Run executes one bounded reconcile pass for the given cluster. It is the runtime
@@ -75,16 +87,30 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		cpReachable = makeCPReachableProbe(in.ControlPlaneEndpoint)
 	}
 
-	state, err := actualstate.FileProber{
-		RootPath:              pctx.RootPath,
-		ControlPlaneReachable: cpReachable,
-	}.Probe(ctx)
+	// ADR-12: an upgrade is intended only when the operator PINS kubernetesVersion
+	// (explicit-pin trigger). The pin equals the bundled binary by ADR-3 (Resolve),
+	// so the target is the resolved version. A newer binary without a pin does NOT
+	// auto-upgrade. The version probes are wired only when a target is set, so the
+	// no-upgrade path stays free of cluster/kubelet version reads.
+	target := ""
+	prober := actualstate.FileProber{RootPath: pctx.RootPath, ControlPlaneReachable: cpReachable}
+	if uc.ClusterConfiguration.KubernetesVersion != "" {
+		target = resolved
+		prober.ClusterVersion = opts.ClusterVersionProbe
+		if prober.ClusterVersion == nil {
+			prober.ClusterVersion = clusterVersionViaKubectl(pctx.RootPath)
+		}
+		prober.RunningKubeletVersion = opts.RunningKubeletVersionProbe
+		if prober.RunningKubeletVersion == nil {
+			prober.RunningKubeletVersion = runningKubeletVersionViaKubectl(pctx.RootPath)
+		}
+	}
+
+	state, err := prober.Probe(ctx)
 	if err != nil {
 		return err
 	}
-	// Upgrade target wiring (the operator-pinned version) lands in a later slice;
-	// passing "" means no upgrade is evaluated and the bootstrap/join logic runs.
-	actions := reconcile.Plan(role, "", state)
+	actions := reconcile.Plan(role, target, state)
 
 	var join *credential.JoinMaterial
 	if role == actualstate.RoleWorker || role == actualstate.RoleControlPlane {
@@ -107,13 +133,47 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		Input:       in,
 		Join:        join,
 		CPReachable: cpReachable,
+		// ADR-12 upgrade wiring.
+		TargetVersion:       target,
+		ClusterVersion:      state.ClusterVersion,
+		ClusterVersionProbe: prober.ClusterVersion, // re-check + follower wait (nil when no target)
+		KubeletRestart:      opts.KubeletRestart,   // nil -> systemctl (production)
+	}
+	// Best-effort pre-apply etcd snapshot on a control plane only (ADR-12 U5).
+	if target != "" && (role == actualstate.RoleInit || role == actualstate.RoleControlPlane) {
+		encConfirmed := opts.EncryptionConfirmed
+		if encConfirmed == nil {
+			encConfirmed = encryptionConfirmedDefault(etcdsnapshot.DefaultDir)
+		}
+		exec.SnapshotEtcd = func(c context.Context) error {
+			return etcdsnapshot.Run(c, etcdsnapshot.Options{RootPath: pctx.RootPath, EncryptionConfirmed: encConfirmed})
+		}
+	}
+
+	// Upgrade actions get the larger upgrade budget (slower; apply not freely
+	// retried); everything else uses the default bounded budget (ADR-12 / #4099-1).
+	budget := reconcile.DefaultBudget()
+	if containsUpgradeAction(actions) {
+		budget = reconcile.UpgradeBudget()
 	}
 
 	logrus.Infof("provider-kubernetes: reconciling role=%q membership=%q actions=%v", role, state.Membership, actions)
-	if err := (reconcile.Reconciler{Budget: reconcile.DefaultBudget(), Exec: exec}).Run(ctx, actions); err != nil {
+	if err := (reconcile.Reconciler{Budget: budget, Exec: exec}).Run(ctx, actions); err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
 	return nil
+}
+
+// containsUpgradeAction reports whether any planned action is an upgrade action.
+func containsUpgradeAction(actions []reconcile.Action) bool {
+	for _, a := range actions {
+		switch a {
+		case reconcile.ActionUpgradeApply, reconcile.ActionUpgradeNode,
+			reconcile.ActionWaitForClusterUpgrade, reconcile.ActionRefuseUpgrade:
+			return true
+		}
+	}
+	return false
 }
 
 // makeCPReachableProbe returns a bounded TCP reachability probe for the given
