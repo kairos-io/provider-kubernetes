@@ -11,7 +11,11 @@
 # token expires before the node boots, re-mint and redeliver. See ADR-10 in
 # PROJECT_CONTEXT.md.
 #
-# Mint on a control-plane node, near boot of this worker:
+# Easiest way to produce this file, run on a control-plane node near boot of the
+# worker (mints a bounded-TTL token, computes the CA pin, derives the endpoint):
+#   sudo agent-provider-kubernetes mint-join --role worker --ttl 1h \
+#     --cluster-token "<the cluster's cluster_token>"
+# Or by hand:
 #   kubeadm token create --ttl 1h
 #   openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin \
 #       -outform der 2>/dev/null | openssl dgst -sha256 -hex | awk '{print "sha256:"$2}'

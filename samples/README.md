@@ -58,21 +58,33 @@ config_url field, etc.).
 
 1. Boot a node from the ISO with `samples/master.yaml` (edit
    `cluster_token`, `control_plane_host`, and `kubernetesVersion`).
-2. On that node, mint join material for the additional nodes you want
-   (kubeadm is now available on the image):
+   With `install.auto: true` and a user in the `admin` group, the install
+   runs unattended; on reboot the provider runs `kubeadm init` automatically.
+2. On the control-plane node, mint join material with the provider's
+   `mint-join` helper. It mints a bounded-TTL bootstrap token, computes the
+   cluster CA SPKI pin, derives the API endpoint from `admin.conf`, and prints
+   a ready-to-paste cloud-config — no manual `openssl`/`kubeadm token` dance:
    ```sh
-   # Worker join material:
-   kubeadm token create --ttl 1h
-   openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt \
-     | openssl rsa -pubin -outform der 2>/dev/null \
-     | openssl dgst -sha256 -hex | awk '{print "sha256:"$2}'
+   # Worker join cloud-config (token + CA pin):
+   sudo agent-provider-kubernetes mint-join \
+     --role worker --ttl 1h \
+     --cluster-token "<the cluster's cluster_token>" > worker-join.yaml
 
-   # Additional control-plane: also mint a fresh certificate-encryption key.
-   kubeadm init phase upload-certs --upload-certs
+   # Additional control-plane: --role controlplane also mints a fresh
+   # certificate-encryption key (upstream kubeadm applies a 2h expiry on it).
+   sudo agent-provider-kubernetes mint-join \
+     --role controlplane --ttl 2h \
+     --cluster-token "<the cluster's cluster_token>" > cp-join.yaml
    ```
-3. Edit `samples/worker.yaml` / `controlplane.yaml` with the freshly minted
-   token, CA hash, and (for CP) certificate key. Tokens default to a 1h TTL;
-   re-mint and redeliver if a node will boot later than that.
+   Flags: `--endpoint host:port` overrides the auto-derived endpoint (e.g. a
+   load-balanced `controlPlaneEndpoint`); `--root-path` locates `admin.conf`
+   and `ca.crt` when the cluster root is not `/`. The printed material is the
+   only copy — the provider persists none of it.
+3. Deliver the printed cloud-config to each joining node (the provider does not
+   pull join material; the operator delivers it out-of-band per ADR-10). Tokens
+   default to a 1h TTL; re-mint and redeliver if a node will boot later. The
+   `samples/worker.yaml` / `controlplane.yaml` files show the same shape by hand
+   if you prefer to assemble it yourself.
 4. Boot the joiners. The provider runs `kubeadm join` with CA pinning enforced
    by construction; joins refuse to proceed without a CA anchor.
 5. Install a CNI plugin (Flannel, Calico, Cilium, ...). The provider does not

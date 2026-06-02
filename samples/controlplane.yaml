@@ -5,8 +5,13 @@
 # STATUS: this provider is under active development and is NOT field-ready.
 #
 # As with workers, join material is delivered HERE by the operator / management
-# plane. A control-plane join additionally needs a fresh certificate key, minted
-# on an existing CP with: kubeadm init phase upload-certs --upload-certs
+# plane. A control-plane join additionally needs a fresh certificate key.
+#
+# Easiest way to produce this file, run on an existing control-plane node:
+#   sudo agent-provider-kubernetes mint-join --role controlplane --ttl 2h \
+#     --cluster-token "<the cluster's cluster_token>"
+# It mints the token + CA pin + a fresh certificate-encryption key. By hand the
+# cert key comes from: kubeadm init phase upload-certs --upload-certs
 
 install:
   device: "auto"
