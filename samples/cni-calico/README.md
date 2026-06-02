@@ -5,11 +5,16 @@ installs **no CNI** — pod networking is the operator's choice (Calico, Cilium,
 Flannel, ...). Until a CNI is installed, nodes stay `NotReady` and CoreDNS stays
 `Pending`. This is by design.
 
-This example installs **Calico v3.32.0** via the Tigera operator. Calico v3.32
+This directory installs **Calico v3.32.0** via the Tigera operator. Calico v3.32
 is tested against Kubernetes 1.34 / 1.35 / 1.36 — the provider's supported
-window.
+window. Two ways to apply it:
 
-## Install
+| File | Approach | When |
+|------|----------|------|
+| `installation.yaml` | Apply by hand after the cluster is up (`kubectl create` the operator, then `kubectl apply` this CR). | You want explicit, staged control of when the CNI lands, or a GitOps tool owns CNI. |
+| `cluster-with-calico.yaml` | Bundled in the control-plane cloud-config — the node installs Calico itself, no follow-up `kubectl`. | You want one declarative file that yields a Ready cluster unattended. |
+
+## Approach A — apply after the cluster is up
 
 Run on the control-plane node (or anywhere with the cluster's admin kubeconfig):
 
@@ -25,6 +30,42 @@ kubectl create -f installation.yaml
 # 3. Wait for Calico to come up and the nodes to go Ready.
 kubectl -n calico-system wait --for=condition=Ready pod --all --timeout=300s
 kubectl wait --for=condition=Ready node --all --timeout=300s
+```
+
+## Approach B — bundled in the cloud-config (`cluster-with-calico.yaml`)
+
+`cluster-with-calico.yaml` is a complete `role: init` control-plane cloud-config
+that ALSO installs Calico, so a single file yields a Ready cluster with no manual
+`kubectl`. It works like this:
+
+- The provider runs `kubeadm init` in its `network.after` stage (as always).
+- The cloud-config additionally installs a small **systemd one-shot**
+  (`kubeswift-cni-install.service` + `/usr/local/bin/kubeswift-install-cni.sh`)
+  and a `boot`-stage `systemctl enable --now`.
+- That unit **self-waits** for `admin.conf` + a ready API, then server-side-applies
+  the Tigera operator and the `Installation` CR, and touches a sentinel so it does
+  not re-apply on reboot.
+
+Why a self-waiting unit rather than another yip stage command: it is independent
+of stage ordering relative to the provider's reconcile (no deadlock if it would
+otherwise run first), it never blocks a boot stage, and it is idempotent across
+reboots. On a node that never becomes a control plane (no `admin.conf`) it is a
+graceful no-op.
+
+Requirements and caveats:
+- The control-plane node needs **outbound internet** (it fetches the pinned
+  `tigera-operator.yaml` and Calico images). For airgapped installs, mirror the
+  operator manifest + images and point `OPERATOR_URL` at your mirror.
+- Edit `cluster_token`, `control_plane_host`, and `kubernetesVersion` as usual.
+- Apply only to the **first** control-plane node; workers join with the
+  `mint-join`-produced config and need no CNI step.
+
+```sh
+# Boot the first control-plane node from an image built with this repo's
+# Dockerfile, using cluster-with-calico.yaml as its cloud-config. Once it is up
+# the node is Ready on its own (no kubectl apply needed):
+kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes
+# journalctl -u kubeswift-cni-install.service   # to watch the bundled install
 ```
 
 ## Why these settings

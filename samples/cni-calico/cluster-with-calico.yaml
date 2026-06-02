@@ -1,0 +1,132 @@
+#cloud-config
+# FIRST control-plane node (role: init) that ALSO installs Calico CNI from the
+# same cloud-config -- a fully declarative "cluster + CNI in one file" example.
+#
+# How it works: the provider runs `kubeadm init` in its network.after stage. A
+# self-contained systemd one-shot (installed below) waits for the kubeadm
+# admin.conf + a healthy API, then applies the Tigera operator and a Calico
+# Installation. Because the unit self-waits and is idempotent, it does not depend
+# on yip stage ordering relative to the provider's reconcile, and it re-runs
+# harmlessly on reboot (a sentinel skips re-apply once it has succeeded).
+#
+# This needs outbound internet on the control-plane node (it fetches the pinned
+# tigera-operator manifest and Calico images). The IP-pool cidr matches the
+# podSubnet below; keep them in sync.
+#
+# STATUS: provider under active development; NOT field-ready.
+
+install:
+  device: "auto"
+  auto: true
+  reboot: true
+
+users:
+  # Kairos 3.3+ requires at least one user in the 'admin' group for auto-install.
+  - name: kairos
+    groups: ["admin", "sudo"]
+    passwd: kairos
+
+cluster:
+  cluster_token: "CHANGE-ME-to-a-long-high-entropy-cluster-correlation-string"
+  control_plane_host: "192.168.1.10"
+  role: init
+  providerConfig:
+    cluster_root_path: "/"
+  config: |
+    clusterConfiguration:
+      kubernetesVersion: v1.34.0
+      controlPlaneEndpoint: "192.168.1.10:6443"
+      networking:
+        podSubnet: 10.244.0.0/16
+        serviceSubnet: 10.96.0.0/12
+
+stages:
+  boot:
+    - name: stage Calico install assets
+      files:
+        - path: /var/lib/kubeswift-cni/installation.yaml
+          permissions: 420   # 0644
+          owner: 0
+          group: 0
+          content: |
+            apiVersion: operator.tigera.io/v1
+            kind: Installation
+            metadata:
+              name: default
+            spec:
+              calicoNetwork:
+                ipPools:
+                  - name: default-ipv4-ippool
+                    blockSize: 26
+                    cidr: 10.244.0.0/16
+                    encapsulation: VXLANCrossSubnet
+                    natOutgoing: Enabled
+                    nodeSelector: all()
+            ---
+            apiVersion: operator.tigera.io/v1
+            kind: APIServer
+            metadata:
+              name: default
+            spec: {}
+        - path: /usr/local/bin/kubeswift-install-cni.sh
+          permissions: 493   # 0755
+          owner: 0
+          group: 0
+          content: |
+            #!/bin/bash
+            # Install Calico once the local kubeadm control plane is up. Self-
+            # waiting + idempotent: safe regardless of stage ordering and reboots.
+            set -eu
+            export KUBECONFIG=/etc/kubernetes/admin.conf
+            KUBECTL=/usr/bin/kubectl
+            SENTINEL=/var/lib/kubeswift-cni/.installed
+            OPERATOR_URL=https://raw.githubusercontent.com/projectcalico/calico/v3.32.0/manifests/tigera-operator.yaml
+            INSTALL_CR=/var/lib/kubeswift-cni/installation.yaml
+
+            [ -f "$SENTINEL" ] && { echo "calico already installed"; exit 0; }
+
+            # Wait (bounded ~10m) for admin.conf + a ready API. On a non-control-
+            # plane node admin.conf never appears, so this is a graceful no-op.
+            for _ in $(seq 1 120); do
+              if [ -f "$KUBECONFIG" ] && "$KUBECTL" get --raw=/readyz >/dev/null 2>&1; then
+                break
+              fi
+              sleep 5
+            done
+            [ -f "$KUBECONFIG" ] || { echo "no admin.conf; nothing to do here"; exit 0; }
+
+            # Server-side apply tolerates the operator's large CRD annotations and
+            # is idempotent across retries/reboots.
+            "$KUBECTL" apply --server-side --force-conflicts -f "$OPERATOR_URL"
+            # Poll until each operator CRD is registered (a freshly applied CRD is
+            # not in the REST mapper immediately; `kubectl wait` errors NotFound on
+            # a resource that does not exist yet), THEN wait for Established.
+            for crd in installations.operator.tigera.io apiservers.operator.tigera.io; do
+              for _ in $(seq 1 60); do
+                "$KUBECTL" get crd "$crd" >/dev/null 2>&1 && break
+                sleep 2
+              done
+              "$KUBECTL" wait --for=condition=Established "crd/$crd" --timeout=180s
+            done
+            "$KUBECTL" apply -f "$INSTALL_CR"
+
+            touch "$SENTINEL"
+            echo "calico install applied"
+        - path: /etc/systemd/system/kubeswift-cni-install.service
+          permissions: 420   # 0644
+          owner: 0
+          group: 0
+          content: |
+            [Unit]
+            Description=Install Calico CNI once the kubeadm control plane is up
+            After=network-online.target
+            Wants=network-online.target
+            [Service]
+            Type=oneshot
+            RemainAfterExit=yes
+            ExecStart=/usr/local/bin/kubeswift-install-cni.sh
+            [Install]
+            WantedBy=multi-user.target
+      commands:
+        - systemctl daemon-reload
+        - systemctl enable --now kubeswift-cni-install.service || true
