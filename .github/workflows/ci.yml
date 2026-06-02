@@ -139,3 +139,37 @@ jobs:
             *) echo "crictl minor mismatch: want v${{ matrix.minor }}.x, got ${crictl_v}" >&2; exit 1 ;;
           esac
           echo "OK: image bundles the k8s ${{ matrix.minor }} toolchain"
+
+      - name: Verify kubeadm exposes the upgrade-path surface (ADR-12)
+        run: |
+          set -euo pipefail
+          img="kairos-kubeadm:ci-${{ matrix.minor }}"
+          ka() { docker run --rm --entrypoint /usr/bin/kubeadm "$img" "$@"; }
+          need() { # <help-output> <flag> <label>
+            printf '%s\n' "$1" | grep -q -- "$2" \
+              || { echo "MISSING $2 in '$3' (bundled kubeadm ${{ matrix.minor }})" >&2; exit 1; }
+            echo "  ok: $3 supports $2"
+          }
+          # The provider drives only these kubeadm subcommands/flags for upgrades.
+          # Asserting them against the SHIPPED binary per minor catches an upstream
+          # removal/rename before it breaks an upgrade at runtime (ADR-12 U-N).
+
+          # `kubeadm upgrade apply <ver> --yes --certificate-renewal=true`
+          apply_help="$(ka upgrade apply --help)"
+          need "$apply_help" --yes "upgrade apply"
+          need "$apply_help" --certificate-renewal "upgrade apply"
+
+          # `kubeadm upgrade node` (follower / worker convergence) must exist.
+          ka upgrade node --help >/dev/null
+          echo "  ok: upgrade node subcommand exists"
+
+          # `kubeadm init phase kubelet-start --config` (ADR-12-R1 API-free repair).
+          ks_help="$(ka init phase kubelet-start --help)"
+          need "$ks_help" --config "init phase kubelet-start"
+
+          # `kubeadm init phase upload-certs --config` (cert-key flows via config,
+          # never on argv -- the mint keystone, ADR-11 #3 / ADR-12 B3).
+          uc_help="$(ka init phase upload-certs --help)"
+          need "$uc_help" --config "init phase upload-certs"
+
+          echo "OK: kubeadm ${{ matrix.minor }} exposes the upgrade-path subcommands/flags"
