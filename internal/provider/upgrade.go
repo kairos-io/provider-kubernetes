@@ -2,11 +2,14 @@ package provider
 
 import (
 	"context"
+	"crypto/tls"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // This file holds the production probes the upgrade path (ADR-12 U6) wires into
@@ -71,6 +74,28 @@ func runningKubeletVersionViaKubectl(rootPath string) func(ctx context.Context) 
 			return ""
 		}
 		return strings.TrimSpace(string(out))
+	}
+}
+
+// localAPIHealthyProbe reports whether the LOCAL apiserver answers /healthz
+// (ADR-12-R1). Liveness only (InsecureSkipVerify); used to decide whether the
+// kubelet config needs repair after an A/B image swap and to gate upgrade apply.
+func localAPIHealthyProbe() func(ctx context.Context) bool {
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // liveness probe only
+	}
+	return func(ctx context.Context) bool {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://127.0.0.1:6443/healthz", nil)
+		if err != nil {
+			return false
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return resp.StatusCode == http.StatusOK
 	}
 }
 

@@ -58,6 +58,10 @@ type KubeadmExecutor struct {
 	ClusterVersionProbe func(ctx context.Context) string
 	// KubeletRestart restarts the local kubelet after an upgrade; nil uses systemctl.
 	KubeletRestart func(ctx context.Context) error
+	// LocalAPIReachable reports whether the LOCAL apiserver answers; used after a
+	// kubelet-config repair (ADR-12-R1). nil uses an HTTPS /healthz probe to
+	// 127.0.0.1:6443. Injectable for tests.
+	LocalAPIReachable func(ctx context.Context) bool
 	// SnapshotEtcd, when set, is invoked best-effort before `upgrade apply` on a
 	// control plane (ADR-12 U5). nil skips it. It must never block (bounded by ctx).
 	SnapshotEtcd func(ctx context.Context) error
@@ -77,6 +81,8 @@ func (e *KubeadmExecutor) Execute(ctx context.Context, a reconcile.Action) error
 	case reconcile.ActionRefuseInit:
 		// Terminal: a verdict that will not change on retry (fail fast, still loud).
 		return fmt.Errorf("%w: a control plane already answers at %q; this node is role=init but the cluster exists. Use role=controlplane to join", reconcile.ErrTerminal, e.Input.ControlPlaneEndpoint)
+	case reconcile.ActionRepairKubeletConfig:
+		return e.runRepairKubeletConfig(ctx)
 	case reconcile.ActionUpgradeApply:
 		return e.runUpgradeApply(ctx)
 	case reconcile.ActionUpgradeNode:
@@ -278,6 +284,66 @@ func (e *KubeadmExecutor) runUpgradeApply(ctx context.Context) error {
 		return fmt.Errorf("kubeadm upgrade apply %s: %w", e.TargetVersion, err)
 	}
 	return e.restartKubelet(ctx)
+}
+
+// runRepairKubeletConfig regenerates /var/lib/kubelet/kubeadm-flags.env and
+// config.yaml with the NEW kubeadm from LOCAL config, then restarts the kubelet
+// (ADR-12-R1). After a Kairos A/B image swap the new kubelet can crashloop on a
+// flag the old kubeadm wrote but the new kubelet removed (e.g.
+// --pod-infra-container-image in 1.35), which leaves the control plane down. This
+// is `kubeadm init phase kubelet-start`, which is API-free and touches no PKI,
+// etcd, or static-pod manifests. The rendered config carries NO secret (no
+// bootstrap token, no certificate key) -- it is still 0600 on tmpfs and shredded
+// for consistency. It then bounded-waits for the local apiserver so the subsequent
+// `upgrade apply` can reach the control plane.
+func (e *KubeadmExecutor) runRepairKubeletConfig(ctx context.Context) error {
+	cluster := kubeadmconfig.BuildClusterConfiguration(e.Input)
+	initCfg := kubeadmconfig.BuildInitConfiguration(e.Input)
+	content, err := kubeadmconfig.Marshal(cluster, initCfg)
+	if err != nil {
+		return err
+	}
+	path, err := securefile.WriteTransient(e.runDir(), content)
+	if err != nil {
+		return err
+	}
+	defer securefile.Shred(path)
+
+	if _, err := e.Runner.Run(ctx, "init", "phase", "kubelet-start", "--config", path); err != nil {
+		return fmt.Errorf("kubeadm init phase kubelet-start: %w", err)
+	}
+	// Wait (bounded) for the local control plane to return before upgrade apply.
+	return e.waitForLocalAPIHealthy(ctx)
+}
+
+// waitForLocalAPIHealthy polls the LOCAL apiserver /healthz until it answers or
+// ctx expires (ADR-12-R1). Liveness only (InsecureSkipVerify), like the HA-4 CP
+// join gate; the upgrade that follows is the real, authenticated operation.
+func (e *KubeadmExecutor) waitForLocalAPIHealthy(ctx context.Context) error {
+	reachable := e.LocalAPIReachable
+	if reachable == nil {
+		client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsInsecure()}}
+		reachable = func(context.Context) bool {
+			resp, err := client.Get("https://127.0.0.1:6443/healthz") //nolint:noctx // bounded by the loop below
+			if err != nil {
+				return false
+			}
+			_ = resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		}
+	}
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	logrus.Info("provider-kubernetes: waiting for local control plane to return after kubelet-config repair")
+	for !reachable(ctx) {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("local control plane did not return after kubelet-config repair within budget: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	logrus.Info("provider-kubernetes: local control plane healthy after repair")
+	return nil
 }
 
 // runUpgradeNode runs `kubeadm upgrade node` on a follower control plane or a

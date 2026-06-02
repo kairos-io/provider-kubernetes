@@ -29,6 +29,9 @@ type FileProber struct {
 	// RunningKubeletVersion reports THIS node's running kubelet version; nil yields
 	// "" (ADR-12 worker convergence signal). Injected for testability.
 	RunningKubeletVersion func(ctx context.Context) string
+	// APIServerReachable reports whether the LOCAL apiserver answers /healthz; nil
+	// yields false (ADR-12-R1: drives the kubelet-config repair decision). Injected.
+	APIServerReachable func(ctx context.Context) bool
 }
 
 // Probe reads the node's actual state. It never mutates the node.
@@ -47,6 +50,9 @@ func (p FileProber) Probe(ctx context.Context) (State, error) {
 	}
 	if p.RunningKubeletVersion != nil {
 		s.RunningKubeletVersion = p.RunningKubeletVersion(ctx)
+	}
+	if p.APIServerReachable != nil {
+		s.APIServerReachable = p.APIServerReachable(ctx)
 	}
 	return s, nil
 }

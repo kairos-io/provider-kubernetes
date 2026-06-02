@@ -138,6 +138,7 @@ func TestRunUpgradeApplyPipeline(t *testing.T) {
 		RunDir:                     t.TempDir(),
 		ClusterVersionProbe:        func(context.Context) string { return "v1.34.8" }, // cluster not yet flipped
 		RunningKubeletVersionProbe: func(context.Context) string { return "v1.35.0" },
+		APIServerReachableProbe:    func(context.Context) bool { return true },  // local API up -> no repair, straight to apply
 		EncryptionConfirmed:        func(context.Context) bool { return false }, // snapshot skipped (safe)
 		KubeletRestart:             func(context.Context) error { restarted = true; return nil },
 	})

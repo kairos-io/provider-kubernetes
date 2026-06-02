@@ -39,6 +39,9 @@ type Options struct {
 	EncryptionConfirmed func(ctx context.Context) bool
 	// KubeletRestart restarts the kubelet after an upgrade; nil -> systemctl.
 	KubeletRestart func(ctx context.Context) error
+	// APIServerReachableProbe reports whether the LOCAL apiserver answers /healthz
+	// (ADR-12-R1); nil -> a /healthz probe to 127.0.0.1:6443.
+	APIServerReachableProbe func(ctx context.Context) bool
 }
 
 // Run executes one bounded reconcile pass for the given cluster. It is the runtime
@@ -104,6 +107,10 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		if prober.RunningKubeletVersion == nil {
 			prober.RunningKubeletVersion = runningKubeletVersionViaKubectl(pctx.RootPath)
 		}
+		prober.APIServerReachable = opts.APIServerReachableProbe
+		if prober.APIServerReachable == nil {
+			prober.APIServerReachable = localAPIHealthyProbe()
+		}
 	}
 
 	state, err := prober.Probe(ctx)
@@ -136,8 +143,9 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		// ADR-12 upgrade wiring.
 		TargetVersion:       target,
 		ClusterVersion:      state.ClusterVersion,
-		ClusterVersionProbe: prober.ClusterVersion, // re-check + follower wait (nil when no target)
-		KubeletRestart:      opts.KubeletRestart,   // nil -> systemctl (production)
+		ClusterVersionProbe: prober.ClusterVersion,     // re-check + follower wait (nil when no target)
+		KubeletRestart:      opts.KubeletRestart,       // nil -> systemctl (production)
+		LocalAPIReachable:   prober.APIServerReachable, // post-repair local-API wait (nil when no target)
 	}
 	// Best-effort pre-apply etcd snapshot on a control plane only (ADR-12 U5).
 	if target != "" && (role == actualstate.RoleInit || role == actualstate.RoleControlPlane) {

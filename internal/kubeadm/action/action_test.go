@@ -330,3 +330,60 @@ func TestWaitForClusterUpgrade(t *testing.T) {
 		t.Fatal("expected a bounded timeout error when the cluster never flips")
 	}
 }
+
+// ADR-12-R1 U9: kubelet-config repair (init phase kubelet-start, API-free, no secret).
+func TestRepairKubeletConfig(t *testing.T) {
+	runDir := t.TempDir()
+	var cfgPath, content string
+	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if len(args) >= 3 && args[0] == "init" && args[1] == "phase" && args[2] == "kubelet-start" {
+			cfgPath = configArg(args)
+			b, _ := os.ReadFile(cfgPath)
+			content = string(b)
+		}
+		return kubeadm.Result{}, nil
+	}}
+	e := &KubeadmExecutor{
+		Runner:            fr,
+		RootPath:          "/",
+		RunDir:            runDir,
+		Role:              actualstate.RoleControlPlane,
+		Input:             kubeadmconfig.Input{KubernetesVersion: "v1.35.0", ControlPlaneEndpoint: "10.0.0.1:6443", ServiceSubnet: "10.96.0.0/12"},
+		LocalAPIReachable: func(context.Context) bool { return true }, // API returns after repair
+	}
+	if err := e.Execute(context.Background(), reconcile.ActionRepairKubeletConfig); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if cfgPath == "" {
+		t.Fatal("kubeadm init phase kubelet-start was not invoked with --config")
+	}
+	// argv is exactly the kubelet-start phase with --config (no API, no secret flags).
+	last := strings.Join(fr.calls[len(fr.calls)-1], " ")
+	if last != "init phase kubelet-start --config "+cfgPath {
+		t.Fatalf("unexpected repair argv: %q", last)
+	}
+	// The rendered config must carry NO secret (no bootstrap token / cert key).
+	if strings.Contains(content, "bootstrapTokens") || strings.Contains(content, "certificateKey") || strings.Contains(content, "token:") {
+		t.Fatalf("repair config must contain no secret material: %s", content)
+	}
+	// Transient config shredded.
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Fatalf("repair transient config was not shredded")
+	}
+}
+
+func TestRepairKubeletConfig_BoundedWait(t *testing.T) {
+	// If the local API never returns, the repair fails loud within ctx (never hangs).
+	e := &KubeadmExecutor{
+		Runner:            &fakeRunner{},
+		RunDir:            t.TempDir(),
+		Role:              actualstate.RoleControlPlane,
+		Input:             kubeadmconfig.Input{ControlPlaneEndpoint: "10.0.0.1:6443"},
+		LocalAPIReachable: func(context.Context) bool { return false },
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := e.Execute(ctx, reconcile.ActionRepairKubeletConfig); err == nil {
+		t.Fatal("expected a bounded error when the local API never returns")
+	}
+}
