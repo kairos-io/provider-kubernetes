@@ -58,7 +58,8 @@ func (e *KubeadmExecutor) Execute(ctx context.Context, a reconcile.Action) error
 	case reconcile.ActionRunJoin:
 		return e.runJoin(ctx)
 	case reconcile.ActionRefuseInit:
-		return fmt.Errorf("a control plane already answers at %q; this node is role=init but the cluster exists. Use role=controlplane to join", e.Input.ControlPlaneEndpoint)
+		// Terminal: a verdict that will not change on retry (fail fast, still loud).
+		return fmt.Errorf("%w: a control plane already answers at %q; this node is role=init but the cluster exists. Use role=controlplane to join", reconcile.ErrTerminal, e.Input.ControlPlaneEndpoint)
 	default:
 		return fmt.Errorf("unknown action %q", a)
 	}

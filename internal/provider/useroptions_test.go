@@ -137,6 +137,20 @@ func TestBuildInputReturnsEndpointWarning(t *testing.T) {
 	if warn2 != "" {
 		t.Fatalf("expected no advisory for a stable endpoint, got %q", warn2)
 	}
+
+	// Operator legitimately points control_plane_host AT the VIP, and sets a
+	// distinct advertiseAddress for this node. The advisory must NOT fire: the
+	// endpoint is a real VIP, not the node's own address. (Regression: the check
+	// must compare against advertiseAddress, not control_plane_host.)
+	ctx3 := Context{Role: "init", ControlPlaneHost: "172.16.56.230"}
+	uc3, _ := ParseUserConfig("clusterConfiguration:\n  controlPlaneEndpoint: 172.16.56.230:6443\ninitConfiguration:\n  localAPIEndpoint:\n    advertiseAddress: 172.16.56.240\n")
+	_, warn3, err := BuildInput(ctx3, uc3, "v1.34.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if warn3 != "" {
+		t.Fatalf("control_plane_host==VIP with a distinct advertiseAddress must not warn, got %q", warn3)
+	}
 }
 
 func TestBuildInputRequiresControlPlaneHost(t *testing.T) {

@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -56,6 +57,29 @@ func TestReconcilerFailsLoudAfterMaxAttempts(t *testing.T) {
 	}
 	if exec.calls[ActionRunJoin] != 3 {
 		t.Fatalf("expected exactly 3 bounded attempts, got %d", exec.calls[ActionRunJoin])
+	}
+}
+
+// terminalExec always returns an ErrTerminal-wrapped error.
+type terminalExec struct{ calls int }
+
+func (e *terminalExec) Execute(_ context.Context, _ Action) error {
+	e.calls++
+	return fmt.Errorf("%w: a control plane already exists", ErrTerminal)
+}
+
+func TestReconcilerFailsFastOnTerminalError(t *testing.T) {
+	exec := &terminalExec{}
+	err := testReconciler(exec).Run(context.Background(), []Action{ActionRefuseInit})
+	if err == nil {
+		t.Fatal("expected a terminal error")
+	}
+	if !errors.Is(err, ErrTerminal) {
+		t.Fatalf("expected error to wrap ErrTerminal, got %v", err)
+	}
+	// Terminal verdicts must NOT be retried: exactly one attempt.
+	if exec.calls != 1 {
+		t.Fatalf("expected exactly 1 attempt for a terminal error, got %d", exec.calls)
 	}
 }
 
