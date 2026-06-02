@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -44,6 +46,21 @@ type KubeadmExecutor struct {
 	TokenTTL time.Duration
 	// CPReachable is a bounded reachability probe used by ActionWaitForControlPlane.
 	CPReachable func(ctx context.Context) bool
+
+	// --- Upgrade (ADR-12) ---
+	// TargetVersion is the operator-pinned upgrade target (e.g. "v1.35.0"); empty
+	// when no upgrade is in play. ClusterVersion is the observed cluster version at
+	// plan time (used to render the RefuseUpgrade message).
+	TargetVersion  string
+	ClusterVersion string
+	// ClusterVersionProbe re-reads the cluster's current version (kubeadm-config) for
+	// the pre-apply lost-race re-check and the follower wait; nil disables them.
+	ClusterVersionProbe func(ctx context.Context) string
+	// KubeletRestart restarts the local kubelet after an upgrade; nil uses systemctl.
+	KubeletRestart func(ctx context.Context) error
+	// SnapshotEtcd, when set, is invoked best-effort before `upgrade apply` on a
+	// control plane (ADR-12 U5). nil skips it. It must never block (bounded by ctx).
+	SnapshotEtcd func(ctx context.Context) error
 }
 
 // Execute runs a single planned action. The reconcile.Reconciler bounds ctx.
@@ -60,6 +77,19 @@ func (e *KubeadmExecutor) Execute(ctx context.Context, a reconcile.Action) error
 	case reconcile.ActionRefuseInit:
 		// Terminal: a verdict that will not change on retry (fail fast, still loud).
 		return fmt.Errorf("%w: a control plane already answers at %q; this node is role=init but the cluster exists. Use role=controlplane to join", reconcile.ErrTerminal, e.Input.ControlPlaneEndpoint)
+	case reconcile.ActionUpgradeApply:
+		return e.runUpgradeApply(ctx)
+	case reconcile.ActionUpgradeNode:
+		return e.runUpgradeNode(ctx)
+	case reconcile.ActionWaitForClusterUpgrade:
+		return e.waitForClusterUpgrade(ctx)
+	case reconcile.ActionRefuseUpgrade:
+		// Terminal: an unsafe transition (downgrade / skip-level / out-of-window).
+		_, err := kubeadm.UpgradePath(e.ClusterVersion, e.TargetVersion)
+		if err == nil {
+			err = fmt.Errorf("unsafe upgrade refused (cluster %q -> target %q)", e.ClusterVersion, e.TargetVersion)
+		}
+		return fmt.Errorf("%w: %v", reconcile.ErrTerminal, err)
 	default:
 		return fmt.Errorf("unknown action %q", a)
 	}
@@ -216,4 +246,90 @@ func (e *KubeadmExecutor) waitForCPHealthy(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// runUpgradeApply runs `kubeadm upgrade apply <target>` on the apply-authority
+// control plane (ADR-12). A pre-apply re-check guards the lost race: if the cluster
+// is already at the target minor (another CP applied), this node converges via
+// `upgrade node` instead. Certificate renewal is enabled explicitly; --upload-certs
+// is NEVER passed (the root-equivalent cert-key stays mint-only, ADR-11 #3). No
+// secret is on argv, and stdout is not logged (upgrade can print cert hints).
+func (e *KubeadmExecutor) runUpgradeApply(ctx context.Context) error {
+	if e.TargetVersion == "" {
+		return fmt.Errorf("upgrade apply: no target version set")
+	}
+	if e.ClusterVersionProbe != nil {
+		if cur := e.ClusterVersionProbe(ctx); sameMinor(cur, e.TargetVersion) {
+			logrus.Infof("provider-kubernetes: cluster already at %s; running upgrade node instead of apply", kubeadm.Minor(cur))
+			return e.runUpgradeNode(ctx)
+		}
+	}
+	// U5: best-effort etcd snapshot before the destructive apply (bounded; never
+	// blocks the upgrade -- failures are logged inside SnapshotEtcd).
+	if e.SnapshotEtcd != nil {
+		if err := e.SnapshotEtcd(ctx); err != nil {
+			logrus.Warnf("provider-kubernetes: pre-upgrade etcd snapshot did not complete: %v (continuing)", err)
+		}
+	}
+	if _, err := e.Runner.Run(ctx, "upgrade", "apply", e.TargetVersion, "--yes", "--certificate-renewal=true"); err != nil {
+		return fmt.Errorf("kubeadm upgrade apply %s: %w", e.TargetVersion, err)
+	}
+	return e.restartKubelet(ctx)
+}
+
+// runUpgradeNode runs `kubeadm upgrade node` on a follower control plane or a
+// worker to converge this node's components to the cluster target (ADR-12).
+func (e *KubeadmExecutor) runUpgradeNode(ctx context.Context) error {
+	if _, err := e.Runner.Run(ctx, "upgrade", "node"); err != nil {
+		return fmt.Errorf("kubeadm upgrade node: %w", err)
+	}
+	return e.restartKubelet(ctx)
+}
+
+// waitForClusterUpgrade blocks (bounded by ctx) until the cluster version reaches
+// the target minor -- i.e. an apply-authority control plane has applied -- before a
+// follower runs `upgrade node` (ADR-12). Without a probe it falls back to the CP
+// health gate. It never loops unbounded (#4099-1).
+func (e *KubeadmExecutor) waitForClusterUpgrade(ctx context.Context) error {
+	if e.ClusterVersionProbe == nil {
+		return e.waitForCPHealthy(ctx)
+	}
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for !sameMinor(e.ClusterVersionProbe(ctx), e.TargetVersion) {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cluster did not reach %s within budget: %w", e.TargetVersion, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	return nil
+}
+
+// restartKubelet restarts the local kubelet after an upgrade (its config and, for
+// CPs, the static-pod manifests have changed). Injectable for tests.
+func (e *KubeadmExecutor) restartKubelet(ctx context.Context) error {
+	if e.KubeletRestart != nil {
+		return e.KubeletRestart(ctx)
+	}
+	return defaultKubeletRestart(ctx)
+}
+
+// defaultKubeletRestart runs `systemctl daemon-reload` then `systemctl restart
+// kubelet` via argv (no shell). Bounded by ctx.
+func defaultKubeletRestart(ctx context.Context) error {
+	for _, args := range [][]string{{"daemon-reload"}, {"restart", "kubelet"}} {
+		out, err := exec.CommandContext(ctx, "systemctl", args...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("systemctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+// sameMinor reports whether two versions share a major.minor (e.g. "v1.34.8" and
+// "v1.34.0"). Invalid/empty versions never match a valid one.
+func sameMinor(a, b string) bool {
+	ma, mb := kubeadm.Minor(a), kubeadm.Minor(b)
+	return ma != "" && ma == mb
 }
