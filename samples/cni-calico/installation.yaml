@@ -1,0 +1,32 @@
+# Calico CNI for a provider-kubernetes cluster, via the Tigera operator.
+#
+# The provider deliberately installs no CNI (it stays out of CNI policy); apply
+# this AFTER the control plane is up to drive nodes Ready.
+#
+# The IP pool CIDR below matches the sample podSubnet (10.244.0.0/16) used in
+# samples/master.yaml and samples/cluster.yaml. If you change podSubnet there,
+# change cidr here to match (Calico's pool must be within the cluster pod CIDR).
+#
+# Encapsulation is VXLANCrossSubnet: it tunnels pod traffic between nodes that
+# are on different subnets and routes natively within a subnet. VXLAN needs no
+# BGP and no special fabric support, so it works on a plain bridged/NAT LAN
+# (e.g. the libvirt host-bridge used in the repo's multi-node walkthrough).
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  calicoNetwork:
+    ipPools:
+      - name: default-ipv4-ippool
+        blockSize: 26
+        cidr: 10.244.0.0/16
+        encapsulation: VXLANCrossSubnet
+        natOutgoing: Enabled
+        nodeSelector: all()
+---
+apiVersion: operator.tigera.io/v1
+kind: APIServer
+metadata:
+  name: default
+spec: {}
