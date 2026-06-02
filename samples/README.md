@@ -13,6 +13,8 @@ samples as design demos, not as production templates.
 | `master.yaml`       | `init`         | First control-plane node; runs `kubeadm init`. |
 | `controlplane.yaml` | `controlplane` | Additional control-plane node; joins via token + cert key. |
 | `worker.yaml`       | `worker`       | Worker node; joins via token + CA hash. |
+| `ha/`               | HA             | Multi-control-plane (stacked-etcd) walkthrough: stable endpoint, one-at-a-time bring-up, reset/etcd-orphan runbook. |
+| `cni-calico/`       | CNI            | Calico CNI examples (post-hoc apply and bundled-in-cloud-config). |
 
 ## Build the image
 

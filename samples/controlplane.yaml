@@ -4,14 +4,26 @@
 #
 # STATUS: this provider is under active development and is NOT field-ready.
 #
+# For a true multi-control-plane (HA, stacked-etcd) cluster, see ./ha/ which
+# covers the stable-endpoint requirement and the one-at-a-time bring-up. This
+# file is the minimal single additional control plane.
+#
 # As with workers, join material is delivered HERE by the operator / management
 # plane. A control-plane join additionally needs a fresh certificate key.
 #
+# SECURITY: the certificateKey below is a CLUSTER ROOT CREDENTIAL -- it decrypts
+# the uploaded cluster PKI INCLUDING THE CA PRIVATE KEY. Deliver it only over a
+# confidential, integrity-protected channel; mint it fresh per join just before
+# boot; never reuse, persist, log, or commit it. The provider performs no node
+# attestation in v1 (the delivery channel is the trust boundary).
+#
 # Easiest way to produce this file, run on an existing control-plane node:
-#   sudo agent-provider-kubernetes mint-join --role controlplane --ttl 2h \
+#   sudo agent-provider-kubernetes mint-join --role controlplane --ttl 1h \
+#     --advertise-address <THIS-NODE-IP> \
 #     --cluster-token "<the cluster's cluster_token>"
-# It mints the token + CA pin + a fresh certificate-encryption key. By hand the
-# cert key comes from: kubeadm init phase upload-certs --upload-certs
+# mint-join mints the token + CA pin AND re-uploads the cluster certs under a
+# fresh certificate key (so the key matches etcd), keeping the upstream 2h
+# kubeadm-certs expiry. It prints a ready-to-edit cloud-config.
 
 install:
   device: "auto"
@@ -42,9 +54,16 @@ cluster:
           caCertHashes:
             - "sha256:REPLACE-WITH-CA-SPKI-PIN"
       controlPlane:
-        # Fresh per join; the upstream kubeadm-certs secret carries a 2h expiry
-        # that the provider deliberately does NOT strip.
+        # CLUSTER ROOT CREDENTIAL (see SECURITY note above). Fresh per join; the
+        # upstream kubeadm-certs secret carries a 2h expiry the provider does NOT
+        # strip.
         certificateKey: "REPLACE-WITH-FRESH-CERT-KEY"
+        localAPIEndpoint:
+          # This node's OWN routable IP. Required on multi-homed nodes; mint-join
+          # writes a FILL-IN-THIS-NODE-IP placeholder if --advertise-address is
+          # omitted at mint time.
+          advertiseAddress: "192.168.1.20"
+          bindPort: 6443
 
 stages:
   initramfs:
