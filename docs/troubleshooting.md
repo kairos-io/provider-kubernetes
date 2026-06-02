@@ -51,6 +51,18 @@ match the `kubeadm` binary in the image. A mismatch fails fast by design. Use th
 image tag for the minor you want, or adjust the pin. See
 [Lifecycle](./lifecycle.md#supported-version-window).
 
+### Upgrade didn't run, or was refused
+
+- **Nothing happened after booting a newer image.** An upgrade runs only when you
+  bump `clusterConfiguration.kubernetesVersion` to the new minor; a newer binary
+  alone is a no-op by design.
+- **Reconcile logs `refuse-upgrade`.** The pin is a downgrade, skip-level
+  (e.g. 1.34 -> 1.36), or out-of-window. Upgrade one minor at a time within the
+  window.
+- **Snapshot skipped warning.** The provider refuses to write a plaintext etcd
+  snapshot when it can't confirm the persistent partition is encrypted - take a
+  manual etcd backup before upgrading. See [Upgrades](./upgrades.md).
+
 ### A reset left a stale etcd member (HA)
 
 If a control plane was reset while the cluster was unreachable, its etcd member is

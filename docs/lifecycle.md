@@ -55,6 +55,11 @@ Each released image bundles one Kubernetes minor; pick the matching image tag (s
 
 ## Upgrades
 
-Cluster **upgrades** (`kubeadm upgrade`) are **not yet implemented** - this is the
-next planned capability. For now the lifecycle covers bootstrap, join, and reset.
-Track the roadmap in the project's issues.
+Cluster **upgrades** (`kubeadm upgrade`) are **implemented**: pin a newer
+`kubernetesVersion`, boot the matching image, and the provider converges the
+cluster on the next reconcile (control plane via `kubeadm upgrade apply`, followers
+and workers via `kubeadm upgrade node`, one minor at a time). A newer image without
+a pin bump does not auto-upgrade, and downgrade / skip-level / out-of-window
+targets are refused. See [Upgrades](./upgrades.md) for the full operator runbook
+(single-node and HA), the automatic kubelet-config repair, etcd snapshots, and
+rollback.
