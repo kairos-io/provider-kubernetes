@@ -3,6 +3,8 @@ package kubeadm
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -86,4 +88,44 @@ func TestMinorAndIsSupported(t *testing.T) {
 	if IsSupported("v1.33.99") {
 		t.Fatal("expected 1.33 unsupported")
 	}
+}
+
+// TestSupportedWindowResolves locks the SupportedMinors window data itself under
+// test: every minor in the window must validate, report supported, and resolve
+// without a pin, and the minor immediately above the window must be rejected
+// (fail loud, ADR-3). CI derives its image-build matrix from SupportedMinors, so
+// keeping this slice honest keeps the matrix meaningful.
+func TestSupportedWindowResolves(t *testing.T) {
+	if len(SupportedMinors) == 0 {
+		t.Fatal("SupportedMinors must not be empty")
+	}
+	for _, m := range SupportedMinors {
+		v := "v" + m + ".0"
+		if !IsSupported(v) {
+			t.Errorf("%s should be supported (it is in SupportedMinors)", v)
+		}
+		if got, err := Resolve(v, ""); err != nil || got != v {
+			t.Errorf("Resolve(%q, \"\") = %q, %v; want %q, nil", v, got, err, v)
+		}
+	}
+	above := bumpMinor(t, SupportedMinors[len(SupportedMinors)-1], +1)
+	if IsSupported("v" + above + ".0") {
+		t.Errorf("minor %s is above the window and must be unsupported", above)
+	}
+	if _, err := Resolve("v"+above+".0", ""); err == nil {
+		t.Errorf("Resolve must reject out-of-window minor %s", above)
+	}
+}
+
+func bumpMinor(t *testing.T, mm string, delta int) string {
+	t.Helper()
+	parts := strings.SplitN(mm, ".", 2)
+	if len(parts) != 2 {
+		t.Fatalf("malformed minor %q", mm)
+	}
+	n, err := strconv.Atoi(parts[1])
+	if err != nil {
+		t.Fatalf("malformed minor %q: %v", mm, err)
+	}
+	return parts[0] + "." + strconv.Itoa(n+delta)
 }

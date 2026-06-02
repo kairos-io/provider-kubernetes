@@ -50,13 +50,49 @@ jobs:
           # Pin to the version validated locally against the v2 config.
           version: v2.12.2
 
+  # Derive the image-build matrix from the single source of truth for the
+  # supported Kubernetes window: kubeadm.SupportedMinors in version.go (ADR-3).
+  # Rolling the window there automatically rolls this CI matrix.
+  discover:
+    name: resolve supported version window
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      minors: ${{ steps.minors.outputs.minors }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract SupportedMinors -> JSON matrix
+        id: minors
+        run: |
+          set -euo pipefail
+          # SupportedMinors is a static string-literal slice; pull each
+          # "major.minor" token off its declaration line.
+          minors="$(grep 'SupportedMinors *=' internal/kubeadm/version.go \
+            | grep -oE '[0-9]+\.[0-9]+' \
+            | jq -R . | jq -cs .)"
+          if [ "$minors" = "[]" ]; then
+            echo "could not parse SupportedMinors from version.go" >&2
+            exit 1
+          fi
+          echo "Supported window: $minors"
+          echo "minors=$minors" >> "$GITHUB_OUTPUT"
+
   # Product deliverable: the multi-stage Kairos image bundling the provider
   # plus kubeadm/kubelet/kubectl/containerd/runc/CNI (all checksum-verified
-  # inside the Dockerfile). Heavier than the gates; runs in parallel.
+  # inside the Dockerfile). Built once per supported minor; each minor's patch
+  # is resolved to the latest upstream release at build time so pins never go
+  # stale as the window rolls.
   image:
-    name: image build
+    name: image build (k8s ${{ matrix.minor }})
+    needs: discover
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ${{ fromJSON(needs.discover.outputs.minors) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,5 +100,42 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Resolve Kubernetes patch + crictl versions
+        id: ver
+        run: |
+          set -euo pipefail
+          k8s="$(curl -fsSL "https://dl.k8s.io/release/stable-${{ matrix.minor }}.txt")"
+          case "$k8s" in
+            v${{ matrix.minor }}.*) : ;;
+            *) echo "unexpected patch ${k8s} for minor ${{ matrix.minor }}" >&2; exit 1 ;;
+          esac
+          # cri-tools publishes one release per minor: v<minor>.0.
+          crictl="v${{ matrix.minor }}.0"
+          echo "k8s=${k8s} crictl=${crictl}"
+          echo "k8s=${k8s}" >> "$GITHUB_OUTPUT"
+          echo "crictl=${crictl}" >> "$GITHUB_OUTPUT"
+
       - name: Build Kairos image
-        run: make image
+        run: |
+          make image \
+            VERSION=ci-${{ matrix.minor }} \
+            KUBERNETES_VERSION=${{ steps.ver.outputs.k8s }} \
+            CRICTL_VERSION=${{ steps.ver.outputs.crictl }}
+
+      - name: Verify bundled binaries match the target minor
+        run: |
+          set -euo pipefail
+          img="kairos-kubeadm:ci-${{ matrix.minor }}"
+          kubeadm_v="$(docker run --rm --entrypoint /usr/bin/kubeadm "$img" version -o short)"
+          crictl_v="$(docker run --rm --entrypoint /usr/bin/crictl "$img" --version)"
+          echo "bundled kubeadm: ${kubeadm_v}"
+          echo "bundled crictl:  ${crictl_v}"
+          case "$kubeadm_v" in
+            v${{ matrix.minor }}.*) ;;
+            *) echo "kubeadm minor mismatch: want v${{ matrix.minor }}.x, got ${kubeadm_v}" >&2; exit 1 ;;
+          esac
+          case "$crictl_v" in
+            *v${{ matrix.minor }}.*) ;;
+            *) echo "crictl minor mismatch: want v${{ matrix.minor }}.x, got ${crictl_v}" >&2; exit 1 ;;
+          esac
+          echo "OK: image bundles the k8s ${{ matrix.minor }} toolchain"
