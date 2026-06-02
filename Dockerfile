@@ -183,6 +183,12 @@ RUN echo "BUNDLED_KUBERNETES_VERSION=${KUBERNETES_VERSION}" >> /etc/os-release
 # or 'dev', so we lift it into a synthesized semver (the SHA/string is preserved
 # as semver build metadata after '+').
 ARG PROVIDER_VERSION
+# OCI provenance: links the published package back to the repo + records the
+# provider/Kubernetes versions baked in. Applied to every build (local, CI, release).
+LABEL org.opencontainers.image.source="https://github.com/kairos-io/provider-kubernetes" \
+      org.opencontainers.image.description="Kairos provider-kubernetes: kubeadm + provider, Kubernetes ${KUBERNETES_VERSION}" \
+      org.opencontainers.image.version="${PROVIDER_VERSION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=kairos-init /kairos-init /kairos-init
 RUN sanitized=$(printf '%s' "${PROVIDER_VERSION}" | tr -c 'A-Za-z0-9-' '-' | sed 's/^-*//; s/-*$//') \
  && image_version="v0.0.0-dev+${sanitized:-unset}" \

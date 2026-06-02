@@ -37,25 +37,37 @@ starting point, notably:
 
 ## What works today
 
-Validated end-to-end on KVM/QEMU and libvirt (Kubernetes v1.34.0):
+Validated end-to-end on KVM/QEMU and libvirt (clusters bootstrapped on
+Kubernetes v1.34.0; images for the whole supported window 1.34 / 1.35 / 1.36 are
+built and verified in CI):
 
 - **Single-node and multi-node clusters.** A `role: init` node runs
   `kubeadm init`; `worker` and `controlplane` nodes join with CA pinning.
+- **Multi-control-plane HA (stacked etcd).** Additional control planes join an
+  existing cluster behind a stable endpoint, etcd membership grows correctly,
+  and a misconfigured second `role: init` is refused rather than clobbering the
+  cluster. Validated live on a 3-control-plane libvirt cluster (CP join, etcd
+  quorum, failover). See [`samples/ha/`](./samples/ha/).
 - **Unattended install.** Booting a Kairos image built from this repo with one
   of the sample cloud-configs installs to disk and bootstraps the cluster with
   no manual steps.
 - **`mint-join` helper.** On a control-plane node,
   `agent-provider-kubernetes mint-join --role worker|controlplane` mints
-  bounded-TTL join material, computes the cluster CA SPKI pin, derives the API
-  endpoint from `admin.conf`, and prints a ready-to-paste join cloud-config.
+  bounded-TTL join material (for control planes, re-uploading the cluster certs
+  under a fresh certificate key), computes the cluster CA SPKI pin, derives the
+  API endpoint from `admin.conf`, and prints a ready-to-paste join cloud-config.
 - **CNI is the operator's choice.** The provider installs no CNI;
   [`samples/cni-calico/`](./samples/cni-calico/) shows two ways to add Calico
   (apply after the cluster is up, or bundle it in the control-plane
   cloud-config).
+- **CI and releases.** Every push runs build / vet / test / lint plus a Kairos
+  image build across the supported Kubernetes window; tagged releases publish
+  per-minor images to ghcr (see "Released images").
 
-The cluster-bootstrap logic, credential handling, reset handler, and image
-build are implemented; multi-control-plane HA, broader version-window testing,
-and CI are in progress. See the roadmap discussion in the issue above.
+Cluster bootstrap, credential handling, multi-control-plane HA, the reset
+handler, the image build, CI, and release publishing are implemented. The next
+major capability is cluster upgrades (`kubeadm upgrade`). See the roadmap
+discussion in the issue above.
 
 ## Status
 
@@ -64,10 +76,12 @@ and CI are in progress. See the roadmap discussion in the issue above.
 | Project bootstrap | in place |
 | Architecture / design | foundational decisions made |
 | Cluster bootstrap (init / worker / controlplane) | implemented, validated on KVM/libvirt |
+| Multi-control-plane HA (stacked etcd) | implemented, validated on libvirt (3 CPs) |
 | `mint-join` join-material helper | implemented, validated |
 | Kairos image build (pinned, checksum-verified) | implemented |
-| CI / release automation | not yet |
-| Multi-control-plane HA | not yet |
+| CI (build/vet/test/lint + image build across 1.34/1.35/1.36) | implemented |
+| Release automation (per-minor images to ghcr + binary) | implemented |
+| Cluster upgrades (`kubeadm upgrade`) | not yet (next) |
 | Field readiness | not ready |
 
 ## Building
@@ -104,6 +118,30 @@ docker build \
 Convert the resulting Docker image into a bootable ISO/raw artifact with
 [auroraboot](https://kairos.io/docs/reference/auroraboot/), and provision it
 with one of the sample cloud-configs in [`samples/`](./samples/).
+
+## Released images
+
+Tagged releases publish a Kairos image per supported Kubernetes minor to the
+GitHub Container Registry, so you can test without building locally:
+
+```sh
+# pick the Kubernetes minor you want (1.34 / 1.35 / 1.36):
+docker pull ghcr.io/kairos-io/provider-kubernetes:v0.1.0-k8s1.34
+
+# the newest supported minor is also published as the plain tag and :latest:
+docker pull ghcr.io/kairos-io/provider-kubernetes:v0.1.0
+docker pull ghcr.io/kairos-io/provider-kubernetes:latest
+```
+
+Each release also attaches the provider binary (linux/amd64) plus a sha256
+checksum. **These are development releases and are not field-ready.**
+
+Maintainers cut a release by pushing a signed semver tag; the `Release` workflow
+builds + pushes the per-minor images and creates the GitHub Release:
+
+```sh
+git tag -s v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+```
 
 ## Creating a cluster
 
