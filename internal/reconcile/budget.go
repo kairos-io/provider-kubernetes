@@ -28,6 +28,19 @@ func DefaultBudget() Budget {
 	}
 }
 
+// UpgradeBudget returns the bounded budget for upgrade actions (ADR-12). Upgrades
+// are slower (etcd + static-pod restarts) and `kubeadm upgrade apply` is a
+// destructive control-plane mutation that must not be blindly retried, so the
+// per-attempt deadline is larger and attempts are few. Still hard-bounded by Total
+// so an upgrade can never hang (#4099-1).
+func UpgradeBudget() Budget {
+	return Budget{
+		PerAttempt:  10 * time.Minute,
+		MaxAttempts: 2,
+		Total:       20 * time.Minute,
+	}
+}
+
 // Valid reports whether the budget is internally consistent and bounded.
 func (b Budget) Valid() bool {
 	return b.PerAttempt > 0 && b.MaxAttempts > 0 && b.Total >= b.PerAttempt

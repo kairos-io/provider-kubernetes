@@ -53,7 +53,7 @@ func TestPlan(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Plan(tt.desired, tt.state)
+			got := Plan(tt.desired, "", tt.state)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Plan(%v, %+v) = %v, want %v", tt.desired, tt.state, got, tt.want)
 			}
@@ -72,7 +72,7 @@ func TestDefaultBudgetIsBounded(t *testing.T) {
 func TestPlanInitUninitialized_CPReachable_RefusesInit(t *testing.T) {
 	// When role=init and ControlPlaneReachable=true, Plan must refuse to init
 	// (a CP already serves at the endpoint; operator must use role=controlplane).
-	got := Plan(actualstate.RoleInit, actualstate.State{
+	got := Plan(actualstate.RoleInit, "", actualstate.State{
 		Membership:            actualstate.Uninitialized,
 		ControlPlaneReachable: true,
 	})
@@ -84,11 +84,98 @@ func TestPlanInitUninitialized_CPReachable_RefusesInit(t *testing.T) {
 func TestPlanInitUninitialized_CPUnreachable_RunsInit(t *testing.T) {
 	// When role=init and ControlPlaneReachable=false, Plan must proceed with init
 	// (normal single-CP bootstrap, no existing CP).
-	got := Plan(actualstate.RoleInit, actualstate.State{
+	got := Plan(actualstate.RoleInit, "", actualstate.State{
 		Membership:            actualstate.Uninitialized,
 		ControlPlaneReachable: false,
 	})
 	if len(got) != 1 || got[0] != ActionRunInit {
 		t.Fatalf("expected [%s] when init+uninitialized+unreachable, got %v", ActionRunInit, got)
+	}
+}
+
+// ADR-12: upgrade decision table.
+func TestPlanUpgrade(t *testing.T) {
+	const t135 = "v1.35.0"
+	cases := []struct {
+		name    string
+		desired actualstate.Role
+		target  string
+		state   actualstate.State
+		want    []Action
+	}{
+		{
+			name:    "CP apply (API up, manifest old) -> apply",
+			desired: actualstate.RoleControlPlane, target: t135,
+			state: actualstate.State{Membership: actualstate.Initialized, APIServerReachable: true, NodeComponentVersion: "v1.34.8"},
+			want:  []Action{ActionUpgradeApply},
+		},
+		{
+			name:    "CP API down (broken kubelet post image-swap) -> repair then apply",
+			desired: actualstate.RoleControlPlane, target: t135,
+			state: actualstate.State{Membership: actualstate.Initialized, APIServerReachable: false, NodeComponentVersion: "v1.34.8"},
+			want:  []Action{ActionRepairKubeletConfig, ActionUpgradeApply},
+		},
+		{
+			name:    "CP converged (manifest at target) -> no-op",
+			desired: actualstate.RoleControlPlane, target: t135,
+			state: actualstate.State{Membership: actualstate.Initialized, APIServerReachable: true, NodeComponentVersion: t135},
+			want:  []Action{ActionNone},
+		},
+		{
+			name:    "worker upgrade-node (kubelet healthy) -> wait then node",
+			desired: actualstate.RoleWorker, target: t135,
+			state: actualstate.State{Membership: actualstate.Joined, KubeletHealthy: true, ClusterVersion: t135, RunningKubeletVersion: "v1.34.8"},
+			want:  []Action{ActionWaitForClusterUpgrade, ActionUpgradeNode},
+		},
+		{
+			name:    "worker broken kubelet -> repair, wait, node",
+			desired: actualstate.RoleWorker, target: t135,
+			state: actualstate.State{Membership: actualstate.Joined, KubeletHealthy: false, ClusterVersion: t135, RunningKubeletVersion: "v1.34.8"},
+			want:  []Action{ActionRepairKubeletConfig, ActionWaitForClusterUpgrade, ActionUpgradeNode},
+		},
+		{
+			name:    "worker converged -> no-op",
+			desired: actualstate.RoleWorker, target: t135,
+			state: actualstate.State{Membership: actualstate.Joined, KubeletHealthy: true, RunningKubeletVersion: t135},
+			want:  []Action{ActionNone},
+		},
+		{
+			name:    "CP refuse skip-level (manifest 1.34 -> target 1.36)",
+			desired: actualstate.RoleControlPlane, target: "v1.36.0",
+			state: actualstate.State{Membership: actualstate.Initialized, APIServerReachable: true, NodeComponentVersion: "v1.34.8"},
+			want:  []Action{ActionRefuseUpgrade},
+		},
+		{
+			name:    "CP refuse downgrade (manifest 1.35 -> target 1.34)",
+			desired: actualstate.RoleControlPlane, target: "v1.34.0",
+			state: actualstate.State{Membership: actualstate.Initialized, APIServerReachable: true, NodeComponentVersion: t135},
+			want:  []Action{ActionRefuseUpgrade},
+		},
+		{
+			name:    "no target -> normal flow (no-op when healthy member)",
+			desired: actualstate.RoleWorker, target: "",
+			state: actualstate.State{Membership: actualstate.Joined, KubeletHealthy: true},
+			want:  []Action{ActionNone},
+		},
+		{
+			name:    "fresh node joins at new version (not a member -> join, no upgrade)",
+			desired: actualstate.RoleWorker, target: t135,
+			state: actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: true},
+			want:  []Action{ActionRunJoin},
+		},
+		{
+			name:    "CP manifest tag unknown -> no-op this pass",
+			desired: actualstate.RoleControlPlane, target: t135,
+			state: actualstate.State{Membership: actualstate.Initialized, APIServerReachable: true, NodeComponentVersion: ""},
+			want:  []Action{ActionNone},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Plan(c.desired, c.target, c.state)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("Plan(%v, %q, %+v) = %v, want %v", c.desired, c.target, c.state, got, c.want)
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -207,5 +208,182 @@ func TestWaitForCPHealthy_EmptyEndpointSkips(t *testing.T) {
 	// Should return nil immediately (no endpoint, no dial attempt).
 	if err := e.Execute(ctx, reconcile.ActionWaitForControlPlane); err != nil {
 		t.Fatalf("empty endpoint must skip health gate, got: %v", err)
+	}
+}
+
+// ADR-12 U4: upgrade executor actions.
+
+func hasFlag(calls [][]string, flag string) bool {
+	for _, c := range calls {
+		for _, a := range c {
+			if strings.Contains(a, flag) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestUpgradeApply(t *testing.T) {
+	r := &fakeRunner{}
+	restarted := false
+	e := &KubeadmExecutor{
+		Runner:         r,
+		Role:           actualstate.RoleControlPlane,
+		TargetVersion:  "v1.35.0",
+		ClusterVersion: "v1.34.8",
+		KubeletRestart: func(context.Context) error { restarted = true; return nil },
+	}
+	if err := e.Execute(context.Background(), reconcile.ActionUpgradeApply); err != nil {
+		t.Fatalf("upgrade apply: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 kubeadm call, got %v", r.calls)
+	}
+	got := strings.Join(r.calls[0], " ")
+	if got != "upgrade apply v1.35.0 --yes --certificate-renewal=true" {
+		t.Fatalf("unexpected argv: %q", got)
+	}
+	// B3: must NOT re-upload certs; B1: no cert-key on argv.
+	if hasFlag(r.calls, "--upload-certs") || hasFlag(r.calls, "--certificate-key") {
+		t.Fatalf("upgrade apply must not carry --upload-certs/--certificate-key: %v", r.calls)
+	}
+	if !restarted {
+		t.Fatal("expected kubelet restart after apply")
+	}
+}
+
+func TestUpgradeApplyPreApplyRecheckDegradesToNode(t *testing.T) {
+	// If the cluster already reached the target (another CP applied first), the
+	// pre-apply re-check must run `upgrade node` instead of a second apply.
+	r := &fakeRunner{}
+	e := &KubeadmExecutor{
+		Runner:              r,
+		Role:                actualstate.RoleControlPlane,
+		TargetVersion:       "v1.35.0",
+		ClusterVersionProbe: func(context.Context) string { return "v1.35.4" },
+		KubeletRestart:      func(context.Context) error { return nil },
+	}
+	if err := e.Execute(context.Background(), reconcile.ActionUpgradeApply); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(r.calls) != 1 || strings.Join(r.calls[0], " ") != "upgrade node" {
+		t.Fatalf("expected a single 'upgrade node' call after race re-check, got %v", r.calls)
+	}
+	if hasFlag(r.calls, "apply") {
+		t.Fatalf("must not apply when cluster already at target: %v", r.calls)
+	}
+}
+
+func TestUpgradeNode(t *testing.T) {
+	r := &fakeRunner{}
+	restarted := false
+	e := &KubeadmExecutor{
+		Runner:         r,
+		Role:           actualstate.RoleWorker,
+		KubeletRestart: func(context.Context) error { restarted = true; return nil },
+	}
+	if err := e.Execute(context.Background(), reconcile.ActionUpgradeNode); err != nil {
+		t.Fatalf("upgrade node: %v", err)
+	}
+	if len(r.calls) != 1 || strings.Join(r.calls[0], " ") != "upgrade node" {
+		t.Fatalf("unexpected argv: %v", r.calls)
+	}
+	if !restarted {
+		t.Fatal("expected kubelet restart after upgrade node")
+	}
+}
+
+func TestRefuseUpgradeIsTerminal(t *testing.T) {
+	e := &KubeadmExecutor{
+		Role:           actualstate.RoleControlPlane,
+		ClusterVersion: "v1.34.0",
+		TargetVersion:  "v1.36.0", // skip-level
+	}
+	err := e.Execute(context.Background(), reconcile.ActionRefuseUpgrade)
+	if err == nil {
+		t.Fatal("expected a terminal refuse-upgrade error")
+	}
+	if !errors.Is(err, reconcile.ErrTerminal) {
+		t.Fatalf("refuse-upgrade must wrap ErrTerminal, got %v", err)
+	}
+}
+
+func TestWaitForClusterUpgrade(t *testing.T) {
+	// Already flipped -> returns immediately.
+	e := &KubeadmExecutor{
+		TargetVersion:       "v1.35.0",
+		ClusterVersionProbe: func(context.Context) string { return "v1.35.4" },
+	}
+	if err := e.Execute(context.Background(), reconcile.ActionWaitForClusterUpgrade); err != nil {
+		t.Fatalf("expected nil when cluster already at target, got %v", err)
+	}
+
+	// Not flipped + bounded ctx -> loud timeout, never hangs.
+	e2 := &KubeadmExecutor{
+		TargetVersion:       "v1.35.0",
+		ClusterVersionProbe: func(context.Context) string { return "v1.34.8" },
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := e2.Execute(ctx, reconcile.ActionWaitForClusterUpgrade); err == nil {
+		t.Fatal("expected a bounded timeout error when the cluster never flips")
+	}
+}
+
+// ADR-12-R1 U9: kubelet-config repair (init phase kubelet-start, API-free, no secret).
+func TestRepairKubeletConfig(t *testing.T) {
+	runDir := t.TempDir()
+	var cfgPath, content string
+	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if len(args) >= 3 && args[0] == "init" && args[1] == "phase" && args[2] == "kubelet-start" {
+			cfgPath = configArg(args)
+			b, _ := os.ReadFile(cfgPath)
+			content = string(b)
+		}
+		return kubeadm.Result{}, nil
+	}}
+	e := &KubeadmExecutor{
+		Runner:            fr,
+		RootPath:          "/",
+		RunDir:            runDir,
+		Role:              actualstate.RoleControlPlane,
+		Input:             kubeadmconfig.Input{KubernetesVersion: "v1.35.0", ControlPlaneEndpoint: "10.0.0.1:6443", ServiceSubnet: "10.96.0.0/12"},
+		LocalAPIReachable: func(context.Context) bool { return true }, // API returns after repair
+	}
+	if err := e.Execute(context.Background(), reconcile.ActionRepairKubeletConfig); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if cfgPath == "" {
+		t.Fatal("kubeadm init phase kubelet-start was not invoked with --config")
+	}
+	// argv is exactly the kubelet-start phase with --config (no API, no secret flags).
+	last := strings.Join(fr.calls[len(fr.calls)-1], " ")
+	if last != "init phase kubelet-start --config "+cfgPath {
+		t.Fatalf("unexpected repair argv: %q", last)
+	}
+	// The rendered config must carry NO secret (no bootstrap token / cert key).
+	if strings.Contains(content, "bootstrapTokens") || strings.Contains(content, "certificateKey") || strings.Contains(content, "token:") {
+		t.Fatalf("repair config must contain no secret material: %s", content)
+	}
+	// Transient config shredded.
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Fatalf("repair transient config was not shredded")
+	}
+}
+
+func TestRepairKubeletConfig_BoundedWait(t *testing.T) {
+	// If the local API never returns, the repair fails loud within ctx (never hangs).
+	e := &KubeadmExecutor{
+		Runner:            &fakeRunner{},
+		RunDir:            t.TempDir(),
+		Role:              actualstate.RoleControlPlane,
+		Input:             kubeadmconfig.Input{ControlPlaneEndpoint: "10.0.0.1:6443"},
+		LocalAPIReachable: func(context.Context) bool { return false },
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := e.Execute(ctx, reconcile.ActionRepairKubeletConfig); err == nil {
+		t.Fatal("expected a bounded error when the local API never returns")
 	}
 }
