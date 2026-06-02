@@ -82,7 +82,9 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	if err != nil {
 		return err
 	}
-	actions := reconcile.Plan(role, state)
+	// Upgrade target wiring (the operator-pinned version) lands in a later slice;
+	// passing "" means no upgrade is evaluated and the bootstrap/join logic runs.
+	actions := reconcile.Plan(role, "", state)
 
 	var join *credential.JoinMaterial
 	if role == actualstate.RoleWorker || role == actualstate.RoleControlPlane {

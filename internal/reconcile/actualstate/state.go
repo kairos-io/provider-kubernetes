@@ -42,8 +42,23 @@ type State struct {
 	BinaryVersion string
 	// ClusterVersion is the cluster's current Kubernetes version as recorded in the
 	// kubeadm-config ConfigMap (e.g. "v1.34.0"); empty if not probed or not yet a
-	// member. Compared against BinaryVersion to decide an upgrade (ADR-12).
+	// member. It flips to the target as soon as the FIRST control plane runs
+	// `kubeadm upgrade apply`, so it answers a cluster-wide question, not a per-node
+	// one (ADR-12).
 	ClusterVersion string
+	// NodeComponentVersion is THIS control-plane node's component version, read from
+	// the kube-apiserver static-pod manifest image tag under
+	// /etc/kubernetes/manifests (e.g. "v1.34.0"); empty on workers or pre-init. It
+	// is the per-node convergence signal for a control plane: it reaches the target
+	// only after this node runs `kubeadm upgrade apply` (first CP) or `upgrade node`
+	// (other CPs) (ADR-12).
+	NodeComponentVersion string
+	// RunningKubeletVersion is THIS node's RUNNING kubelet version (e.g. "v1.34.0");
+	// empty if not probed. It is the per-node convergence signal for a worker: post
+	// image-swap the kubelet binary on disk is already the target, but the running
+	// kubelet stays the old version until `kubeadm upgrade node` + kubelet restart,
+	// so this distinguishes "cluster flipped" from "this node converged" (ADR-12).
+	RunningKubeletVersion string
 }
 
 // Prober observes the node's actual state without mutating it. Implementations
