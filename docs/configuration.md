@@ -64,7 +64,7 @@ Common fields:
 ```yaml
 config: |
   clusterConfiguration:
-    kubernetesVersion: v1.34.0          # must be within the supported window
+    kubernetesVersion: v1.34.0          # within the window; must match the image; bumping it triggers an upgrade (see docs/upgrades.md)
     controlPlaneEndpoint: "vip:6443"    # stable endpoint; REQUIRED for HA
     imageRepository: registry.k8s.io
     networking:

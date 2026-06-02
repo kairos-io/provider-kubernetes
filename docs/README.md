@@ -21,6 +21,7 @@ Usage documentation for **provider-kubernetes**, the Go-native
 | [Creating a cluster](./creating-a-cluster.md) | Single control plane, adding workers, the join-material flow. |
 | [High availability](./high-availability.md) | Multi-control-plane (stacked etcd): stable endpoint, one-at-a-time bring-up, failover. |
 | [mint-join reference](./mint-join.md) | The `agent-provider-kubernetes mint-join` subcommand. |
+| [Upgrades](./upgrades.md) | Upgrading between Kubernetes minors (`kubeadm upgrade`): pin + image, single-node and HA, kubelet-config repair, etcd snapshots, rollback. |
 | [CNI](./cni.md) | Installing a CNI (the provider installs none). |
 | [Security model](./security.md) | `cluster_token`, certificate-key blast radius, CA pinning, at-rest encryption, the trust boundary. |
 | [Lifecycle and reset](./lifecycle.md) | Reboot idempotency, reset / `EventClusterReset`, the supported version window, upgrades. |

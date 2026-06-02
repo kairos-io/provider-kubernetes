@@ -56,6 +56,13 @@ built and verified in CI):
   bounded-TTL join material (for control planes, re-uploading the cluster certs
   under a fresh certificate key), computes the cluster CA SPKI pin, derives the
   API endpoint from `admin.conf`, and prints a ready-to-paste join cloud-config.
+- **Cluster upgrades (`kubeadm upgrade`).** Pin a newer `kubernetesVersion` and
+  boot the matching image; the provider converges the cluster one minor at a time
+  (control plane via `upgrade apply`, followers/workers via `upgrade node`),
+  refusing downgrades / skip-level / out-of-window. It auto-repairs the kubelet
+  config when an image swap leaves the new kubelet unable to start, and takes a
+  best-effort etcd snapshot (only onto encrypted storage). Validated live for
+  1.34 -> 1.35. See [`docs/upgrades.md`](./docs/upgrades.md).
 - **CNI is the operator's choice.** The provider installs no CNI;
   [`samples/cni-calico/`](./samples/cni-calico/) shows two ways to add Calico
   (apply after the cluster is up, or bundle it in the control-plane
@@ -64,10 +71,9 @@ built and verified in CI):
   image build across the supported Kubernetes window; tagged releases publish
   per-minor images to ghcr (see "Released images").
 
-Cluster bootstrap, credential handling, multi-control-plane HA, the reset
-handler, the image build, CI, and release publishing are implemented. The next
-major capability is cluster upgrades (`kubeadm upgrade`). See the roadmap
-discussion in the issue above.
+The full lifecycle - bootstrap, join, **upgrade**, and reset - plus credential
+handling, multi-control-plane HA, the image build, CI, and release publishing are
+implemented and validated on VMs. See the roadmap discussion in the issue above.
 
 ## Status
 
@@ -81,7 +87,7 @@ discussion in the issue above.
 | Kairos image build (pinned, checksum-verified) | implemented |
 | CI (build/vet/test/lint + image build across 1.34/1.35/1.36) | implemented |
 | Release automation (per-minor images to ghcr + binary) | implemented |
-| Cluster upgrades (`kubeadm upgrade`) | not yet (next) |
+| Cluster upgrades (`kubeadm upgrade`) | implemented, validated on libvirt (1.34 -> 1.35) |
 | Field readiness | not ready |
 
 ## Building
@@ -171,6 +177,7 @@ Usage documentation lives in [`docs/`](./docs/):
 | [Creating a cluster](./docs/creating-a-cluster.md) | Single control plane plus workers. |
 | [High availability](./docs/high-availability.md) | Multi-control-plane (stacked etcd). |
 | [mint-join](./docs/mint-join.md) | The join-material CLI. |
+| [Upgrades](./docs/upgrades.md) | Upgrading between Kubernetes minors with `kubeadm upgrade`. |
 | [CNI](./docs/cni.md) | Installing a CNI. |
 | [Security model](./docs/security.md) | Tokens, the cert-key blast radius, CA pinning, at-rest encryption. |
 | [Lifecycle and reset](./docs/lifecycle.md) | Reconcile, reset, the version window, upgrades. |
