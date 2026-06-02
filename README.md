@@ -6,10 +6,11 @@ Kubernetes** using `kubeadm`, while remaining native to the Kairos ecosystem
 
 > ## Under active development — NOT ready for field testing
 >
-> This project is in **early, pre-alpha development**. It is **not** ready for
-> field testing, staging, or production use. Interfaces, configuration, and
-> behavior **will** change without notice, and the provider currently does not
-> bootstrap a cluster. Do not deploy it on machines you care about.
+> This project is in **early development**. It is **not** production-hardened
+> and is **not** ready for field testing, staging, or production use. It can
+> bootstrap clusters in validation (see "What works today"), but interfaces,
+> configuration, and behavior **will** change without notice. Do not deploy it
+> on machines you care about.
 
 ## What this is
 
@@ -29,17 +30,44 @@ starting point, notably:
 - **No vendor lock-in** — upstream kubeadm first; FIPS and downstream
   distributions are optional build variants, not core assumptions.
 - **Secure by default** — sound credential handling, join-time CA
-  verification, least privilege, and a verified supply chain.
+  verification (mandatory CA pinning, never `unsafeSkipCAVerification`), least
+  privilege, and a checksum-verified supply chain.
 - **Externally-managed control planes** are a supported topology, not an
   afterthought.
+
+## What works today
+
+Validated end-to-end on KVM/QEMU and libvirt (Kubernetes v1.34.0):
+
+- **Single-node and multi-node clusters.** A `role: init` node runs
+  `kubeadm init`; `worker` and `controlplane` nodes join with CA pinning.
+- **Unattended install.** Booting a Kairos image built from this repo with one
+  of the sample cloud-configs installs to disk and bootstraps the cluster with
+  no manual steps.
+- **`mint-join` helper.** On a control-plane node,
+  `agent-provider-kubernetes mint-join --role worker|controlplane` mints
+  bounded-TTL join material, computes the cluster CA SPKI pin, derives the API
+  endpoint from `admin.conf`, and prints a ready-to-paste join cloud-config.
+- **CNI is the operator's choice.** The provider installs no CNI;
+  [`samples/cni-calico/`](./samples/cni-calico/) shows two ways to add Calico
+  (apply after the cluster is up, or bundle it in the control-plane
+  cloud-config).
+
+The cluster-bootstrap logic, credential handling, reset handler, and image
+build are implemented; multi-control-plane HA, broader version-window testing,
+and CI are in progress. See the roadmap discussion in the issue above.
 
 ## Status
 
 | Area | State |
 |------|-------|
 | Project bootstrap | in place |
-| Architecture / design | in progress |
-| Cluster bootstrap logic | not implemented |
+| Architecture / design | foundational decisions made |
+| Cluster bootstrap (init / worker / controlplane) | implemented, validated on KVM/libvirt |
+| `mint-join` join-material helper | implemented, validated |
+| Kairos image build (pinned, checksum-verified) | implemented |
+| CI / release automation | not yet |
+| Multi-control-plane HA | not yet |
 | Field readiness | not ready |
 
 ## Building
@@ -75,10 +103,24 @@ docker build \
 
 Convert the resulting Docker image into a bootable ISO/raw artifact with
 [auroraboot](https://kairos.io/docs/reference/auroraboot/), and provision it
-with one of the sample cloud-configs in [`samples/`](./samples/) (`master.yaml`,
-`controlplane.yaml`, `worker.yaml`). The samples directory's
-[README](./samples/README.md) walks through the end-to-end cluster-creation
-flow.
+with one of the sample cloud-configs in [`samples/`](./samples/).
+
+## Creating a cluster
+
+The [`samples/`](./samples/) directory has cloud-configs for each node role,
+and its [README](./samples/README.md) walks through the end-to-end flow:
+
+| File | Role |
+|------|------|
+| [`samples/master.yaml`](./samples/master.yaml) | first control-plane (`role: init`) |
+| [`samples/controlplane.yaml`](./samples/controlplane.yaml) | additional control-plane join |
+| [`samples/worker.yaml`](./samples/worker.yaml) | worker join |
+| [`samples/cluster.yaml`](./samples/cluster.yaml) | annotated reference covering the full kubeadm v1beta4 surface |
+| [`samples/cni-calico/`](./samples/cni-calico/) | Calico CNI, post-hoc or bundled in the cloud-config |
+
+The flow: boot the first control-plane node from a sample; once it is up, mint
+join material with `agent-provider-kubernetes mint-join` and drop it into the
+worker/controlplane configs; boot the joiners; install a CNI.
 
 ## Contributing
 
