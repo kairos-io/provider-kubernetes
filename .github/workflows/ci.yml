@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner time.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Fast Go gates: format, vet, test (with coverage), build, lint.
+  # The Go toolchain is read from go.mod so CI can never drift from the
+  # module's `go` directive (CLAUDE.md no-drift rule, hardening item C3).
+  gates:
+    name: build / vet / test / lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: gofmt -s (check only)
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      - name: go test (with coverage)
+        run: make test
+
+      - name: go build
+        run: make build
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          # Pin to the version validated locally against the v2 config.
+          version: v2.12.2
+
+  # Product deliverable: the multi-stage Kairos image bundling the provider
+  # plus kubeadm/kubelet/kubectl/containerd/runc/CNI (all checksum-verified
+  # inside the Dockerfile). Heavier than the gates; runs in parallel.
+  image:
+    name: image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Kairos image
+        run: make image
