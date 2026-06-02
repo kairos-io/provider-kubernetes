@@ -265,7 +265,10 @@ func (e *KubeadmExecutor) runUpgradeApply(ctx context.Context) error {
 		}
 	}
 	// U5: best-effort etcd snapshot before the destructive apply (bounded; never
-	// blocks the upgrade -- failures are logged inside SnapshotEtcd).
+	// blocks the upgrade -- failures are logged below). On a bounded retry of apply
+	// this runs again; that is harmless (the snapshot is single-retained and the
+	// pre-apply re-check above degrades a retry to upgrade-node once the cluster has
+	// actually flipped).
 	if e.SnapshotEtcd != nil {
 		if err := e.SnapshotEtcd(ctx); err != nil {
 			logrus.Warnf("provider-kubernetes: pre-upgrade etcd snapshot did not complete: %v (continuing)", err)

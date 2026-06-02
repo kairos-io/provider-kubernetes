@@ -77,7 +77,14 @@ func runningKubeletVersionViaKubectl(rootPath string) func(ctx context.Context) 
 // encryptionConfirmedDefault reports whether dir's backing block device is part of
 // an encrypted (LUKS/crypt) stack, by walking the device dependency tree. It is
 // conservative: any error or an absent crypt layer yields false, so the etcd
-// snapshot is refused rather than writing plaintext (ADR-12 U5 security).
+// snapshot is refused rather than writing plaintext (ADR-12 U5 security). A false
+// negative is safe (snapshot skipped); a false positive would be dangerous but
+// requires the resolved source device to genuinely carry a dm-crypt node.
+//
+// Precondition (documented, like RunDir-must-be-tmpfs): the snapshot dir must be a
+// DIRECT mount. Under an overlay/bind mount, `findmnt --target` may resolve to a
+// backing device that differs from where bytes actually land, so the check is only
+// trustworthy for a plain mount of the persistent partition.
 func encryptionConfirmedDefault(dir string) func(ctx context.Context) bool {
 	return func(ctx context.Context) bool {
 		src, err := exec.CommandContext(ctx, "findmnt", "-no", "SOURCE", "--target", dir).CombinedOutput()
