@@ -1,0 +1,19 @@
+# Keep the Docker build context small and fast. The provider-builder stage does
+# `COPY . .` to run `go build`, so without this every build ships the whole repo
+# (including build/, which holds multi-GB VM ISOs and disks) to the daemon.
+# Only the Go module + the config dirs the Dockerfile explicitly COPYs
+# (containerd/, systemd/, sysctl/, modules-load/) are needed.
+
+.git
+.github
+.claude
+build
+bin
+docs
+samples
+*.md
+coverage.out
+*.iso
+*.qcow2
+*.tar
+*.log
