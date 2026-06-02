@@ -129,3 +129,43 @@ func bumpMinor(t *testing.T, mm string, delta int) string {
 	}
 	return parts[0] + "." + strconv.Itoa(n+delta)
 }
+
+func TestUpgradePath(t *testing.T) {
+	cases := []struct {
+		name      string
+		cluster   string
+		target    string
+		wantDue   bool
+		wantTgt   string
+		wantError bool
+	}{
+		{name: "one minor up is due", cluster: "v1.34.8", target: "v1.35.5", wantDue: true, wantTgt: "v1.35.5"},
+		{name: "one minor up into window", cluster: "v1.35.0", target: "v1.36.1", wantDue: true, wantTgt: "v1.36.1"},
+		{name: "same minor not due", cluster: "v1.34.0", target: "v1.34.8", wantDue: false},
+		{name: "skip-level refused", cluster: "v1.34.0", target: "v1.36.0", wantError: true},
+		{name: "downgrade refused", cluster: "v1.35.0", target: "v1.34.0", wantError: true},
+		{name: "target out of window refused", cluster: "v1.36.0", target: "v1.37.0", wantError: true},
+		{name: "invalid cluster", cluster: "nope", target: "v1.35.0", wantError: true},
+		{name: "invalid target", cluster: "v1.34.0", target: "nope", wantError: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d, err := UpgradePath(c.cluster, c.target)
+			if c.wantError {
+				if err == nil {
+					t.Fatalf("expected error for cluster=%s target=%s, got %+v", c.cluster, c.target, d)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if d.Due != c.wantDue {
+				t.Fatalf("Due = %v, want %v", d.Due, c.wantDue)
+			}
+			if d.Due && d.Target != c.wantTgt {
+				t.Fatalf("Target = %q, want %q", d.Target, c.wantTgt)
+			}
+		})
+	}
+}

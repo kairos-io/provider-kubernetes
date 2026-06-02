@@ -36,6 +36,14 @@ type State struct {
 	// ControlPlaneReachable reports whether the target control-plane endpoint is
 	// reachable from this node (relevant before a join).
 	ControlPlaneReachable bool
+	// BinaryVersion is the bundled kubeadm binary version on this node (e.g.
+	// "v1.35.0"); empty if not probed. The desired/target version for an upgrade
+	// (ADR-12: the pinned version equals the bundled binary version).
+	BinaryVersion string
+	// ClusterVersion is the cluster's current Kubernetes version as recorded in the
+	// kubeadm-config ConfigMap (e.g. "v1.34.0"); empty if not probed or not yet a
+	// member. Compared against BinaryVersion to decide an upgrade (ADR-12).
+	ClusterVersion string
 }
 
 // Prober observes the node's actual state without mutating it. Implementations

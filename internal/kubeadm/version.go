@@ -3,6 +3,7 @@ package kubeadm
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -65,4 +66,72 @@ func Resolve(detected, pinned string) (string, error) {
 		}
 	}
 	return detected, nil
+}
+
+// UpgradeDecision is the result of evaluating a possible upgrade (ADR-12).
+type UpgradeDecision struct {
+	// Due is true when a minor upgrade from clusterVersion to Target should run.
+	Due bool
+	// Target is the version to upgrade to (the bundled binary / pinned version)
+	// when Due; empty otherwise.
+	Target string
+}
+
+// UpgradePath decides whether a cluster currently at clusterVersion should upgrade
+// to targetVersion (the operator-pinned version, which by ADR-3 equals the bundled
+// kubeadm binary version). It is a pure function (ADR-4 testability).
+//
+// It returns a TERMINAL error for any unsafe transition so the caller fails loud
+// rather than attempting it (ADR-12 skew enforcement): a downgrade, a skip-level
+// jump (more than one minor), a cross-major jump, or a target outside the supported
+// window. A same-minor input yields Due=false (no minor upgrade; reboot-safe no-op).
+// kubeadm only supports +1 minor per upgrade, so exactly one minor of distance is
+// the only "due" case.
+func UpgradePath(clusterVersion, targetVersion string) (UpgradeDecision, error) {
+	if !semver.IsValid(clusterVersion) {
+		return UpgradeDecision{}, fmt.Errorf("cluster version %q is not valid semver", clusterVersion)
+	}
+	if !semver.IsValid(targetVersion) {
+		return UpgradeDecision{}, fmt.Errorf("target version %q is not valid semver", targetVersion)
+	}
+	if !IsSupported(targetVersion) {
+		return UpgradeDecision{}, fmt.Errorf("refusing upgrade: target %s (minor %s) is outside the supported window %v", targetVersion, Minor(targetVersion), SupportedMinors)
+	}
+	if semver.Major(clusterVersion) != semver.Major(targetVersion) {
+		return UpgradeDecision{}, fmt.Errorf("refusing cross-major change: cluster is %s, target is %s", clusterVersion, targetVersion)
+	}
+
+	switch semver.Compare(semver.MajorMinor(clusterVersion), semver.MajorMinor(targetVersion)) {
+	case 0:
+		// Same minor: no minor upgrade is due (patch-level handling is out of scope
+		// here; a re-applied same-minor upgrade is intentionally a no-op).
+		return UpgradeDecision{Due: false}, nil
+	case 1:
+		// Cluster minor is newer than target: downgrade.
+		return UpgradeDecision{}, fmt.Errorf("refusing downgrade: cluster is %s, target is %s", clusterVersion, targetVersion)
+	default:
+		// Cluster minor is older than target: must be exactly one minor apart.
+		cn, okc := minorNum(clusterVersion)
+		tn, okt := minorNum(targetVersion)
+		if !okc || !okt {
+			return UpgradeDecision{}, fmt.Errorf("cannot parse minor of %q or %q", clusterVersion, targetVersion)
+		}
+		if tn-cn != 1 {
+			return UpgradeDecision{}, fmt.Errorf("refusing skip-level upgrade: cluster is %s, target is %s; upgrade one minor at a time", clusterVersion, targetVersion)
+		}
+		return UpgradeDecision{Due: true, Target: targetVersion}, nil
+	}
+}
+
+// minorNum extracts the integer minor component, e.g. 34 from "v1.34.2".
+func minorNum(version string) (int, bool) {
+	parts := strings.SplitN(Minor(version), ".", 2)
+	if len(parts) != 2 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
