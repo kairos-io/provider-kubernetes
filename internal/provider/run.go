@@ -177,7 +177,8 @@ func containsUpgradeAction(actions []reconcile.Action) bool {
 	for _, a := range actions {
 		switch a {
 		case reconcile.ActionUpgradeApply, reconcile.ActionUpgradeNode,
-			reconcile.ActionWaitForClusterUpgrade, reconcile.ActionRefuseUpgrade:
+			reconcile.ActionWaitForClusterUpgrade, reconcile.ActionRefuseUpgrade,
+			reconcile.ActionRepairKubeletConfig:
 			return true
 		}
 	}
