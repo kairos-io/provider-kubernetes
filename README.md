@@ -160,6 +160,22 @@ The flow: boot the first control-plane node from a sample; once it is up, mint
 join material with `agent-provider-kubernetes mint-join` and drop it into the
 worker/controlplane configs; boot the joiners; install a CNI.
 
+## Documentation
+
+Usage documentation lives in [`docs/`](./docs/):
+
+| Document | Covers |
+|----------|--------|
+| [Getting started](./docs/getting-started.md) | From nothing to a running single-node control plane. |
+| [Configuration reference](./docs/configuration.md) | The full `cluster` cloud-config contract. |
+| [Creating a cluster](./docs/creating-a-cluster.md) | Single control plane plus workers. |
+| [High availability](./docs/high-availability.md) | Multi-control-plane (stacked etcd). |
+| [mint-join](./docs/mint-join.md) | The join-material CLI. |
+| [CNI](./docs/cni.md) | Installing a CNI. |
+| [Security model](./docs/security.md) | Tokens, the cert-key blast radius, CA pinning, at-rest encryption. |
+| [Lifecycle and reset](./docs/lifecycle.md) | Reconcile, reset, the version window, upgrades. |
+| [Troubleshooting](./docs/troubleshooting.md) | Logs, common failures, filing issues. |
+
 ## Contributing
 
 This project is moving quickly and its architecture is still being defined.
