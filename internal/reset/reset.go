@@ -11,6 +11,11 @@
 // artifact is refused (not followed) to avoid destroying a bind-mount target.
 // Operators must NOT point RootPath at a directory whose only copy of their
 // externally-managed PKI lives under it.
+//
+// HA-5: stacked-etcd CP detection + etcd orphan cleanup warning (ADR-11 #5).
+// If the node is a stacked-etcd CP and the cluster is unreachable, a loud
+// actionable warning is emitted naming the remediation. The provider never runs
+// etcdctl against a quorum; that is operator-owned.
 package reset
 
 import (
@@ -24,11 +29,13 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
+	"github.com/kairos-io/provider-kubernetes/internal/securefile"
 )
 
 const (
 	defaultRootPath = "/"
 	defaultTimeout  = 5 * time.Minute
+	defaultRunDir   = "/run"
 )
 
 // Options configures a reset pass.
@@ -37,6 +44,15 @@ type Options struct {
 	RootPath  string
 	CRISocket string        // optional; passed to `kubeadm reset --cri-socket` when set
 	Timeout   time.Duration // bounded; zero defaults to defaultTimeout
+	// NodeName is this node's name, surfaced in the etcd orphan warning (HA-5).
+	// When empty the hostname is used in the advisory message.
+	NodeName string
+	// RunDir is the ephemeral directory swept for leftover kubeadm-*.yaml transient
+	// configs from an interrupted join (HA-5). Empty defaults to /run.
+	RunDir string
+	// ControlPlaneReachable is an injectable bounded probe for HA-5. When nil the
+	// cluster is assumed unreachable (conservative: always emit the warning).
+	ControlPlaneReachable func(ctx context.Context) bool
 }
 
 // authoritativeArtifacts are the paths whose presence the actualstate prober
@@ -87,9 +103,29 @@ func removeArtifact(path string) error {
 	return os.RemoveAll(path)
 }
 
+// isStackedEtcdCP reports whether this node is a stacked-etcd control plane by
+// checking for the presence of the etcd static-pod manifest or the etcd data dir
+// under root. Pure file check, no I/O beyond stat (HA-5).
+func isStackedEtcdCP(root string) bool {
+	indicators := []string{
+		filepath.Join(root, "etc", "kubernetes", "manifests", "etcd.yaml"),
+		filepath.Join(root, "var", "lib", "etcd", "member"),
+	}
+	for _, p := range indicators {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // Run performs a bounded, idempotent reset. `kubeadm reset` failing (e.g. on an
 // already-clean node) is non-fatal: artifact cleanup still runs so reset is
 // idempotent. It returns the first artifact-removal error, if any.
+//
+// HA-5: if the node is a stacked-etcd CP and the cluster is unreachable, a loud
+// actionable warning is emitted (naming the operator remediation). No etcdctl is
+// run. A sweep of RunDir for leftover transient kubeadm-*.yaml files also runs.
 func Run(ctx context.Context, opts Options) error {
 	root, err := validateRoot(opts.RootPath)
 	if err != nil {
@@ -103,6 +139,37 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	runDir := opts.RunDir
+	if runDir == "" {
+		runDir = defaultRunDir
+	}
+
+	// HA-5: detect stacked-etcd CP before we remove artifacts. We check first so
+	// we can warn (or rely on kubeadm reset for clean member removal) before wiping.
+	cpIsStacked := isStackedEtcdCP(root)
+	clusterReachable := false
+	if opts.ControlPlaneReachable != nil {
+		clusterReachable = opts.ControlPlaneReachable(ctx)
+	}
+
+	if cpIsStacked && !clusterReachable {
+		nodeName := opts.NodeName
+		if nodeName == "" {
+			if h, herr := os.Hostname(); herr == nil {
+				nodeName = h
+			} else {
+				nodeName = "<node-name>"
+			}
+		}
+		logrus.Warnf("provider-kubernetes: ATTENTION: this appears to be a stacked-etcd control-plane node and the cluster is unreachable. "+
+			"The etcd member for this node may remain registered in the etcd quorum after reset, which can cause quorum loss. "+
+			"Operator action required from a surviving control-plane node: "+
+			"(1) kubectl delete node %s  "+
+			"(2) etcdctl member list  (identify this node's member ID)  "+
+			"(3) etcdctl member remove <id>  "+
+			"This provider does NOT run etcdctl. Proceeding with local cleanup.", nodeName)
+	}
 
 	args := []string{"reset", "-f", "--cleanup-tmp-dir"}
 	if opts.CRISocket != "" {
@@ -123,5 +190,10 @@ func Run(ctx context.Context, opts Options) error {
 			}
 		}
 	}
+
+	// HA-5: sweep RunDir for leftover transient kubeadm-*.yaml configs from an
+	// interrupted join. Non-fatal; Shred logs failures at debug level.
+	securefile.SweepRunDir(runDir)
+
 	return firstErr
 }

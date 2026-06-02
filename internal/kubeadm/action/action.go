@@ -8,7 +8,7 @@ package action
 import (
 	"context"
 	"fmt"
-	"os"
+	"net/http"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -18,6 +18,7 @@ import (
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile"
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile/actualstate"
+	"github.com/kairos-io/provider-kubernetes/internal/securefile"
 )
 
 // defaultTokenTTL is the bounded bootstrap-token TTL (ADR-10 decision).
@@ -56,6 +57,8 @@ func (e *KubeadmExecutor) Execute(ctx context.Context, a reconcile.Action) error
 		return e.runInit(ctx)
 	case reconcile.ActionRunJoin:
 		return e.runJoin(ctx)
+	case reconcile.ActionRefuseInit:
+		return fmt.Errorf("a control plane already answers at %q; this node is role=init but the cluster exists. Use role=controlplane to join", e.Input.ControlPlaneEndpoint)
 	default:
 		return fmt.Errorf("unknown action %q", a)
 	}
@@ -102,11 +105,11 @@ func (e *KubeadmExecutor) runInit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	path, err := writeTransient(e.runDir(), content)
+	path, err := securefile.WriteTransient(e.runDir(), content)
 	if err != nil {
 		return err
 	}
-	defer shred(path)
+	defer securefile.Shred(path)
 
 	// stdout is intentionally not logged: kubeadm init prints the join command
 	// (including the token) on success.
@@ -136,11 +139,11 @@ func (e *KubeadmExecutor) runJoin(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	path, err := writeTransient(e.runDir(), content)
+	path, err := securefile.WriteTransient(e.runDir(), content)
 	if err != nil {
 		return err
 	}
-	defer shred(path)
+	defer securefile.Shred(path)
 
 	if _, err := e.Runner.Run(ctx, "join", "--config", path); err != nil {
 		return fmt.Errorf("kubeadm join: %w", err)
@@ -148,52 +151,68 @@ func (e *KubeadmExecutor) runJoin(ctx context.Context) error {
 	return nil
 }
 
+// waitForControlPlane waits until the CP endpoint is reachable (TCP-level) and,
+// for control-plane joins, until the CP /readyz endpoint reports healthy (HA-4).
+// The overall wait is bounded by ctx (which the reconcile.Reconciler sets from
+// Budget.PerAttempt); it never hangs (design principle 4 / #4099-1).
 func (e *KubeadmExecutor) waitForControlPlane(ctx context.Context) error {
 	if e.CPReachable == nil {
 		return nil // no checker; the bounded join attempt will surface unreachability
 	}
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	for {
-		if e.CPReachable(ctx) {
-			return nil
-		}
+	for !e.CPReachable(ctx) {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("control plane not reachable within budget: %w", ctx.Err())
 		case <-ticker.C:
 		}
 	}
+	// HA-4: for control-plane joins, add a bounded /readyz health gate so we do
+	// not join a quorum that is TCP-reachable but not yet healthy. Worker joins
+	// keep the existing behavior (kubeadm join handles the API availability wait).
+	if e.Role == actualstate.RoleControlPlane {
+		return e.waitForCPHealthy(ctx)
+	}
+	return nil
 }
 
-// writeTransient writes content to a fresh 0600 file under dir (ephemeral storage).
-func writeTransient(dir, content string) (string, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create run dir: %w", err)
+// waitForCPHealthy polls https://<endpoint>/readyz with a 5s per-probe timeout
+// until the CP reports healthy or ctx expires. This is the HA-4 bounded health
+// gate before a CP join. No distributed lock: the operator delivers one CP-join
+// cloud-config at a time (ADR-11 #4).
+func (e *KubeadmExecutor) waitForCPHealthy(ctx context.Context) error {
+	endpoint := e.Input.ControlPlaneEndpoint
+	if endpoint == "" {
+		// No endpoint configured; skip and let kubeadm report the error.
+		return nil
 	}
-	f, err := os.CreateTemp(dir, "kubeadm-*.yaml")
-	if err != nil {
-		return "", fmt.Errorf("create transient config: %w", err)
+	url := "https://" + endpoint + "/readyz"
+	// Use an HTTP client that skips TLS verification only for the readyz probe:
+	// we are checking liveness, not authenticating; the real CA-pinned join
+	// follows immediately after. This avoids needing the CA at probe time.
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsInsecure(),
+		},
 	}
-	defer func() { _ = f.Close() }()
-	if err := f.Chmod(0o600); err != nil {
-		return "", fmt.Errorf("chmod transient config: %w", err)
-	}
-	if _, err := f.WriteString(content); err != nil {
-		return "", fmt.Errorf("write transient config: %w", err)
-	}
-	return f.Name(), nil
-}
-
-// shred best-effort overwrites then removes a transient secret file. On tmpfs
-// (/run) removal already prevents persistence; the overwrite is defense-in-depth.
-func shred(path string) {
-	if info, err := os.Stat(path); err == nil {
-		_ = os.WriteFile(path, make([]byte, info.Size()), 0o600)
-	}
-	// A lingering secret file is a real risk, so do not fail silently if removal
-	// does not happen (Design Principle #6). The path is a filename, not content.
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		logrus.Debugf("provider-kubernetes: failed to remove transient secret file %s: %v", path, err)
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	logrus.Infof("provider-kubernetes: waiting for control-plane health at %s (CP join health gate)", url)
+	for {
+		resp, err := client.Get(url) //nolint:noctx // bounded by ticker + ctx.Done below
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				logrus.Infof("provider-kubernetes: control-plane healthy (%s)", url)
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("control plane not healthy within budget (%s): %w", url, ctx.Err())
+		case <-ticker.C:
+		}
 	}
 }

@@ -104,6 +104,10 @@ func runMintJoin(args []string) int {
 	endpoint := fs.String("endpoint", "", "apiserver endpoint host:port (default: derived from admin.conf)")
 	rootPath := fs.String("root-path", "/", "cluster_root_path (locates admin.conf and ca.crt)")
 	clusterToken := fs.String("cluster-token", "", "cluster_token correlation value to embed (must match the control plane)")
+	// HA-2: the joining CP's own advertise address. The minting CP cannot know the
+	// joiner's IP; the operator passes it here or fills in the placeholder in the
+	// rendered cloud-config before delivering it to the joining node.
+	advertiseAddress := fs.String("advertise-address", "", "joining CP node's own API server advertise address (controlplane role only; HA-2)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
@@ -141,13 +145,14 @@ func runMintJoin(args []string) int {
 	}
 
 	out, err := provider.RenderJoinCloudConfig(provider.JoinSnippet{
-		Role:           roleNorm,
-		Endpoint:       ep,
-		Token:          jm.Token,
-		CACertHashes:   jm.CACertHashes,
-		CertificateKey: jm.CertificateKey,
-		ClusterToken:   *clusterToken,
-		TTL:            ttl.String(),
+		Role:             roleNorm,
+		Endpoint:         ep,
+		Token:            jm.Token,
+		CACertHashes:     jm.CACertHashes,
+		CertificateKey:   jm.CertificateKey,
+		ClusterToken:     *clusterToken,
+		TTL:              ttl.String(),
+		AdvertiseAddress: *advertiseAddress,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "render join cloud-config: %v\n", err)
@@ -172,6 +177,7 @@ mint-join flags:
   --endpoint host:port         apiserver endpoint (default: derived from admin.conf)
   --root-path /                cluster_root_path locating admin.conf and ca.crt
   --cluster-token VALUE        cluster_token to embed (must match the control plane)
+  --advertise-address IP       joining CP node's own advertise address (controlplane only; operator fills in if not known at mint time)
 
 `, version.Version)
 }

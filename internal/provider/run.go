@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net"
+	"time"
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 	"github.com/sirupsen/logrus"
@@ -21,6 +23,10 @@ type Options struct {
 	// RunDir is the ephemeral directory for transient secret-bearing config; empty
 	// defaults to /run.
 	RunDir string
+	// CPReachableProbe overrides the default TCP-dial probe for control-plane
+	// reachability. When nil, a bounded TCP-dial to the controlPlaneEndpoint is
+	// used. Inject a custom probe in tests to avoid real network calls.
+	CPReachableProbe func(ctx context.Context) bool
 }
 
 // Run executes one bounded reconcile pass for the given cluster. It is the runtime
@@ -49,14 +55,30 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	if err != nil {
 		return err
 	}
-	in, err := BuildInput(pctx, uc, resolved)
+	in, endpointWarn, err := BuildInput(pctx, uc, resolved)
 	if err != nil {
 		return err
+	}
+	// HA-1: log any non-fatal endpoint advisory returned by BuildInput.
+	if endpointWarn != "" {
+		logrus.Warnf("provider-kubernetes: %s", endpointWarn)
 	}
 
 	role := actualstate.Role(pctx.Role)
 
-	state, err := actualstate.FileProber{RootPath: pctx.RootPath}.Probe(ctx)
+	// HA-3: inject a bounded CP reachability probe for all roles, including init,
+	// so Plan can detect an already-serving CP at role=init and refuse to clobber
+	// it (ADR-11 #2). Worker/CP joins already used this probe; now init does too.
+	// The probe is injectable via Options.CPReachableProbe for test isolation.
+	cpReachable := opts.CPReachableProbe
+	if cpReachable == nil {
+		cpReachable = makeCPReachableProbe(in.ControlPlaneEndpoint)
+	}
+
+	state, err := actualstate.FileProber{
+		RootPath:              pctx.RootPath,
+		ControlPlaneReachable: cpReachable,
+	}.Probe(ctx)
 	if err != nil {
 		return err
 	}
@@ -69,14 +91,20 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		}
 	}
 
+	runDir := opts.RunDir
+	if runDir == "" {
+		runDir = "/run"
+	}
+
 	exec := &action.KubeadmExecutor{
-		Runner:   opts.Runner,
-		Minter:   credential.Minter{Runner: opts.Runner, RootPath: pctx.RootPath},
-		RootPath: pctx.RootPath,
-		RunDir:   opts.RunDir,
-		Role:     role,
-		Input:    in,
-		Join:     join,
+		Runner:      opts.Runner,
+		Minter:      credential.Minter{Runner: opts.Runner, RootPath: pctx.RootPath, RunDir: runDir},
+		RootPath:    pctx.RootPath,
+		RunDir:      runDir,
+		Role:        role,
+		Input:       in,
+		Join:        join,
+		CPReachable: cpReachable,
 	}
 
 	logrus.Infof("provider-kubernetes: reconciling role=%q membership=%q actions=%v", role, state.Membership, actions)
@@ -84,4 +112,24 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		return fmt.Errorf("reconcile: %w", err)
 	}
 	return nil
+}
+
+// makeCPReachableProbe returns a bounded TCP reachability probe for the given
+// endpoint ("host:port"). Returns nil if the endpoint is empty (callers treat
+// nil as unreachable). The probe attempts a TCP dial with a 5s deadline so it
+// never hangs (design principle 4 / #4099-1).
+func makeCPReachableProbe(endpoint string) func(ctx context.Context) bool {
+	if endpoint == "" {
+		return nil
+	}
+	return func(ctx context.Context) bool {
+		dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", endpoint)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+		return true
+	}
 }

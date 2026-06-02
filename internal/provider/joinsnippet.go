@@ -23,6 +23,11 @@ type JoinSnippet struct {
 	ClusterToken   string   // correlation value; must match the control plane's cluster_token
 	TTL            string   // token TTL, surfaced in the header comment only
 	Device         string   // install.device for the snippet (default "auto")
+	// AdvertiseAddress is the joining CP's own API server advertise address (HA-2).
+	// The minting CP cannot know the joiner's IP; the operator fills this in before
+	// delivering the cloud-config. Empty means kubeadm's default-route heuristic
+	// applies (acceptable for single-homed nodes, warn-worthy for multi-homed).
+	AdvertiseAddress string
 }
 
 // EndpointFromKubeconfig extracts the apiserver endpoint ("host:port") from the
@@ -98,25 +103,27 @@ func RenderJoinCloudConfig(s JoinSnippet) (string, error) {
 	}
 
 	data := struct {
-		Role         string
-		Endpoint     string
-		Token        string
-		Hashes       []string
-		CertKey      string
-		ClusterToken string
-		TTL          string
-		Device       string
-		IsCP         bool
+		Role             string
+		Endpoint         string
+		Token            string
+		Hashes           []string
+		CertKey          string
+		ClusterToken     string
+		TTL              string
+		Device           string
+		IsCP             bool
+		AdvertiseAddress string
 	}{
-		Role:         role,
-		Endpoint:     s.Endpoint,
-		Token:        s.Token,
-		Hashes:       hashes,
-		CertKey:      strings.TrimSpace(s.CertificateKey),
-		ClusterToken: clusterToken,
-		TTL:          strings.TrimSpace(s.TTL),
-		Device:       device,
-		IsCP:         role == "controlplane",
+		Role:             role,
+		Endpoint:         s.Endpoint,
+		Token:            s.Token,
+		Hashes:           hashes,
+		CertKey:          strings.TrimSpace(s.CertificateKey),
+		ClusterToken:     clusterToken,
+		TTL:              strings.TrimSpace(s.TTL),
+		Device:           device,
+		IsCP:             role == "controlplane",
+		AdvertiseAddress: strings.TrimSpace(s.AdvertiseAddress),
 	}
 
 	var b strings.Builder
@@ -140,6 +147,12 @@ var joinTemplate = template.Must(template.New("join").Parse(`#cloud-config
 {{- if .IsCP}}
 # The certificateKey decrypts the uploaded control-plane certs (upstream kubeadm
 # applies a 2h expiry on the kubeadm-certs secret); re-mint per control-plane join.
+#
+# OPERATOR ACTION REQUIRED: set joinConfiguration.controlPlane.localAPIEndpoint.
+# advertiseAddress below to this joining node's own IP address (HA-2). The
+# minting control-plane cannot know the joiner's IP. If you leave it blank,
+# kubeadm uses the default-route interface address (acceptable for single-homed
+# nodes; warn-worthy for multi-homed).
 {{- end}}
 
 install:
@@ -176,5 +189,8 @@ cluster:
 {{- if .IsCP}}
       controlPlane:
         certificateKey: "{{.CertKey}}"
+        localAPIEndpoint:
+          # Set to this joining CP node's own IP (HA-2, ADR-11). Operator must fill this in.
+          advertiseAddress: "{{if .AdvertiseAddress}}{{.AdvertiseAddress}}{{else}}FILL-IN-THIS-NODE-IP{{end}}"
 {{- end}}
 `))
