@@ -1,16 +1,7 @@
-# ----------------------------------------------------------------------------
-# Claude Code tooling — LOCAL ONLY, never pushed to GitHub.
-# These are personal working aids for the maintainer and are intentionally
-# excluded from the public repository.
-# ----------------------------------------------------------------------------
 CLAUDE.md
 **/CLAUDE.md
 .claude/
 PROJECT_CONTEXT.md
-
-# ----------------------------------------------------------------------------
-# Go build artifacts
-# ----------------------------------------------------------------------------
 /bin/
 /dist/
 /build/
@@ -18,10 +9,6 @@ vendor/
 *.test
 *.out
 coverage*
-
-# ----------------------------------------------------------------------------
-# Editor / OS cruft
-# ----------------------------------------------------------------------------
 .idea/
 .vscode/
 .DS_Store
