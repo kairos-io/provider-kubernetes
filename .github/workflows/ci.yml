@@ -24,10 +24,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           check-latest: false
@@ -45,7 +45,7 @@ jobs:
         run: make build
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           # Pin to the version validated locally against the v2 config.
           version: v2.12.2
@@ -61,7 +61,7 @@ jobs:
       minors: ${{ steps.minors.outputs.minors }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Extract SupportedMinors -> JSON matrix
         id: minors
@@ -95,10 +95,10 @@ jobs:
         minor: ${{ fromJSON(needs.discover.outputs.minors) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Resolve Kubernetes patch + crictl versions
         id: ver
