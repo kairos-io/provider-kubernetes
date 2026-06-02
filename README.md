@@ -132,10 +132,10 @@ GitHub Container Registry, so you can test without building locally:
 
 ```sh
 # pick the Kubernetes minor you want (1.34 / 1.35 / 1.36):
-docker pull ghcr.io/kairos-io/provider-kubernetes:v0.1.0-k8s1.34
+docker pull ghcr.io/kairos-io/provider-kubernetes:v0.2.0-k8s1.34
 
 # the newest supported minor is also published as the plain tag and :latest:
-docker pull ghcr.io/kairos-io/provider-kubernetes:v0.1.0
+docker pull ghcr.io/kairos-io/provider-kubernetes:v0.2.0
 docker pull ghcr.io/kairos-io/provider-kubernetes:latest
 ```
 
@@ -146,7 +146,7 @@ Maintainers cut a release by pushing a signed semver tag; the `Release` workflow
 builds + pushes the per-minor images and creates the GitHub Release:
 
 ```sh
-git tag -s v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+git tag -s v0.2.0 -m "v0.2.0" && git push origin v0.2.0
 ```
 
 ## Creating a cluster
