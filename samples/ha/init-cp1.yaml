@@ -1,0 +1,64 @@
+#cloud-config
+# Kairos cloud-config for the FIRST control-plane node (cp1) of a
+# multi-control-plane (HA, stacked-etcd) kubeadm cluster bootstrapped by
+# provider-kubernetes.
+#
+# STATUS: this provider is under active development and is NOT field-ready.
+#
+# HA REQUIREMENT (ADR-11): controlPlaneEndpoint MUST be a STABLE address that
+# outlives any single control-plane node -- a VIP, an external L4 load balancer,
+# or a DNS name fronting all control planes. It must NOT be cp1's own node IP.
+# The provider warns at role=init if the endpoint looks like a single node's IP,
+# because additional control planes can only join a cluster that was initialized
+# with a stable endpoint. Retrofitting an endpoint into a live cluster is not
+# supported (it requires re-issuing all API server certificates).
+#
+# The provider does NOT ship a load balancer. Provisioning the VIP/LB/DNS is the
+# operator's responsibility (kube-vip, keepalived, MetalLB-L2, a cloud LB, or a
+# DNS round-robin/health-checked record). See README.md in this directory.
+
+install:
+  device: "auto"
+  auto: true
+  reboot: true
+
+users:
+  # Kairos 3.3+ requires at least one user in the 'admin' group for
+  # kairos-agent install to proceed (or set install.nousers: true).
+  - name: kairos
+    groups: ["admin", "sudo"]
+    passwd: kairos
+
+cluster:
+  # CHANGE THIS to a long, high-entropy string. Correlation value only; the
+  # provider rejects empty / <16-char tokens and warns on low entropy.
+  cluster_token: "CHANGE-ME-to-a-long-high-entropy-cluster-correlation-string"
+
+  # This node's own routable IP (its API server advertise address).
+  control_plane_host: "192.168.1.11"
+
+  role: init
+
+  providerConfig:
+    cluster_root_path: "/"
+
+  config: |
+    clusterConfiguration:
+      kubernetesVersion: v1.34.0
+      # STABLE HA endpoint -- a VIP / LB / DNS, NOT cp1's node IP. All control
+      # planes and workers reach the API server through this address, and it is
+      # baked into the API server serving certificate (the provider also adds it
+      # to certSANs automatically).
+      controlPlaneEndpoint: "k8s-api.example.test:6443"
+      networking:
+        podSubnet: "10.244.0.0/16"
+        serviceSubnet: "10.96.0.0/12"
+    initConfiguration:
+      localAPIEndpoint:
+        advertiseAddress: "192.168.1.11"   # cp1's own IP
+        bindPort: 6443
+
+stages:
+  initramfs:
+    - commands:
+        - ln -sf /etc/kubernetes/admin.conf /run/kubeconfig

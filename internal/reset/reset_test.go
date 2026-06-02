@@ -96,6 +96,94 @@ func TestResetRejectsRelativeRootPath(t *testing.T) {
 	}
 }
 
+// HA-5: stacked-etcd CP detection tests.
+
+func TestIsStackedEtcdCP_EtcdManifest(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc/kubernetes/manifests"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc/kubernetes/manifests/etcd.yaml"), []byte("spec:"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !isStackedEtcdCP(root) {
+		t.Fatal("expected isStackedEtcdCP=true when etcd.yaml manifest present")
+	}
+}
+
+func TestIsStackedEtcdCP_EtcdDataDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "var/lib/etcd/member"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !isStackedEtcdCP(root) {
+		t.Fatal("expected isStackedEtcdCP=true when etcd data dir present")
+	}
+}
+
+func TestIsStackedEtcdCP_NoIndicators(t *testing.T) {
+	root := t.TempDir()
+	if isStackedEtcdCP(root) {
+		t.Fatal("expected isStackedEtcdCP=false when no etcd indicators present")
+	}
+}
+
+// HA-5: reset with stacked-etcd CP and unreachable cluster runs and does not hang.
+func TestResetStackedEtcdCPUnreachableEmitsWarning(t *testing.T) {
+	root := t.TempDir()
+	// Seed etcd indicator so isStackedEtcdCP returns true.
+	if err := os.MkdirAll(filepath.Join(root, "var/lib/etcd/member"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seedArtifacts(t, root)
+	fr := &fakeRunner{}
+
+	// ControlPlaneReachable=false: should emit warning and proceed.
+	if err := Run(context.Background(), Options{
+		Runner:                fr,
+		RootPath:              root,
+		ControlPlaneReachable: func(context.Context) bool { return false },
+		NodeName:              "cp-node-1",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Artifacts still removed despite the warning.
+	if _, err := os.Stat(filepath.Join(root, "etc/kubernetes")); !os.IsNotExist(err) {
+		t.Fatal("expected artifacts removed even with stacked-etcd warning")
+	}
+}
+
+// HA-5: sweep of RunDir removes leftover kubeadm-*.yaml transient files.
+func TestResetSweepsRunDir(t *testing.T) {
+	root := t.TempDir()
+	runDir := t.TempDir()
+
+	// Plant a fake transient file in runDir.
+	transient := filepath.Join(runDir, "kubeadm-123456.yaml")
+	if err := os.WriteFile(transient, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Plant a non-transient file that must survive.
+	other := filepath.Join(runDir, "something.txt")
+	if err := os.WriteFile(other, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Run(context.Background(), Options{
+		Runner:   &fakeRunner{},
+		RootPath: root,
+		RunDir:   runDir,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(transient); !os.IsNotExist(err) {
+		t.Fatalf("expected transient file swept, stat err=%v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("non-transient file must survive reset sweep: %v", err)
+	}
+}
+
 func TestResetDefaultsEmptyRootPathToSlash(t *testing.T) {
 	// We don't actually want to wipe the test host, so use a fake runner and
 	// assert only that validateRoot accepts an empty input (defense-in-depth:

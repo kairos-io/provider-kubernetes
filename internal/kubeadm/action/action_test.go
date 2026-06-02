@@ -158,3 +158,54 @@ func TestExecuteNoneAndUnknown(t *testing.T) {
 		t.Fatal("expected error for unknown action")
 	}
 }
+
+func TestExecuteRefuseInitIsHardError(t *testing.T) {
+	e := &KubeadmExecutor{
+		Input: kubeadmconfig.Input{ControlPlaneEndpoint: "10.0.0.1:6443"},
+	}
+	err := e.Execute(context.Background(), reconcile.ActionRefuseInit)
+	if err == nil {
+		t.Fatal("ActionRefuseInit must return a hard error")
+	}
+	// The error message must name the endpoint and guide the operator.
+	if !strings.Contains(err.Error(), "10.0.0.1:6443") {
+		t.Fatalf("ActionRefuseInit error must name the endpoint, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "role=controlplane") {
+		t.Fatalf("ActionRefuseInit error must mention role=controlplane, got: %v", err)
+	}
+}
+
+// HA-4: worker join does NOT run the /readyz health gate; it goes straight through
+// after TCP reachability.
+func TestWaitForControlPlane_WorkerSkipsHealthGate(t *testing.T) {
+	reached := false
+	e := &KubeadmExecutor{
+		Role:        actualstate.RoleWorker,
+		Input:       kubeadmconfig.Input{ControlPlaneEndpoint: "10.0.0.1:6443"},
+		CPReachable: func(context.Context) bool { reached = true; return true },
+	}
+	if err := e.Execute(context.Background(), reconcile.ActionWaitForControlPlane); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reached {
+		t.Fatal("CPReachable probe must be called for worker join")
+	}
+	// For workers, the method returns after TCP reachability (no /readyz) -- the
+	// test just verifies it returns nil quickly without hanging.
+}
+
+// HA-4: CP join /readyz gate: when endpoint is empty, the health check is skipped.
+func TestWaitForCPHealthy_EmptyEndpointSkips(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	e := &KubeadmExecutor{
+		Role:        actualstate.RoleControlPlane,
+		Input:       kubeadmconfig.Input{ControlPlaneEndpoint: ""},
+		CPReachable: func(context.Context) bool { return true },
+	}
+	// Should return nil immediately (no endpoint, no dial attempt).
+	if err := e.Execute(ctx, reconcile.ActionWaitForControlPlane); err != nil {
+		t.Fatalf("empty endpoint must skip health gate, got: %v", err)
+	}
+}

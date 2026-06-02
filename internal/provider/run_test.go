@@ -74,7 +74,13 @@ func TestRunWorkerJoinPipeline(t *testing.T) {
 		Options: "joinConfiguration:\n  discovery:\n    bootstrapToken:\n" +
 			"      token: abcdef.0123456789abcdef\n      caCertHashes:\n      - sha256:deadbeef\n",
 	}
-	if err := Run(context.Background(), cluster, Options{Runner: fr, RunDir: t.TempDir()}); err != nil {
+	if err := Run(context.Background(), cluster, Options{
+		Runner: fr,
+		RunDir: t.TempDir(),
+		// Inject a reachable probe so Plan yields [ActionRunJoin] directly (no wait),
+		// avoiding real TCP dials to the fake endpoint in this hardware-free test.
+		CPReachableProbe: func(_ context.Context) bool { return true },
+	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !fr.called("join") {

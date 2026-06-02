@@ -1,6 +1,12 @@
 package kubeadmconfig
 
-import "fmt"
+import (
+	"fmt"
+	"net"
+	"strings"
+
+	"github.com/sirupsen/logrus"
+)
 
 // Input carries the non-credential values needed to build kubeadm documents.
 // Credential-bearing fields (bootstrap tokens, certificate keys, join discovery)
@@ -102,6 +108,16 @@ func BuildJoinConfiguration(in Input) (JoinConfiguration, error) {
 		if in.CertificateKey == "" {
 			return JoinConfiguration{}, fmt.Errorf("control-plane join requires a certificate key")
 		}
+		// HA-2: warn when advertiseAddress is not set for a CP join. An empty
+		// address makes kubeadm fall back to the default-route interface, which is
+		// often right for single-homed nodes but problematic for multi-homed ones.
+		// This is a warning, not a hard fail: kubeadm's own heuristic is sometimes
+		// correct and we do not want to break single-homed deployments.
+		if strings.TrimSpace(in.AdvertiseAddress) == "" {
+			logrus.Warnf("provider-kubernetes: joinConfiguration.controlPlane.localAPIEndpoint.advertiseAddress is not set for a control-plane join; kubeadm will use the default-route interface address. Set it explicitly for multi-homed control-plane nodes (HA-2, ADR-11).")
+		} else if isLoopback(in.AdvertiseAddress) {
+			logrus.Warnf("provider-kubernetes: joinConfiguration.controlPlane.localAPIEndpoint.advertiseAddress %q is a loopback address; other nodes will not be able to reach this control-plane API server.", in.AdvertiseAddress)
+		}
 		j.ControlPlane = &JoinControlPlane{
 			LocalAPIEndpoint: APIEndpoint{AdvertiseAddress: in.AdvertiseAddress, BindPort: in.BindPort},
 			CertificateKey:   in.CertificateKey,
@@ -109,4 +125,10 @@ func BuildJoinConfiguration(in Input) (JoinConfiguration, error) {
 	}
 
 	return j, nil
+}
+
+// isLoopback reports whether addr is a loopback address (IPv4 127.x or IPv6 ::1).
+func isLoopback(addr string) bool {
+	ip := net.ParseIP(strings.TrimSpace(addr))
+	return ip != nil && ip.IsLoopback()
 }

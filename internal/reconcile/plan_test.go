@@ -66,3 +66,29 @@ func TestDefaultBudgetIsBounded(t *testing.T) {
 		t.Fatal("DefaultBudget must be valid/bounded")
 	}
 }
+
+// HA-3: init-clobber guard (ADR-11 #2).
+
+func TestPlanInitUninitialized_CPReachable_RefusesInit(t *testing.T) {
+	// When role=init and ControlPlaneReachable=true, Plan must refuse to init
+	// (a CP already serves at the endpoint; operator must use role=controlplane).
+	got := Plan(actualstate.RoleInit, actualstate.State{
+		Membership:            actualstate.Uninitialized,
+		ControlPlaneReachable: true,
+	})
+	if len(got) != 1 || got[0] != ActionRefuseInit {
+		t.Fatalf("expected [%s] when init+uninitialized+reachable, got %v", ActionRefuseInit, got)
+	}
+}
+
+func TestPlanInitUninitialized_CPUnreachable_RunsInit(t *testing.T) {
+	// When role=init and ControlPlaneReachable=false, Plan must proceed with init
+	// (normal single-CP bootstrap, no existing CP).
+	got := Plan(actualstate.RoleInit, actualstate.State{
+		Membership:            actualstate.Uninitialized,
+		ControlPlaneReachable: false,
+	})
+	if len(got) != 1 || got[0] != ActionRunInit {
+		t.Fatalf("expected [%s] when init+uninitialized+unreachable, got %v", ActionRunInit, got)
+	}
+}

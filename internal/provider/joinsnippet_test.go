@@ -122,6 +122,42 @@ clusters:
 	}
 }
 
+// HA-2: localAPIEndpoint advertiseAddress placeholder in CP join cloud-config.
+func TestRenderJoinCloudConfig_CPWithAdvertiseAddress(t *testing.T) {
+	out, err := RenderJoinCloudConfig(JoinSnippet{
+		Role:             "controlplane",
+		Endpoint:         "vip.example.test:6443",
+		Token:            "abcdef.0123456789abcdef",
+		CACertHashes:     []string{"sha256:deadbeef"},
+		CertificateKey:   "feedface",
+		AdvertiseAddress: "10.0.0.5",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "advertiseAddress: \"10.0.0.5\"") {
+		t.Errorf("expected advertiseAddress in CP join config, got:\n%s", out)
+	}
+}
+
+func TestRenderJoinCloudConfig_CPWithoutAdvertiseAddressHasPlaceholder(t *testing.T) {
+	out, err := RenderJoinCloudConfig(JoinSnippet{
+		Role:           "controlplane",
+		Endpoint:       "vip.example.test:6443",
+		Token:          "abcdef.0123456789abcdef",
+		CACertHashes:   []string{"sha256:deadbeef"},
+		CertificateKey: "feedface",
+		// AdvertiseAddress intentionally empty.
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Must contain the placeholder indicating operator must fill this in.
+	if !strings.Contains(out, "FILL-IN-THIS-NODE-IP") {
+		t.Errorf("expected placeholder when advertiseAddress is empty, got:\n%s", out)
+	}
+}
+
 func TestEndpointFromKubeconfig_Errors(t *testing.T) {
 	for _, tc := range []struct {
 		name string

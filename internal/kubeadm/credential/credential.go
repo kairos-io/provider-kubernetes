@@ -6,8 +6,8 @@
 //
 // Secret hygiene: token and certificate-key values are returned to the caller and
 // never logged here. They are obtained from kubeadm stdout (not passed on argv),
-// and the certificate key is intended to flow into a 0600 config file (ADR-2/OQ-7),
-// not a command-line flag, so it never appears in the process table.
+// and the certificate key is written into a 0600 config file (ADR-2/OQ-7),
+// never a command-line flag, so it never appears in the process table.
 package credential
 
 import (
@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
+	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
+	"github.com/kairos-io/provider-kubernetes/internal/securefile"
 )
 
 // JoinMaterial is transient, credential-bearing join input. It is never persisted
@@ -67,10 +69,21 @@ func SPKIHashFromPEM(pemData []byte) (string, error) {
 type Minter struct {
 	Runner   kubeadm.Runner
 	RootPath string // cluster_root_path; locates admin.conf and the CA cert
+	// RunDir is the directory for transient secret-bearing config files written
+	// during UploadCerts (ADR-2/OQ-7: cert-key goes into a 0600 tmpfs file, never
+	// on argv). Empty defaults to /run. MUST be a tmpfs mount in production.
+	RunDir string
 }
 
 func (m Minter) adminConf() string {
 	return filepath.Join(m.RootPath, "etc", "kubernetes", "admin.conf")
+}
+
+func (m Minter) runDir() string {
+	if m.RunDir != "" {
+		return m.RunDir
+	}
+	return "/run"
 }
 
 // GenerateToken produces a fresh CSPRNG bootstrap token value offline
@@ -123,12 +136,69 @@ func (m Minter) GenerateCertificateKey(ctx context.Context) (string, error) {
 	return key, nil
 }
 
+// UploadCerts re-uploads the cluster PKI to the kubeadm-certs Secret, encrypted
+// under the freshly-minted certKey. It mirrors the init path (action.go:runInit):
+// the cert-key is written into the InitConfiguration via --config (a 0600 tmpfs
+// file) so it NEVER appears on argv (B1/B2). The transient config is shredded
+// post-exec. The upstream 2h kubeadm-certs expiry is preserved: we pass no TTL-
+// stripping flag (B3). The config also carries --kubeconfig so the call uses the
+// local admin credentials (ADR-10).
+//
+// Command: kubeadm init phase upload-certs --upload-certs --config <0600-tmpfs>
+//
+// Note: kubeadm init phase upload-certs reads the certificateKey from the
+// InitConfiguration in the --config file (confirmed: the existing runInit path
+// at action.go:91-113 uses the same mechanism and the test asserts no --certificate-
+// key flag appears on argv). No --certificate-key argv flag is used.
+func (m Minter) UploadCerts(ctx context.Context, certKey string) error {
+	if certKey == "" {
+		return fmt.Errorf("upload-certs: certKey must not be empty")
+	}
+
+	// Build a minimal InitConfiguration carrying only the certificateKey. This is
+	// the only field upload-certs reads from the config (it ignores all other
+	// InitConfiguration fields when run as a standalone phase).
+	initCfg := kubeadmconfig.NewInitConfiguration()
+	initCfg.CertificateKey = certKey
+
+	content, err := kubeadmconfig.Marshal(initCfg)
+	if err != nil {
+		return fmt.Errorf("upload-certs: marshal config: %w", err)
+	}
+
+	path, err := securefile.WriteTransient(m.runDir(), content)
+	if err != nil {
+		return fmt.Errorf("upload-certs: write transient config: %w", err)
+	}
+	defer securefile.Shred(path)
+
+	// The cert-key is in the 0600 config file; it must never appear on argv (B1).
+	// --upload-certs is the flag that triggers the actual upload (required).
+	// --kubeconfig ensures we use the local admin credentials.
+	if _, err := m.Runner.Run(ctx,
+		"init", "phase", "upload-certs",
+		"--upload-certs",
+		"--config", path,
+		"--kubeconfig", m.adminConf(),
+	); err != nil {
+		return fmt.Errorf("upload-certs: %w", err)
+	}
+	return nil
+}
+
 // MintJoinMaterial assembles fresh join material on a control-plane node (ADR-10
 // N3 auto-propagation): a bounded-TTL bootstrap token, the cluster CA SPKI pin
 // computed from the local ca.crt, and (for control-plane joins) a fresh
 // certificate key. The operator/management plane surfaces this to a joining node
 // out-of-band; this function only mints, it does not transmit. controlPlane=true
 // includes the certificate key.
+//
+// KEYSTONE (ADR-11 #3): when controlPlane=true, UploadCerts is called atomically
+// after GenerateCertificateKey so the freshly-minted cert-key is guaranteed to
+// match what is stored in the kubeadm-certs Secret. A minted cert-key without a
+// matching upload would cause CP-join to fail or use a stale key. The 2h kubeadm-
+// certs expiry is preserved (B3; no TTL:0 / expiry-strip). The cert-key is never
+// passed on argv (B1) and is not reused (B2: fresh per CP-join call).
 func (m Minter) MintJoinMaterial(ctx context.Context, controlPlane bool, ttl time.Duration) (*JoinMaterial, error) {
 	token, _, err := m.CreateToken(ctx, ttl)
 	if err != nil {
@@ -143,6 +213,12 @@ func (m Minter) MintJoinMaterial(ctx context.Context, controlPlane bool, ttl tim
 		key, err := m.GenerateCertificateKey(ctx)
 		if err != nil {
 			return nil, err
+		}
+		// KEYSTONE: upload-certs paired atomically with the freshly-minted cert-key
+		// (ADR-11 #3 / B2/B3). The cert-key flows through UploadCerts via a 0600
+		// config file, never on argv (B1).
+		if err := m.UploadCerts(ctx, key); err != nil {
+			return nil, fmt.Errorf("mint CP join material: %w", err)
 		}
 		jm.CertificateKey = key
 	}
