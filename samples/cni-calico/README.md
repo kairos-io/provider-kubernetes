@@ -40,7 +40,7 @@ that ALSO installs Calico, so a single file yields a Ready cluster with no manua
 
 - The provider runs `kubeadm init` in its `network.after` stage (as always).
 - The cloud-config additionally installs a small **systemd one-shot**
-  (`kubeswift-cni-install.service` + `/usr/local/bin/kubeswift-install-cni.sh`)
+  (`provider-kubernetes-cni-install.service` + `/usr/local/bin/provider-kubernetes-install-cni.sh`)
   and a `boot`-stage `systemctl enable --now`.
 - That unit **self-waits** for `admin.conf` + a ready API, then server-side-applies
   the Tigera operator and the `Installation` CR, and touches a sentinel so it does
@@ -65,7 +65,7 @@ Requirements and caveats:
 # Dockerfile, using cluster-with-calico.yaml as its cloud-config. Once it is up
 # the node is Ready on its own (no kubectl apply needed):
 kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes
-# journalctl -u kubeswift-cni-install.service   # to watch the bundled install
+# journalctl -u provider-kubernetes-cni-install.service   # to watch the bundled install
 ```
 
 ## Why these settings

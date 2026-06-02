@@ -44,7 +44,7 @@ stages:
   boot:
     - name: stage Calico install assets
       files:
-        - path: /var/lib/kubeswift-cni/installation.yaml
+        - path: /var/lib/provider-kubernetes-cni/installation.yaml
           permissions: 420   # 0644
           owner: 0
           group: 0
@@ -68,7 +68,7 @@ stages:
             metadata:
               name: default
             spec: {}
-        - path: /usr/local/bin/kubeswift-install-cni.sh
+        - path: /usr/local/bin/provider-kubernetes-install-cni.sh
           permissions: 493   # 0755
           owner: 0
           group: 0
@@ -79,9 +79,9 @@ stages:
             set -eu
             export KUBECONFIG=/etc/kubernetes/admin.conf
             KUBECTL=/usr/bin/kubectl
-            SENTINEL=/var/lib/kubeswift-cni/.installed
+            SENTINEL=/var/lib/provider-kubernetes-cni/.installed
             OPERATOR_URL=https://raw.githubusercontent.com/projectcalico/calico/v3.32.0/manifests/tigera-operator.yaml
-            INSTALL_CR=/var/lib/kubeswift-cni/installation.yaml
+            INSTALL_CR=/var/lib/provider-kubernetes-cni/installation.yaml
 
             [ -f "$SENTINEL" ] && { echo "calico already installed"; exit 0; }
 
@@ -112,7 +112,7 @@ stages:
 
             touch "$SENTINEL"
             echo "calico install applied"
-        - path: /etc/systemd/system/kubeswift-cni-install.service
+        - path: /etc/systemd/system/provider-kubernetes-cni-install.service
           permissions: 420   # 0644
           owner: 0
           group: 0
@@ -124,9 +124,9 @@ stages:
             [Service]
             Type=oneshot
             RemainAfterExit=yes
-            ExecStart=/usr/local/bin/kubeswift-install-cni.sh
+            ExecStart=/usr/local/bin/provider-kubernetes-install-cni.sh
             [Install]
             WantedBy=multi-user.target
       commands:
         - systemctl daemon-reload
-        - systemctl enable --now kubeswift-cni-install.service || true
+        - systemctl enable --now provider-kubernetes-cni-install.service || true
