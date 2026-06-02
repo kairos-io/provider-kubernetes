@@ -1,0 +1,144 @@
+#cloud-config
+# Reference cloud-config for creating a Kubernetes cluster with the
+# provider-kubernetes Kairos image. Boot a node with this config to install
+# Kairos to disk, then on the first installed boot the provider runs
+# `kubeadm init` to bring up the control plane.
+#
+# This is the FIRST control-plane node (`role: init`). For additional control
+# planes use `samples/controlplane.yaml`; for workers use `samples/worker.yaml`.
+#
+# STATUS: under active development; not field-ready.
+
+# -----------------------------------------------------------------------------
+# Install — Kairos copies the image to disk on first (LiveCD) boot, then reboots
+# into the installed system.
+# -----------------------------------------------------------------------------
+install:
+  device: "auto"          # or a fixed path like "/dev/sda" / "/dev/vda"
+  auto: true              # run unattended; no prompts
+  reboot: true            # reboot after install completes
+  # nousers: true         # uncomment to allow an install with no admin user
+
+# -----------------------------------------------------------------------------
+# Users — Kairos 3.3+ REQUIRES at least one user in the `admin` group
+# (or `install.nousers: true`). The provider's cluster_token entropy check is
+# unrelated to OS users.
+# -----------------------------------------------------------------------------
+users:
+  - name: kairos
+    groups:
+      - admin
+      - sudo
+    # Use a hashed password in real deployments (openssl passwd -6); plaintext
+    # is acceptable only for throwaway test VMs.
+    passwd: kairos
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAA... your-key-here
+
+hostname: cp-init
+
+# -----------------------------------------------------------------------------
+# Cluster — read by provider-kubernetes (the kairos-sdk clusterplugin contract).
+# -----------------------------------------------------------------------------
+cluster:
+  # A correlation value, not key material. Must be non-empty and >= 16 chars;
+  # the provider warns if estimated entropy < 128 bits. Treat as confidential.
+  cluster_token: "REPLACE-WITH-A-LONG-HIGH-ENTROPY-RANDOM-STRING-AT-LEAST-32-CHARS"
+
+  # IP or hostname every node in the cluster can reach. For a single-node test
+  # under QEMU user-mode networking, 10.0.2.15 is the fixed guest IP.
+  control_plane_host: "192.0.2.10"
+
+  role: init                # init | controlplane | worker
+
+  providerConfig:
+    # Defaults to "/". Override only if Kairos is rooted elsewhere.
+    cluster_root_path: "/"
+
+  # ---------------------------------------------------------------------------
+  # The kubeadm configuration. Three documents, all v1beta4:
+  #   - ClusterConfiguration    (cluster-wide)
+  #   - InitConfiguration       (node-specific bootstrap for `kubeadm init`)
+  #   - KubeletConfiguration    (kubelet defaults)
+  # The provider parses this YAML and merges it with its own defaults; fields
+  # explicitly set here win. Bootstrap tokens, --upload-certs certificateKey,
+  # and the API server's `certSANs` for the local node are added by the
+  # provider at runtime — do NOT set them here.
+  # ---------------------------------------------------------------------------
+  config: |
+    clusterConfiguration:
+      # Must match the bundled kubeadm binary's minor. Out-of-window or
+      # mismatched is a HARD ERROR at boot (fail-fast).
+      kubernetesVersion: v1.34.0
+
+      # Stable endpoint name/IP every node uses. Must equal control_plane_host
+      # (with the API server port). The provider auto-derives this if you
+      # omit it.
+      controlPlaneEndpoint: "192.0.2.10:6443"
+
+      # Image registry. Use registry.k8s.io (the modern path); k8s.gcr.io is
+      # dead. The provider sets this if unset.
+      imageRepository: "registry.k8s.io"
+
+      # Extra SANs to embed in the API server cert. The control_plane_host is
+      # added automatically; list anything else clients use to reach the API.
+      apiServer:
+        certSANs:
+          - "192.0.2.10"
+          - "cp.example.com"
+
+      # CNI subnet allocation. Choose to match the CNI you will install.
+      networking:
+        podSubnet: "10.244.0.0/16"        # Flannel default
+        serviceSubnet: "10.96.0.0/12"     # kube-proxy default
+        dnsDomain: "cluster.local"
+
+    initConfiguration:
+      # Bootstrap token TTL is enforced by the provider (default 1h, never 0);
+      # the token value itself is CSPRNG-generated, never derived from
+      # cluster_token. Do not set `bootstrapTokens` here.
+
+      # The local node's API endpoint (where kube-apiserver binds on this
+      # machine). Often equal to control_plane_host on a single-CP cluster.
+      localAPIEndpoint:
+        advertiseAddress: "192.0.2.10"
+        bindPort: 6443
+
+      nodeRegistration:
+        # Should match what kubelet sees from systemd-resolved / DNS.
+        # Defaults to the node's hostname.
+        # name: cp-init
+
+        # Container runtime endpoint. The bundled image uses containerd on the
+        # standard socket; only change if you swap runtimes.
+        criSocket: "unix:///run/containerd/containerd.sock"
+
+        # Extra kubelet flags (rare). v1beta4 uses a list of {name, value}
+        # rather than a map.
+        # kubeletExtraArgs:
+        #   - name: node-ip
+        #     value: "192.0.2.10"
+
+        # Taints applied to this node at registration. CP nodes get the
+        # standard no-schedule taint by default; uncomment to override.
+        # taints:
+        #   - key: node-role.kubernetes.io/control-plane
+        #     effect: NoSchedule
+
+    kubeletConfiguration:
+      # Kubelet defaults the provider uses unless you override. Common knobs:
+      cgroupDriver: systemd
+      # maxPods: 250
+      # serializeImagePulls: false
+      # featureGates: {}
+
+# -----------------------------------------------------------------------------
+# Additional Kairos stages (optional). Useful for plumbing kubectl access,
+# convenience symlinks, or one-shot tasks. The provider's own yip stage is
+# emitted automatically at `network.after`.
+# -----------------------------------------------------------------------------
+stages:
+  initramfs:
+    - name: kubeconfig symlink
+      commands:
+        - ln -sf /etc/kubernetes/admin.conf /run/kubeconfig

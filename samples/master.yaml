@@ -23,8 +23,10 @@ install:
   reboot: true
 
 users:
+  # Kairos 3.3+ requires at least one user in the 'admin' group for
+  # kairos-agent install to proceed (or set install.nousers: true).
   - name: kairos
-    groups: ["sudo"]
+    groups: ["admin", "sudo"]
     passwd: kairos
 
 cluster:

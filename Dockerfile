@@ -17,6 +17,7 @@
 # image digest as well once a release pipeline lands.
 # ----------------------------------------------------------------------------
 ARG KAIROS_BASE_IMAGE=quay.io/kairos/ubuntu:24.04-core-amd64-generic-v3.5.1
+ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.6.0
 ARG GO_BUILDER_IMAGE=golang:1.26.3-alpine
 ARG TARGETARCH=amd64
 
@@ -32,6 +33,15 @@ ARG CRICTL_VERSION=v1.34.0
 
 # Provider build version (injected into the binary via -ldflags).
 ARG PROVIDER_VERSION=dev
+
+# ----------------------------------------------------------------------------
+# Stage: bring in the kairos-init binary. kairos-init is run as the very last
+# step of the final image to regenerate the initramfs with our bundled binaries
+# in place and to wire the installer machinery for our custom image. Without
+# this step, kairos-installer.service exits 1 and auto-install does not fire on
+# the LiveCD (observed empirically; see build/vmtest/RESULTS.md).
+# ----------------------------------------------------------------------------
+FROM ${KAIROS_INIT_IMAGE} AS kairos-init
 
 # ----------------------------------------------------------------------------
 # Stage: build the provider binary.
@@ -164,3 +174,18 @@ RUN systemctl enable containerd.service kubelet.service
 # Record the bundled Kubernetes version on the image (OS_VERSION style banner
 # kept short; the provider also detects/enforces the version at runtime).
 RUN echo "BUNDLED_KUBERNETES_VERSION=${KUBERNETES_VERSION}" >> /etc/os-release
+
+# --- kairos-init finalize ---------------------------------------------------
+# Regenerates the initramfs and wires the installer machinery for our custom
+# image. MUST be the last layer touched before the build artifact is finalized.
+#
+# kairos-init's --version is strict semver. PROVIDER_VERSION can be a git SHA
+# or 'dev', so we lift it into a synthesized semver (the SHA/string is preserved
+# as semver build metadata after '+').
+ARG PROVIDER_VERSION
+COPY --from=kairos-init /kairos-init /kairos-init
+RUN sanitized=$(printf '%s' "${PROVIDER_VERSION}" | tr -c 'A-Za-z0-9-' '-' | sed 's/^-*//; s/-*$//') \
+ && image_version="v0.0.0-dev+${sanitized:-unset}" \
+ && /kairos-init -l info -m generic --version "${image_version}" \
+ && /kairos-init validate \
+ && rm /kairos-init
