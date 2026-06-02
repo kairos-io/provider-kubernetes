@@ -2,9 +2,16 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrTerminal marks an executor error as a deliberate, non-retryable decision
+// (e.g. refusing to init because the cluster already exists). The Reconciler
+// returns immediately on such an error instead of burning the retry budget on a
+// verdict that will not change. Wrap with fmt.Errorf("%w: ...", ErrTerminal, ...).
+var ErrTerminal = errors.New("terminal")
 
 // Executor performs a single Action. Implementations MUST honor the context
 // deadline and MUST NOT run unbounded work.
@@ -66,6 +73,11 @@ func (r Reconciler) runAction(ctx context.Context, a Action, sleep func(time.Dur
 			return nil
 		}
 		lastErr = err
+
+		// A terminal decision will not change on retry; fail fast (still loud).
+		if errors.Is(err, ErrTerminal) {
+			return fmt.Errorf("terminal on attempt %d: %w", attempt, err)
+		}
 
 		if attempt < r.Budget.MaxAttempts {
 			sleep(backoff(attempt))

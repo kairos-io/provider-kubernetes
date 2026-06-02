@@ -116,7 +116,17 @@ func BuildInput(ctx Context, uc UserConfig, resolvedVersion string) (kubeadmconf
 	// to Run, which logs it; a hard failure (e.g. role=controlplane with no endpoint)
 	// is returned as an error. Returning the warning (rather than mutating ctx, which
 	// is passed by value) ensures the advisory actually reaches the caller.
-	endpointWarn, ferr := ValidateControlPlaneEndpoint(actualstate.Role(ctx.Role), cpEndpoint, host)
+	//
+	// The "is the endpoint just this node's own address" check compares against the
+	// node's real advertiseAddress when set, NOT control_plane_host: an operator who
+	// legitimately points control_plane_host AT the VIP would otherwise trip a false
+	// "endpoint resolves to this node's own IP" advisory. Fall back to the
+	// control_plane_host-derived host only when no advertiseAddress is configured.
+	nodeIP := host
+	if adv := uc.InitConfiguration.LocalAPIEndpoint.AdvertiseAddress; adv != "" {
+		nodeIP = adv
+	}
+	endpointWarn, ferr := ValidateControlPlaneEndpoint(actualstate.Role(ctx.Role), cpEndpoint, nodeIP)
 	if ferr != nil {
 		return kubeadmconfig.Input{}, "", ferr
 	}
