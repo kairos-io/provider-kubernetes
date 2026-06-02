@@ -1,0 +1,175 @@
+name: Release
+
+# Cut a release by pushing a semver tag, e.g.:
+#   git tag -s v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+#
+# Produces, per tag:
+#   - one Kairos image per supported Kubernetes minor, pushed to
+#     ghcr.io/<owner>/provider-kubernetes:<tag>-k8s<minor> (e.g. v0.1.0-k8s1.34).
+#     The newest supported minor is additionally tagged <tag> and latest.
+#   - a GitHub Release with the provider binary + sha256 checksum.
+#
+# NOTE: the ghcr package inherits the repository's visibility. For EXTERNAL
+# testers to pull, make the package public in the org's package settings.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub Release
+  packages: write # push images to ghcr
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Derive the image matrix from the single source of truth (kubeadm.SupportedMinors),
+  # exactly as CI does, plus the newest minor for the default/latest aliases.
+  discover:
+    name: resolve supported version window
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      minors: ${{ steps.minors.outputs.minors }}
+      latest_minor: ${{ steps.minors.outputs.latest_minor }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract SupportedMinors -> JSON matrix
+        id: minors
+        run: |
+          set -euo pipefail
+          minors="$(grep 'SupportedMinors *=' internal/kubeadm/version.go \
+            | grep -oE '[0-9]+\.[0-9]+' \
+            | jq -R . | jq -cs .)"
+          if [ "$minors" = "[]" ]; then
+            echo "could not parse SupportedMinors from version.go" >&2
+            exit 1
+          fi
+          # Newest minor, order-independent (do not rely on slice ordering).
+          latest="$(echo "$minors" | jq -r 'sort_by(split(".")|map(tonumber))|.[-1]')"
+          echo "window: $minors ; newest: $latest"
+          echo "minors=$minors" >> "$GITHUB_OUTPUT"
+          echo "latest_minor=$latest" >> "$GITHUB_OUTPUT"
+
+  # Build and push one image per supported minor.
+  images:
+    name: image ${{ github.ref_name }}-k8s${{ matrix.minor }}
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ${{ fromJSON(needs.discover.outputs.minors) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve Kubernetes patch + crictl versions
+        id: ver
+        run: |
+          set -euo pipefail
+          k8s="$(curl -fsSL "https://dl.k8s.io/release/stable-${{ matrix.minor }}.txt")"
+          case "$k8s" in
+            v${{ matrix.minor }}.*) : ;;
+            *) echo "unexpected patch ${k8s} for minor ${{ matrix.minor }}" >&2; exit 1 ;;
+          esac
+          echo "k8s=${k8s}" >> "$GITHUB_OUTPUT"
+          echo "crictl=v${{ matrix.minor }}.0" >> "$GITHUB_OUTPUT"
+
+      - name: Build, tag and push image
+        env:
+          TAG: ${{ github.ref_name }}
+          MINOR: ${{ matrix.minor }}
+          LATEST_MINOR: ${{ needs.discover.outputs.latest_minor }}
+        run: |
+          set -euo pipefail
+          # Image repo is lowercased ghcr.io/<owner>/<repo> (ghcr requires lowercase).
+          repo="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          minortag="${repo}:${TAG}-k8s${MINOR}"
+          make image \
+            VERSION="${TAG}" \
+            KUBERNETES_VERSION="${{ steps.ver.outputs.k8s }}" \
+            CRICTL_VERSION="${{ steps.ver.outputs.crictl }}" \
+            IMAGE="${minortag}"
+          # Verify the bundled toolchain matches before publishing.
+          got="$(docker run --rm --entrypoint /usr/bin/kubeadm "${minortag}" version -o short)"
+          case "$got" in
+            v${MINOR}.*) echo "verified kubeadm ${got}" ;;
+            *) echo "kubeadm mismatch: want v${MINOR}.x got ${got}" >&2; exit 1 ;;
+          esac
+          docker push "${minortag}"
+          # The newest supported minor also gets the plain <tag> and :latest aliases.
+          if [ "${MINOR}" = "${LATEST_MINOR}" ]; then
+            for alias in "${repo}:${TAG}" "${repo}:latest"; do
+              docker tag "${minortag}" "${alias}"
+              docker push "${alias}"
+            done
+          fi
+
+  # Build the provider binary and publish a GitHub Release with a checksum.
+  binary:
+    name: release binary
+    needs: [discover, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        run: make build VERSION=${{ github.ref_name }}
+
+      - name: Package + checksum
+        run: |
+          set -euo pipefail
+          cd bin
+          tar -czf "agent-provider-kubernetes_${{ github.ref_name }}_linux_amd64.tar.gz" agent-provider-kubernetes
+          sha256sum agent-provider-kubernetes_*.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          MINORS: ${{ needs.discover.outputs.minors }}
+          LATEST_MINOR: ${{ needs.discover.outputs.latest_minor }}
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          # Image list derived from the supported window (single source of truth);
+          # no hardcoded minors here, so the notes never drift as the window rolls.
+          imglist=""
+          for m in $(echo "${MINORS}" | jq -r '.[]'); do
+            imglist="${imglist}${repo}:${TAG}-k8s${m}"$'\n'
+          done
+          notes="$(printf 'Kairos images (one per supported Kubernetes minor):\n```\n%s```\nThe newest supported minor (%s) is also published as `%s:%s` and `%s:latest`.\n\nProvider binary (linux/amd64) attached below. This is a development release; not yet field-ready.\n' \
+            "${imglist}" "${LATEST_MINOR}" "${repo}" "${TAG}" "${repo}")"
+          # Idempotent: update an existing release (e.g. a re-run), else create it.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" bin/agent-provider-kubernetes_*.tar.gz bin/checksums.txt --clobber
+          else
+            gh release create "${TAG}" \
+              bin/agent-provider-kubernetes_*.tar.gz bin/checksums.txt \
+              --title "${TAG}" --notes "${notes}" --prerelease
+          fi
