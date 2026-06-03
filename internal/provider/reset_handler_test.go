@@ -38,7 +38,7 @@ func TestHandleClusterResetRunsReset(t *testing.T) {
 	clusterYAML := "cluster:\n  providerConfig:\n    cluster_root_path: " + root + "\n  role: init\n"
 	fr := &resetFakeRunner{}
 
-	resp := handleClusterReset(resetEvent(t, clusterYAML), fr)
+	resp := handleClusterReset(resetEvent(t, clusterYAML), fr, nil)
 	if resp.Error != "" {
 		t.Fatalf("unexpected error: %s", resp.Error)
 	}
@@ -51,14 +51,14 @@ func TestHandleClusterResetRunsReset(t *testing.T) {
 }
 
 func TestHandleClusterResetNilEventIsSafe(t *testing.T) {
-	if resp := handleClusterReset(nil, &resetFakeRunner{}); resp.Error != "" {
+	if resp := handleClusterReset(nil, &resetFakeRunner{}, nil); resp.Error != "" {
 		t.Fatalf("nil event must be a safe no-op, got %q", resp.Error)
 	}
 }
 
 func TestHandleClusterResetNoClusterIsNoop(t *testing.T) {
 	fr := &resetFakeRunner{}
-	resp := handleClusterReset(resetEvent(t, "other: value\n"), fr)
+	resp := handleClusterReset(resetEvent(t, "other: value\n"), fr, nil)
 	if resp.Error != "" {
 		t.Fatalf("unexpected error: %s", resp.Error)
 	}
@@ -73,7 +73,7 @@ func TestHandleClusterResetRejectsOversizedPayload(t *testing.T) {
 	for i := range big {
 		big[i] = 'a'
 	}
-	resp := handleClusterReset(&pluggable.Event{Data: string(big)}, &resetFakeRunner{})
+	resp := handleClusterReset(&pluggable.Event{Data: string(big)}, &resetFakeRunner{}, nil)
 	if resp.Error == "" {
 		t.Fatal("expected reset to reject oversized payload, got nil error")
 	}
@@ -83,7 +83,7 @@ func TestHandleClusterResetIgnoresTokenValidation(t *testing.T) {
 	// Reset must work even with an empty/invalid cluster_token (no token gate).
 	root := t.TempDir()
 	clusterYAML := "cluster:\n  cluster_token: \"\"\n  providerConfig:\n    cluster_root_path: " + root + "\n"
-	resp := handleClusterReset(resetEvent(t, clusterYAML), &resetFakeRunner{})
+	resp := handleClusterReset(resetEvent(t, clusterYAML), &resetFakeRunner{}, nil)
 	if resp.Error != "" {
 		t.Fatalf("reset must not fail on empty token, got %q", resp.Error)
 	}

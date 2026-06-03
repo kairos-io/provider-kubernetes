@@ -17,6 +17,11 @@ const (
 	// ReconcileLogPath is where the boot-time reconcile subcommand writes its
 	// stdout/stderr; surfacing failures to operators (OQ-4 logs-only for v1).
 	ReconcileLogPath = "/var/log/provider-kubernetes-reconcile.log"
+
+	// The Layer-1 structured status paths are defined in internal/status:
+	//   status.StatusRunPath = "/run/provider-kubernetes/status.yaml"  (tmpfs, 0640)
+	//   status.StatusLogPath = "/var/log/provider-kubernetes/status.yaml"  (persistent, 0640)
+	// See ADR-4-S for the full design.
 )
 
 // Context is the parsed, validated provider input derived from a Cluster. It is a
