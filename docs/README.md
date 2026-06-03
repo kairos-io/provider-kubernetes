@@ -25,6 +25,7 @@ Usage documentation for **provider-kubernetes**, the Go-native
 | [CNI](./cni.md) | Installing a CNI (the provider installs none). |
 | [Security model](./security.md) | `cluster_token`, certificate-key blast radius, CA pinning, at-rest encryption, the trust boundary. |
 | [Lifecycle and reset](./lifecycle.md) | Reboot idempotency, reset / `EventClusterReset`, the supported version window, upgrades. |
+| [Node status](./status.md) | Why a node did or did not converge: the local status file and the own-Node annotations. |
 | [Troubleshooting](./troubleshooting.md) | Where logs are, common failures, and what "fail loud, never hang" means in practice. |
 
 ## How it works in one paragraph

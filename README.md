@@ -181,6 +181,7 @@ Usage documentation lives in [`docs/`](./docs/):
 | [CNI](./docs/cni.md) | Installing a CNI. |
 | [Security model](./docs/security.md) | Tokens, the cert-key blast radius, CA pinning, at-rest encryption. |
 | [Lifecycle and reset](./docs/lifecycle.md) | Reconcile, reset, the version window, upgrades. |
+| [Node status](./docs/status.md) | Why a node did or did not converge: status file + Node annotations. |
 | [Troubleshooting](./docs/troubleshooting.md) | Logs, common failures, filing issues. |
 
 ## Contributing

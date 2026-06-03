@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/kairos-io/kairos-sdk/bus"
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
@@ -12,22 +13,25 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
+	"github.com/kairos-io/provider-kubernetes/internal/reconcile/actualstate"
 	"github.com/kairos-io/provider-kubernetes/internal/reset"
+	"github.com/kairos-io/provider-kubernetes/internal/status"
+	"github.com/kairos-io/provider-kubernetes/version"
 )
 
 // HandleClusterReset is the Kairos "cluster.reset" event handler. It parses the
 // payload and performs a bounded, idempotent reset (ADR-4). It deliberately does
 // NOT run cluster_token validation: reset must succeed regardless of token state.
 func HandleClusterReset(event *pluggable.Event) pluggable.EventResponse {
-	return handleClusterReset(event, kubeadm.ExecRunner{})
+	return handleClusterReset(event, kubeadm.ExecRunner{}, status.NewFileSink())
 }
 
 // maxResetPayloadBytes caps the event payload size before unmarshaling, to bound
 // CPU/memory of (in-process but still untrusted-by-shape) YAML/JSON parsing.
 const maxResetPayloadBytes = 1 << 20 // 1 MiB
 
-// handleClusterReset is the testable core (runner injected).
-func handleClusterReset(event *pluggable.Event, runner kubeadm.Runner) pluggable.EventResponse {
+// handleClusterReset is the testable core (runner and sink injected).
+func handleClusterReset(event *pluggable.Event, runner kubeadm.Runner, sink status.StatusSink) pluggable.EventResponse {
 	var resp pluggable.EventResponse
 	if event == nil {
 		return resp
@@ -69,12 +73,35 @@ func handleClusterReset(event *pluggable.Event, runner kubeadm.Runner) pluggable
 	}
 
 	logrus.Infof("provider-kubernetes: handling cluster reset (root=%s)", rootPath)
-	if err := reset.Run(context.Background(), reset.Options{
+	resetErr := reset.Run(context.Background(), reset.Options{
 		Runner:    runner,
 		RootPath:  rootPath,
 		CRISocket: criSocket,
-	}); err != nil {
-		resp.Error = fmt.Sprintf("cluster reset: %s", err)
+	})
+
+	// S4: write terminal reset status. Best-effort, bounded, swallowed on error.
+	writeResetStatus(sink, actualstate.Role(string(config.Cluster.Role)), resetErr)
+
+	if resetErr != nil {
+		resp.Error = fmt.Sprintf("cluster reset: %s", resetErr)
 	}
 	return resp
+}
+
+// writeResetStatus records a terminal Phase=Reset status after a cluster reset.
+// It is best-effort: write errors are swallowed so they never mask the reset result.
+func writeResetStatus(sink status.StatusSink, role actualstate.Role, resetErr error) {
+	if sink == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sink.Record(ctx, status.BuildStatus(status.BuildParams{
+		Role:     role,
+		IsReset:  true,
+		ResetErr: resetErr,
+		Now:      time.Now().UTC().Format(time.RFC3339),
+		BootID:   readBootID(),
+		Version:  version.Version,
+	}))
 }

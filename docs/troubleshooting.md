@@ -2,6 +2,12 @@
 
 ## Where to look first
 
+- **Status file (start here):** `/run/provider-kubernetes/status.yaml` (current
+  boot) or `/var/log/provider-kubernetes/status.yaml` (persists across reboot). A
+  one-glance `phase` / `reason` / `message` summary of why the node did or did not
+  converge, plus whether the failure is `terminal`. On a cluster member the same
+  outcome is also on the Node as `provider-kubernetes.kairos.io/*` annotations. See
+  [Node status](./status.md).
 - **Reconcile log:** `/var/log/provider-kubernetes-reconcile.log` on the node. It
   records the role, observed membership, the planned actions, and any bounded
   failure (with kubeadm output, secret-sanitized).
