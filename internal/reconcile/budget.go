@@ -18,12 +18,41 @@ type Budget struct {
 	Total time.Duration
 }
 
-// DefaultBudget returns conservative bounded defaults. These exist so that an
-// unbounded operation is impossible by construction; tune per-action as needed.
+// DefaultBudget returns the bounded default applied to every non-upgrade action
+// (run-init, run-join, wait-for-control-plane). Sizing reflects two facts:
+//
+//   - PerAttempt=6m: the production image bundles the kubeadm/kubelet binaries but
+//     does NOT pre-pull the control-plane container images (etcd, apiserver,
+//     controller-manager, scheduler), so a real first-boot `kubeadm init` PULLS
+//     those images and then waits for them to become healthy. On a slow node this
+//     can run 3-6 minutes; the old 2m deadline SIGKILL-ed kubeadm via the expired
+//     context. 6m gives a cold init genuine headroom.
+//   - Total=8m (NOT PerAttempt*MaxAttempts): Total is the hard wall-clock ceiling
+//     and is deliberately the lever that bounds FAILURE-detection latency. The
+//     worst case is a node pointed at an unreachable control-plane endpoint
+//     (the [wait-for-control-plane, run-join] plan): wait-for-control-plane polls
+//     until its context expires, so its surfacing time is driven by the budget.
+//     With Total=8m the first 6m attempt runs in full, the second attempt starts
+//     but is capped by the remaining 2m, and the failure surfaces at ~8m -- the
+//     same ceiling the old 3x2m budget produced, NOT the ~12m a 2x6m budget would.
+//     This preserves fail-fast responsiveness (design principle 4 / #4099-1) while
+//     still tolerating a transient blip via the partial second attempt.
+//
+// MaxAttempts=2 (down from 3): with a 6m PerAttempt window each attempt already
+// absorbs short transient failures, so the second attempt is a safety net rather
+// than a retry loop. Note Total < PerAttempt*MaxAttempts by design: Total wins, so
+// the second attempt may be truncated. This is intentional -- the ceiling on how
+// long a failing node may block later Kairos boot stages is the priority.
+//
+// KNOWN LIMITATION (follow-up: per-action budgets): a single global PerAttempt
+// conflates a slow legitimate waiter (cold init) with a pure reachability probe
+// (wait-for-control-plane against a bad endpoint), which ideally fails in ~60-90s.
+// Splitting these requires the Reconciler to select a budget per Action; that
+// wiring is a separate slice. Until then Total=8m caps the bad-endpoint case.
 func DefaultBudget() Budget {
 	return Budget{
-		PerAttempt:  2 * time.Minute,
-		MaxAttempts: 3,
+		PerAttempt:  6 * time.Minute,
+		MaxAttempts: 2,
 		Total:       8 * time.Minute,
 	}
 }

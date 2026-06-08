@@ -173,3 +173,105 @@ jobs:
           need "$uc_help" --config "init phase upload-certs"
 
           echo "OK: kubeadm ${{ matrix.minor }} exposes the upgrade-path subcommands/flags"
+
+  # ADR-13 Tier-1 e2e suite: real kubeadm in a privileged systemd node container.
+  # Runs all scenarios in test/e2e/ (init-converge, reset, init-clobber-refusal,
+  # upgrade-skew-refusal, worker-join) against the real provider binary.
+  #
+  # SECURITY NOTE (privileged containers, ADR-13 E3 gate): the e2e node container
+  # must run --privileged because kubeadm/kubelet/containerd/etcd require real
+  # cgroup v2 control, mount namespaces, netns creation, and /sys/fs/cgroup write
+  # access -- unavailable without privilege inside a container. This is the same
+  # constraint kind (Kubernetes-in-Docker) has. The only image that runs privileged
+  # is OUR OWN built kairos-kubeadm-e2e-node image, derived from the kairos-kubeadm
+  # base we build in this same job from the checkout source. No third-party image
+  # is ever pulled. Ephemeral per-run kubeadm bootstrap tokens (bounded TTL, never
+  # persisted) are the only secrets; no long-lived credentials are embedded. Teardown
+  # is guaranteed: t.Cleanup registers docker rm -fv per container, and the failure
+  # step below sweeps leaked containers by label.
+  #
+  # Image strategy: option (a) -- rebuild kairos-kubeadm + e2e-node in this job
+  # using the same stable-<minor>.txt patch-resolution as the image job. This is
+  # self-contained (no artifact upload/download between jobs), fault-isolated
+  # per-minor-leg, and avoids docker/actions-artifact size limits. The ~4 min
+  # build overhead is well within the 30 min per-leg timeout.
+  #
+  # GitHub-hosted ubuntu-latest supports --privileged containers, /boot/config-*,
+  # and /lib/modules. The harness mounts those read-only so kubeadm's
+  # SystemVerification preflight can read the kernel config without relaxing any
+  # preflight check.
+  e2e:
+    name: e2e (k8s ${{ matrix.minor }})
+    needs: discover
+    # SECURITY (ADR-13 E3, security-architect R1): this job runs a --privileged
+    # node container (real kubeadm/kubelet/containerd) on attacker-influenceable
+    # PR code. The load-bearing controls are: (1) GitHub-HOSTED ephemeral runner
+    # only -- NEVER a self-hosted runner; (2) NO secrets and an explicit
+    # read-only token (below) -- NEVER add secrets or packages:write; (3) the
+    # `pull_request` trigger (NOT pull_request_target), so fork PRs get no secrets.
+    # These four conditions, not the container flags, are what contain a hostile PR.
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ${{ fromJSON(needs.discover.outputs.minors) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Resolve Kubernetes patch + crictl versions
+        id: ver
+        run: |
+          set -euo pipefail
+          k8s="$(curl -fsSL "https://dl.k8s.io/release/stable-${{ matrix.minor }}.txt")"
+          case "$k8s" in
+            v${{ matrix.minor }}.*) : ;;
+            *) echo "unexpected patch ${k8s} for minor ${{ matrix.minor }}" >&2; exit 1 ;;
+          esac
+          crictl="v${{ matrix.minor }}.0"
+          echo "k8s=${k8s} crictl=${crictl}"
+          echo "k8s=${k8s}" >> "$GITHUB_OUTPUT"
+          echo "crictl=${crictl}" >> "$GITHUB_OUTPUT"
+
+      - name: Build kairos-kubeadm base image
+        run: |
+          make image \
+            VERSION=ci-${{ matrix.minor }} \
+            KUBERNETES_VERSION=${{ steps.ver.outputs.k8s }} \
+            CRICTL_VERSION=${{ steps.ver.outputs.crictl }} \
+            IMAGE=kairos-kubeadm:${{ steps.ver.outputs.k8s }}
+
+      - name: Build e2e node image
+        run: |
+          make e2e-node-image \
+            KUBERNETES_VERSION=${{ steps.ver.outputs.k8s }} \
+            BASE_IMAGE=kairos-kubeadm:${{ steps.ver.outputs.k8s }} \
+            E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:${{ steps.ver.outputs.k8s }}
+
+      - name: Run e2e suite
+        run: |
+          E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:${{ steps.ver.outputs.k8s }} \
+          E2E_KUBERNETES_VERSION=${{ steps.ver.outputs.k8s }} \
+          go test -tags e2e -count=1 -timeout 45m -v ./test/e2e/...
+
+      - name: Prune e2e container volumes and images on failure
+        if: failure()
+        run: |
+          docker ps -aq --filter 'label=provider-kubernetes-e2e=1' \
+            | xargs -r docker rm -fv || true
+          docker image rm -f \
+            "kairos-kubeadm-e2e-node:${{ steps.ver.outputs.k8s }}" \
+            "kairos-kubeadm:${{ steps.ver.outputs.k8s }}" || true
+          docker volume prune -f || true
