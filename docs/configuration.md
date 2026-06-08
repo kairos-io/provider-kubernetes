@@ -111,9 +111,23 @@ Notes:
 ## Externally-managed control planes
 
 You can join a control plane the provider did not bootstrap. Supply the trust
-anchor explicitly: a `discovery.bootstrapToken` with `caCertHashes`, or a
-CA-embedded discovery file. If you supply both `CACerts` (via the cloud-config)
-and explicit `caCertHashes`, they are cross-validated and a mismatch fails loud.
+anchor explicitly, in any of these ways:
+
+- `ca_certs` (the CA certificate in PEM form) with a `discovery.bootstrapToken`
+  token: the provider derives the SPKI pin from the PEM for you. You do not need
+  to precompute a hash.
+- a `discovery.bootstrapToken` with explicit `caCertHashes` (precomputed
+  `sha256:...` SPKI pins).
+- a CA-embedded discovery file (`discovery.file.kubeConfigPath`).
+
+If you supply both `ca_certs` and explicit `caCertHashes`, they are
+cross-validated and a mismatch fails loud. CA pinning is mandatory in every case;
+`unsafeSkipCAVerification` is never set.
+
+This path is exercised end-to-end in CI: an e2e scenario stands up a control plane
+with plain `kubeadm init` (the provider never touches it), then joins a worker
+through the provider using only the operator-supplied CA PEM, asserting the
+provider derives the pin and the worker registers on the external control plane.
 
 ## Proxy environment
 
