@@ -18,7 +18,7 @@
 # ----------------------------------------------------------------------------
 ARG KAIROS_BASE_IMAGE=quay.io/kairos/ubuntu:24.04-core-amd64-generic-v3.5.1
 ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.6.0
-ARG GO_BUILDER_IMAGE=golang:1.26.3-alpine
+ARG GO_BUILDER_IMAGE=golang:1.26.4-alpine
 ARG TARGETARCH=amd64
 
 # Kubernetes (must be within the supported window the provider enforces at
