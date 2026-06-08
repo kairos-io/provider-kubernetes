@@ -30,6 +30,7 @@ import (
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 	"github.com/kairos-io/provider-kubernetes/internal/provider"
+	"github.com/kairos-io/provider-kubernetes/internal/reset"
 	"github.com/kairos-io/provider-kubernetes/version"
 )
 
@@ -39,6 +40,8 @@ func main() {
 		switch args[0] {
 		case "reconcile":
 			os.Exit(runReconcile(args[1:]))
+		case "reset":
+			os.Exit(runReset(args[1:]))
 		case "mint-join":
 			os.Exit(runMintJoin(args[1:]))
 		case "version", "--version", "-v":
@@ -162,12 +165,62 @@ func runMintJoin(args []string) int {
 	return 0
 }
 
+// runReset performs a bounded cluster reset from a serialized Cluster YAML, exactly
+// as HandleClusterReset does for the pluggable event. This subcommand is the e2e
+// harness's entry point for the reset scenario (ADR-13 Tier-1 scenario 3); it is
+// also a useful operator escape hatch. It reads the cluster_root_path from
+// ProviderOptions and the optional CRI socket from the user config, then calls
+// reset.Run -- no shell, no interpolation, bounded (design principle 1 / #4099-1).
+func runReset(args []string) int {
+	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
+	clusterFile := fs.String("cluster-file", provider.ClusterStatePath, "path to the serialized Cluster YAML")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+
+	logrus.Infof("provider-kubernetes reset %s: reading %s", version.Version, *clusterFile)
+
+	data, err := os.ReadFile(*clusterFile)
+	if err != nil {
+		logrus.Errorf("read cluster file: %v", err)
+		return 1
+	}
+	var cluster clusterplugin.Cluster
+	if err := yaml.Unmarshal(data, &cluster); err != nil {
+		logrus.Errorf("parse cluster file: %v", err)
+		return 1
+	}
+
+	rootPath := "/"
+	if v := cluster.ProviderOptions["cluster_root_path"]; v != "" {
+		rootPath = v
+	}
+
+	var criSocket string
+	if uc, ucErr := provider.ParseUserConfig(cluster.Options); ucErr == nil {
+		criSocket = uc.InitConfiguration.NodeRegistration.CRISocket
+	}
+
+	if err := reset.Run(context.Background(), reset.Options{
+		Runner:    kubeadm.ExecRunner{},
+		RootPath:  rootPath,
+		CRISocket: criSocket,
+	}); err != nil {
+		logrus.Errorf("cluster reset: %v", err)
+		return 1
+	}
+	logrus.Info("provider-kubernetes reset: done")
+	return 0
+}
+
 func printUsage(w *os.File) {
 	_, _ = fmt.Fprintf(w, `agent-provider-kubernetes %s
 
 Usage:
   agent-provider-kubernetes                 run the Kairos clusterplugin event handler (default)
   agent-provider-kubernetes reconcile [...] run one bounded reconcile pass for a serialized Cluster
+  agent-provider-kubernetes reset [...]     run a bounded cluster reset from a serialized Cluster
   agent-provider-kubernetes mint-join [...] mint join material on a CP and print a join cloud-config
   agent-provider-kubernetes version         print the build version
 
