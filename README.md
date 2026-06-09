@@ -146,8 +146,35 @@ docker pull ghcr.io/kairos-io/provider-kubernetes:latest
 Each release also attaches the provider binary (linux/amd64) plus a sha256
 checksum. **These are development releases and are not field-ready.**
 
+### Verifying a release
+
+Every published image and the release binary carry **keyless SLSA build-provenance
+and SPDX SBOM attestations**, signed via the release workflow's OIDC identity (no
+private key). Verify them with the GitHub CLI -- no extra tooling:
+
+```sh
+# Image -- verify by digest (resolve it first so you verify the exact bytes):
+digest=$(docker buildx imagetools inspect \
+  ghcr.io/kairos-io/provider-kubernetes:v0.2.0-k8s1.34 \
+  --format '{{.Manifest.Digest}}')
+gh attestation verify \
+  oci://ghcr.io/kairos-io/provider-kubernetes@${digest} \
+  --repo kairos-io/provider-kubernetes
+
+# Binary tarball (downloaded from the GitHub Release):
+gh attestation verify \
+  agent-provider-kubernetes_v0.2.0_linux_amd64.tar.gz \
+  --repo kairos-io/provider-kubernetes
+```
+
+A successful verification confirms the artifact was built by this repository's
+`Release` workflow from a tagged commit. Add `--predicate-type
+https://spdx.dev/Document/v2.3` to verify the SBOM attestation specifically. See
+[`docs/testing.md`](./docs/testing.md) for the full supply-chain picture.
+
 Maintainers cut a release by pushing a signed semver tag; the `Release` workflow
-builds + pushes the per-minor images and creates the GitHub Release:
+builds + pushes the per-minor images (with attestations) and creates the GitHub
+Release:
 
 ```sh
 git tag -s v0.2.0 -m "v0.2.0" && git push origin v0.2.0

@@ -167,6 +167,36 @@ maintainer keeps the run logs and results locally (under `build/vmtest/`, which 
 git-ignored). When you change anything in those areas, run the relevant smoke
 before release and record the outcome.
 
+## Release artifact provenance
+
+Testing proves the software behaves; provenance proves the artifact a tester pulls
+is the one CI built. The two halves of the supply chain:
+
+- **Build-time (inputs):** the `Dockerfile` checksum-verifies every binary it
+  downloads (kubeadm/kubelet/kubectl/containerd/runc/CNI) against the publisher's
+  HTTPS-served `.sha256`.
+- **Publish-time (outputs):** the `Release` workflow attaches, to every published
+  image (by digest) and to the release binary, a **keyless SLSA build-provenance
+  attestation** and an **SPDX SBOM attestation**, signed via the workflow's OIDC
+  identity (no private key, ADR-15). The release job self-verifies its own
+  attestations before publishing, so a broken signing step fails the release rather
+  than reaching a tester.
+
+Verify with the GitHub CLI (no extra tooling):
+
+```sh
+# image, by digest:
+gh attestation verify oci://ghcr.io/kairos-io/provider-kubernetes@sha256:<digest> \
+  --repo kairos-io/provider-kubernetes
+# binary:
+gh attestation verify agent-provider-kubernetes_<tag>_linux_amd64.tar.gz \
+  --repo kairos-io/provider-kubernetes
+```
+
+Add `--predicate-type https://spdx.dev/Document/v2.3` to check the SBOM
+attestation specifically (the version suffix tracks the SBOM's SPDX version). See the [README](../README.md#verifying-a-release) for the
+digest-resolution one-liner.
+
 ## See also
 
 - [Lifecycle and reset](./lifecycle.md) -- the reconcile model the e2e exercises.
