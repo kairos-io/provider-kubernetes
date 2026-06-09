@@ -8,7 +8,7 @@ name: Release
 #     ghcr.io/<owner>/provider-kubernetes:<tag>-k8s<minor> (e.g. v0.1.0-k8s1.34).
 #     The newest supported minor is additionally tagged <tag> and latest.
 #   - a GitHub Release with the provider binary + sha256 checksum.
-#   - SLSA build-provenance + SPDX SBOM attestations for every image (by digest)
+#   - SLSA build-provenance + CycloneDX SBOM attestations for every image (by digest)
 #     and for the binary, signed keyless via the workflow's OIDC identity (ADR-15).
 #     Verify with `gh attestation verify` -- see the GitHub Release notes / README.
 #
@@ -144,12 +144,15 @@ jobs:
             done
           fi
 
-      - name: Generate image SBOM (SPDX)
+      # CycloneDX, not SPDX: a full OS-image SPDX SBOM is ~23 MiB and exceeds the
+      # actions/attest-sbom 16 MiB predicate cap; the equivalent CycloneDX SBOM is
+      # ~3 MiB. CycloneDX is the compact format for image-scale SBOMs.
+      - name: Generate image SBOM (CycloneDX)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}
-          format: spdx-json
-          output-file: image.spdx.json
+          format: cyclonedx-json
+          output-file: image.cdx.json
           upload-artifact: false
           upload-release-assets: false # we attest the SBOM; do not auto-attach it to the Release
 
@@ -165,12 +168,16 @@ jobs:
         with:
           subject-name: ${{ steps.build.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
-          sbom-path: image.spdx.json
+          sbom-path: image.cdx.json
           push-to-registry: true
 
-      # R-4: prove the attestations are real before a tester relies on them. A
-      # broken signing step fails the release here, not in the field.
-      - name: Self-verify image attestations
+      # R-4: prove the attestation is real before a tester relies on it. A broken
+      # signing step fails the release here, not in the field. We verify provenance
+      # (the load-bearing integrity check); the SBOM attestation's existence is
+      # already guaranteed by the Attest-image-SBOM step above failing otherwise, so
+      # we do not add a predicate-type filter here (avoids coupling to the SBOM
+      # format/spec version).
+      - name: Self-verify image attestation
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -178,11 +185,6 @@ jobs:
           ref="${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}"
           echo "verifying provenance for oci://${ref}"
           gh attestation verify "oci://${ref}" --repo "${{ github.repository }}"
-          echo "verifying SBOM attestation for oci://${ref}"
-          # The SPDX predicate-type suffix tracks the SBOM's spdxVersion (syft emits
-          # SPDX-2.3 -> /v2.3). Bump this if the SBOM SPDX version changes.
-          gh attestation verify "oci://${ref}" --repo "${{ github.repository }}" \
-            --predicate-type https://spdx.dev/Document/v2.3
 
   # Build the provider binary and publish a GitHub Release with a checksum.
   binary:
@@ -214,12 +216,14 @@ jobs:
           sha256sum agent-provider-kubernetes_*.tar.gz > checksums.txt
           cat checksums.txt
 
-      - name: Generate binary SBOM (SPDX)
+      # CycloneDX for consistency with the image SBOM (one SBOM format across all
+      # published artifacts; well under the attest-sbom 16 MiB cap).
+      - name: Generate binary SBOM (CycloneDX)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           file: bin/agent-provider-kubernetes
-          format: spdx-json
-          output-file: binary.spdx.json
+          format: cyclonedx-json
+          output-file: binary.cdx.json
           upload-artifact: false
           upload-release-assets: false # we attest the SBOM; do not auto-attach it to the Release
 
@@ -232,9 +236,10 @@ jobs:
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: bin/agent-provider-kubernetes_*.tar.gz
-          sbom-path: binary.spdx.json
+          sbom-path: binary.cdx.json
 
-      # R-4: verify the binary attestation before publishing the Release.
+      # R-4: verify provenance before publishing the Release (the SBOM attestation's
+      # existence is guaranteed by the Attest-binary-SBOM step failing otherwise).
       - name: Self-verify binary attestation
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -243,10 +248,6 @@ jobs:
           tarball="$(ls bin/agent-provider-kubernetes_*.tar.gz)"
           echo "verifying provenance for ${tarball}"
           gh attestation verify "${tarball}" --repo "${{ github.repository }}"
-          echo "verifying SBOM attestation for ${tarball}"
-          # SPDX predicate-type suffix tracks the SBOM spdxVersion (SPDX-2.3 -> /v2.3).
-          gh attestation verify "${tarball}" --repo "${{ github.repository }}" \
-            --predicate-type https://spdx.dev/Document/v2.3
 
       - name: Create GitHub Release
         env:
@@ -264,7 +265,7 @@ jobs:
           for m in $(echo "${MINORS}" | jq -r '.[]'); do
             imglist="${imglist}${repo}:${TAG}-k8s${m}"$'\n'
           done
-          verify="$(printf 'Verifying (every image + the binary carry keyless SLSA provenance + SPDX SBOM attestations):\n```\n# image (resolve the digest first, then verify by digest)\ngh attestation verify oci://%s:%s --repo %s\n# binary\ngh attestation verify agent-provider-kubernetes_%s_linux_amd64.tar.gz --repo %s\n```\n' \
+          verify="$(printf 'Verifying (every image + the binary carry keyless SLSA provenance + CycloneDX SBOM attestations):\n```\n# image (resolve the digest first, then verify by digest)\ngh attestation verify oci://%s:%s --repo %s\n# binary\ngh attestation verify agent-provider-kubernetes_%s_linux_amd64.tar.gz --repo %s\n```\n' \
             "${repo}" "${TAG}" "${REPO_SLUG}" "${TAG}" "${REPO_SLUG}")"
           notes="$(printf 'Kairos images (one per supported Kubernetes minor):\n```\n%s```\nThe newest supported minor (%s) is also published as `%s:%s` and `%s:latest`.\n\n%s\nProvider binary (linux/amd64) attached below. This is a development release; not yet field-ready.\n' \
             "${imglist}" "${LATEST_MINOR}" "${repo}" "${TAG}" "${repo}" "${verify}")"

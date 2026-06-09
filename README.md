@@ -149,7 +149,7 @@ checksum. **These are development releases and are not field-ready.**
 ### Verifying a release
 
 Every published image and the release binary carry **keyless SLSA build-provenance
-and SPDX SBOM attestations**, signed via the release workflow's OIDC identity (no
+and CycloneDX SBOM attestations**, signed via the release workflow's OIDC identity (no
 private key). Verify them with the GitHub CLI -- no extra tooling:
 
 ```sh
@@ -168,8 +168,9 @@ gh attestation verify \
 ```
 
 A successful verification confirms the artifact was built by this repository's
-`Release` workflow from a tagged commit. Add `--predicate-type
-https://spdx.dev/Document/v2.3` to verify the SBOM attestation specifically. See
+`Release` workflow from a tagged commit. That command checks the provenance; add
+`--predicate-type https://cyclonedx.org/bom` to verify the CycloneDX SBOM
+attestation specifically. See
 [`docs/testing.md`](./docs/testing.md) for the full supply-chain picture.
 
 Maintainers cut a release by pushing a signed semver tag; the `Release` workflow
