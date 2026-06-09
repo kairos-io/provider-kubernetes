@@ -8,6 +8,9 @@ name: Release
 #     ghcr.io/<owner>/provider-kubernetes:<tag>-k8s<minor> (e.g. v0.1.0-k8s1.34).
 #     The newest supported minor is additionally tagged <tag> and latest.
 #   - a GitHub Release with the provider binary + sha256 checksum.
+#   - SLSA build-provenance + SPDX SBOM attestations for every image (by digest)
+#     and for the binary, signed keyless via the workflow's OIDC identity (ADR-15).
+#     Verify with `gh attestation verify` -- see the GitHub Release notes / README.
 #
 # NOTE: the ghcr package inherits the repository's visibility. For EXTERNAL
 # testers to pull, make the package public in the org's package settings.
@@ -17,9 +20,10 @@ on:
     tags:
       - "v*"
 
+# Least privilege at the top; each job widens to exactly what it needs
+# (images: push + attest; binary: release + attest). See ADR-15.
 permissions:
-  contents: write # create the GitHub Release
-  packages: write # push images to ghcr
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -62,6 +66,10 @@ jobs:
     needs: discover
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      packages: write # push images to ghcr
+      id-token: write # keyless OIDC identity for attestation signing
+      attestations: write # write provenance + SBOM attestations
     strategy:
       fail-fast: false
       matrix:
@@ -93,6 +101,7 @@ jobs:
           echo "crictl=v${{ matrix.minor }}.0" >> "$GITHUB_OUTPUT"
 
       - name: Build, tag and push image
+        id: build
         env:
           TAG: ${{ github.ref_name }}
           MINOR: ${{ matrix.minor }}
@@ -114,7 +123,20 @@ jobs:
             *) echo "kubeadm mismatch: want v${MINOR}.x got ${got}" >&2; exit 1 ;;
           esac
           docker push "${minortag}"
+          # Capture the immutable digest of what we just pushed. Attestation MUST
+          # target the digest, never a tag (ADR-15). RepoDigests is populated after
+          # the push; pin to this repo's entry.
+          digest="$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "${minortag}" \
+            | grep "^${repo}@" | head -1 | sed 's/.*@//')"
+          case "$digest" in
+            sha256:*) echo "pushed digest ${digest}" ;;
+            *) echo "failed to resolve pushed digest for ${minortag}" >&2; exit 1 ;;
+          esac
+          echo "image=${repo}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           # The newest supported minor also gets the plain <tag> and :latest aliases.
+          # These are the SAME digest (docker tag of the same image), so the single
+          # digest attestation below covers all three tags.
           if [ "${MINOR}" = "${LATEST_MINOR}" ]; then
             for alias in "${repo}:${TAG}" "${repo}:latest"; do
               docker tag "${minortag}" "${alias}"
@@ -122,12 +144,56 @@ jobs:
             done
           fi
 
+      - name: Generate image SBOM (SPDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: image.spdx.json
+          upload-artifact: false
+          upload-release-assets: false # we attest the SBOM; do not auto-attach it to the Release
+
+      - name: Attest image build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ steps.build.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest image SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.build.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: image.spdx.json
+          push-to-registry: true
+
+      # R-4: prove the attestations are real before a tester relies on them. A
+      # broken signing step fails the release here, not in the field.
+      - name: Self-verify image attestations
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ref="${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}"
+          echo "verifying provenance for oci://${ref}"
+          gh attestation verify "oci://${ref}" --repo "${{ github.repository }}"
+          echo "verifying SBOM attestation for oci://${ref}"
+          # The SPDX predicate-type suffix tracks the SBOM's spdxVersion (syft emits
+          # SPDX-2.3 -> /v2.3). Bump this if the SBOM SPDX version changes.
+          gh attestation verify "oci://${ref}" --repo "${{ github.repository }}" \
+            --predicate-type https://spdx.dev/Document/v2.3
+
   # Build the provider binary and publish a GitHub Release with a checksum.
   binary:
     name: release binary
     needs: [discover, images]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # keyless OIDC identity for attestation signing
+      attestations: write # write provenance + SBOM attestations
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -148,12 +214,47 @@ jobs:
           sha256sum agent-provider-kubernetes_*.tar.gz > checksums.txt
           cat checksums.txt
 
+      - name: Generate binary SBOM (SPDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          file: bin/agent-provider-kubernetes
+          format: spdx-json
+          output-file: binary.spdx.json
+          upload-artifact: false
+          upload-release-assets: false # we attest the SBOM; do not auto-attach it to the Release
+
+      - name: Attest binary build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: bin/agent-provider-kubernetes_*.tar.gz
+
+      - name: Attest binary SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: bin/agent-provider-kubernetes_*.tar.gz
+          sbom-path: binary.spdx.json
+
+      # R-4: verify the binary attestation before publishing the Release.
+      - name: Self-verify binary attestation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tarball="$(ls bin/agent-provider-kubernetes_*.tar.gz)"
+          echo "verifying provenance for ${tarball}"
+          gh attestation verify "${tarball}" --repo "${{ github.repository }}"
+          echo "verifying SBOM attestation for ${tarball}"
+          # SPDX predicate-type suffix tracks the SBOM spdxVersion (SPDX-2.3 -> /v2.3).
+          gh attestation verify "${tarball}" --repo "${{ github.repository }}" \
+            --predicate-type https://spdx.dev/Document/v2.3
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           MINORS: ${{ needs.discover.outputs.minors }}
           LATEST_MINOR: ${{ needs.discover.outputs.latest_minor }}
+          REPO_SLUG: ${{ github.repository }}
         run: |
           set -euo pipefail
           repo="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
@@ -163,8 +264,10 @@ jobs:
           for m in $(echo "${MINORS}" | jq -r '.[]'); do
             imglist="${imglist}${repo}:${TAG}-k8s${m}"$'\n'
           done
-          notes="$(printf 'Kairos images (one per supported Kubernetes minor):\n```\n%s```\nThe newest supported minor (%s) is also published as `%s:%s` and `%s:latest`.\n\nProvider binary (linux/amd64) attached below. This is a development release; not yet field-ready.\n' \
-            "${imglist}" "${LATEST_MINOR}" "${repo}" "${TAG}" "${repo}")"
+          verify="$(printf 'Verifying (every image + the binary carry keyless SLSA provenance + SPDX SBOM attestations):\n```\n# image (resolve the digest first, then verify by digest)\ngh attestation verify oci://%s:%s --repo %s\n# binary\ngh attestation verify agent-provider-kubernetes_%s_linux_amd64.tar.gz --repo %s\n```\n' \
+            "${repo}" "${TAG}" "${REPO_SLUG}" "${TAG}" "${REPO_SLUG}")"
+          notes="$(printf 'Kairos images (one per supported Kubernetes minor):\n```\n%s```\nThe newest supported minor (%s) is also published as `%s:%s` and `%s:latest`.\n\n%s\nProvider binary (linux/amd64) attached below. This is a development release; not yet field-ready.\n' \
+            "${imglist}" "${LATEST_MINOR}" "${repo}" "${TAG}" "${repo}" "${verify}")"
           # Idempotent: update an existing release (e.g. a re-run), else create it.
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" bin/agent-provider-kubernetes_*.tar.gz bin/checksums.txt --clobber
