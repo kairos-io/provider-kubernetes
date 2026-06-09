@@ -27,6 +27,7 @@ Usage documentation for **provider-kubernetes**, the Go-native
 | [Lifecycle and reset](./lifecycle.md) | Reboot idempotency, reset / `EventClusterReset`, the supported version window, upgrades. |
 | [Node status](./status.md) | Why a node did or did not converge: the local status file and the own-Node annotations. |
 | [Troubleshooting](./troubleshooting.md) | Where logs are, common failures, and what "fail loud, never hang" means in practice. |
+| [Testing](./testing.md) | The test layers (unit, real-kubeadm e2e, manual VM smokes), how to run them, and the explicit CI-coverage boundary. |
 
 ## How it works in one paragraph
 

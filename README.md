@@ -67,9 +67,12 @@ built and verified in CI):
   [`samples/cni-calico/`](./samples/cni-calico/) shows two ways to add Calico
   (apply after the cluster is up, or bundle it in the control-plane
   cloud-config).
-- **CI and releases.** Every push runs build / vet / test / lint plus a Kairos
-  image build across the supported Kubernetes window; tagged releases publish
-  per-minor images to ghcr (see "Released images").
+- **CI and releases.** Every push runs build / vet / test / lint, a Kairos image
+  build across the supported Kubernetes window, and a real-kubeadm **end-to-end
+  suite** (init, worker join, externally-managed-CP join, reset, and the
+  refuse-guards) in a privileged node container per minor; tagged releases publish
+  per-minor images to ghcr (see "Released images"). See
+  [`docs/testing.md`](./docs/testing.md) for the test layers and coverage boundary.
 
 The full lifecycle - bootstrap, join, **upgrade**, and reset - plus credential
 handling, multi-control-plane HA, the image build, CI, and release publishing are
@@ -86,6 +89,7 @@ implemented and validated on VMs. See the roadmap discussion in the issue above.
 | `mint-join` join-material helper | implemented, validated |
 | Kairos image build (pinned, checksum-verified) | implemented |
 | CI (build/vet/test/lint + image build across 1.34/1.35/1.36) | implemented |
+| E2E suite (real kubeadm in-container: init/join/external-CP/reset/guards, per-PR) | implemented |
 | Release automation (per-minor images to ghcr + binary) | implemented |
 | Cluster upgrades (`kubeadm upgrade`) | implemented, validated on libvirt (1.34 -> 1.35) |
 | Field readiness | not ready |
