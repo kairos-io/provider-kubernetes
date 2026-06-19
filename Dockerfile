@@ -3,6 +3,13 @@
 # checksum-verified against the publisher's HTTPS-served .sha256 file, fixing the
 # unverified-curl supply-chain pitfall of the previous kubeadm provider.
 #
+# Base is the Kairos Hadron immutable OS (musl). We mirror the canonical Kairos
+# image build flow (images/Dockerfile upstream): the base is a pure upstream OS
+# that kairos-init transforms into a Kairos system in two phases (install, init).
+# Because Hadron is musl, the official glibc-linked containerd and kubelet cannot
+# exec; we build both fully static from source (kubeadm/kubectl/crictl/runc are
+# already static and run on musl unchanged).
+#
 # Build:
 #   docker build \
 #     --build-arg KUBERNETES_VERSION=v1.34.0 \
@@ -16,17 +23,38 @@
 # Versions: pinned by default. Bump together via build args; CI should pin via
 # image digest as well once a release pipeline lands.
 # ----------------------------------------------------------------------------
-ARG KAIROS_BASE_IMAGE=quay.io/kairos/ubuntu:24.04-core-amd64-generic-v3.5.1
-ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.6.0
+# Pure upstream Hadron base (musl). kairos-init transforms it into a Kairos OS in
+# the final stage, exactly as the canonical Kairos image build does.
+ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0
+# kairos-init that matches the version Kairos itself uses to build Hadron. Older
+# pins (e.g. v0.6.0) cannot regenerate Hadron's initramfs (dracut -f ... fails).
+ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6
 ARG GO_BUILDER_IMAGE=golang:1.26.4-alpine
 ARG TARGETARCH=amd64
+
+# containerd and kubelet are ALWAYS built fully static from source: Hadron is
+# musl, so the glibc-linked official releases cannot exec. A fully static binary
+# runs on musl AND glibc. STATIC_BUILDER is the from-source toolchain (Debian Go,
+# matching the validated recipe); patch-pinned (matches GO_BUILDER_IMAGE's pin
+# level) so the from-source compiler is reproducible across Go patch releases.
+# Digest-pinning all base images remains a tracked backlog item.
+ARG STATIC_BUILDER_IMAGE=golang:1.26.4
 
 # Kubernetes (must be within the supported window the provider enforces at
 # runtime: 1.34 / 1.35 / 1.36 as of 2026).
 ARG KUBERNETES_VERSION=v1.34.0
+# Commit SHA the KUBERNETES_VERSION tag must resolve to. Used by the static
+# from-source kubelet build to pin the clone to an immutable commit (a git tag is
+# mutable; a commit SHA is content-addressed), matching the checksum discipline of
+# the binary-download path. MUST be updated together with KUBERNETES_VERSION or
+# the build fails loud.
+ARG KUBERNETES_COMMIT=f28b4c9efbca5c5c0af716d9f2d5702667ee8a45
 
 # Container runtime stack.
 ARG CONTAINERD_VERSION=2.1.4
+# Commit SHA for CONTAINERD_VERSION (same rationale as KUBERNETES_COMMIT; used by
+# the static from-source containerd build).
+ARG CONTAINERD_COMMIT=75cb2b7193e4e490e9fbdc236c0e811ccaba3376
 ARG RUNC_VERSION=v1.3.0
 ARG CNI_PLUGINS_VERSION=v1.8.0
 ARG CRICTL_VERSION=v1.34.0
@@ -36,10 +64,8 @@ ARG PROVIDER_VERSION=dev
 
 # ----------------------------------------------------------------------------
 # Stage: bring in the kairos-init binary. kairos-init is run as the very last
-# step of the final image to regenerate the initramfs with our bundled binaries
-# in place and to wire the installer machinery for our custom image. Without
-# this step, kairos-installer.service exits 1 and auto-install does not fire on
-# the LiveCD (observed empirically; see build/vmtest/RESULTS.md).
+# step of the final image to transform the pure Hadron base into a Kairos system
+# (install + init phases), mirroring the canonical Kairos image build.
 # ----------------------------------------------------------------------------
 FROM ${KAIROS_INIT_IMAGE} AS kairos-init
 
@@ -58,12 +84,14 @@ RUN go build \
       -o /out/agent-provider-kubernetes .
 
 # ----------------------------------------------------------------------------
-# Stage: download and verify Kubernetes binaries.
+# Stage: download and verify Kubernetes binaries (kubeadm, kubectl, crictl).
 #
 # dl.k8s.io publishes a per-binary .sha256 file alongside each binary, served
 # over HTTPS by the same origin. Verifying with sha256sum -c (against that
 # canonical .sha256) gives us integrity from the publisher without hardcoding
 # hashes here, while ensuring an unverified or tampered download fails the build.
+# kubeadm/kubectl/crictl are already static and run on musl unchanged. kubelet is
+# NOT downloaded here -- it is built static from source (see kubelet-build).
 # ----------------------------------------------------------------------------
 FROM alpine:3.21 AS k8s-binaries
 ARG KUBERNETES_VERSION
@@ -74,7 +102,7 @@ WORKDIR /bin
 
 # Helper: download <name> and its <name>.sha256, then verify.
 RUN set -eux; \
-    for bin in kubeadm kubelet kubectl; do \
+    for bin in kubeadm kubectl; do \
       base="https://dl.k8s.io/${KUBERNETES_VERSION}/bin/linux/${TARGETARCH}"; \
       curl -fsSL -o "${bin}" "${base}/${bin}"; \
       curl -fsSL -o "${bin}.sha256" "${base}/${bin}.sha256"; \
@@ -95,26 +123,16 @@ RUN set -eux; \
     chmod +x crictl
 
 # ----------------------------------------------------------------------------
-# Stage: download and verify the container-runtime stack (containerd, runc, CNI).
+# Stage: download and verify the runtime stack we DON'T build from source
+# (runc, CNI). containerd is built static from source (see containerd-build);
+# runc and the CNI plugins are already static and run on musl unchanged.
 # ----------------------------------------------------------------------------
 FROM alpine:3.21 AS runtime-binaries
-ARG CONTAINERD_VERSION
 ARG RUNC_VERSION
 ARG CNI_PLUGINS_VERSION
 ARG TARGETARCH
 RUN apk add --no-cache curl ca-certificates
 WORKDIR /bin
-
-# containerd publishes a SHA256SUMS file per release. We pull only the line for
-# our tarball and verify just that, keeping the verification scope tight.
-RUN set -eux; \
-    base="https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}"; \
-    file="containerd-${CONTAINERD_VERSION}-linux-${TARGETARCH}.tar.gz"; \
-    curl -fsSL -o "${file}" "${base}/${file}"; \
-    curl -fsSL -o sha256sums "${base}/${file}.sha256sum"; \
-    echo "$(awk '{print $1}' sha256sums)  ${file}" | sha256sum -c -; \
-    mkdir containerd && tar -xzf "${file}" -C containerd; \
-    rm "${file}" sha256sums
 
 # runc: ships a PGP-signed runc.sha256sum that names files like "runc.amd64",
 # so we download under that name (matching the sha256sum line), verify, then
@@ -139,19 +157,93 @@ RUN set -eux; \
     rm "${file}" "${file}.sha256"
 
 # ----------------------------------------------------------------------------
+# Stage: build kubelet fully static from source.
+#
+# Hadron is musl; the glibc-linked official kubelet cannot exec. CGO_ENABLED=0
+# produces a fully static binary that runs on musl AND glibc. The clone is pinned
+# to an immutable commit (KUBERNETES_COMMIT); a mismatch fails the build loud.
+# ----------------------------------------------------------------------------
+FROM ${STATIC_BUILDER_IMAGE} AS kubelet-build
+ARG KUBERNETES_VERSION
+ARG KUBERNETES_COMMIT
+ARG TARGETARCH
+# Clone the version tag, then PIN to the expected commit (a tag is mutable; the
+# commit SHA is immutable). Mismatch fails loud -- update KUBERNETES_COMMIT when
+# bumping KUBERNETES_VERSION.
+RUN git clone --depth 1 --branch "${KUBERNETES_VERSION}" \
+      https://github.com/kubernetes/kubernetes /src \
+ && got="$(git -C /src rev-parse HEAD)" \
+ && if [ "${got}" != "${KUBERNETES_COMMIT}" ]; then \
+      echo "kubernetes ${KUBERNETES_VERSION} resolved to ${got}, expected ${KUBERNETES_COMMIT}; update KUBERNETES_COMMIT to match KUBERNETES_VERSION" >&2; exit 1; \
+    fi
+WORKDIR /src
+RUN set -eux; \
+    V="${KUBERNETES_VERSION}"; \
+    maj="$(echo "$V" | sed -E 's/^v([0-9]+)\..*/\1/')"; \
+    min="$(echo "$V" | sed -E 's/^v[0-9]+\.([0-9]+)\..*/\1/')"; \
+    LD="-s -w \
+      -X k8s.io/client-go/pkg/version.gitVersion=${V} \
+      -X k8s.io/component-base/version.gitVersion=${V} \
+      -X k8s.io/client-go/pkg/version.gitMajor=${maj} \
+      -X k8s.io/client-go/pkg/version.gitMinor=${min} \
+      -X k8s.io/component-base/version.gitMajor=${maj} \
+      -X k8s.io/component-base/version.gitMinor=${min} \
+      -X k8s.io/client-go/pkg/version.gitTreeState=clean \
+      -X k8s.io/component-base/version.gitTreeState=clean"; \
+    CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" GOFLAGS=-mod=vendor \
+      go build -ldflags "${LD}" -o /bin/kubelet ./cmd/kubelet; \
+    [ "$(/bin/kubelet --version)" = "Kubernetes ${V}" ] || { echo "kubelet version ldflags wrong: $(/bin/kubelet --version)" >&2; exit 1; }
+
+# ----------------------------------------------------------------------------
+# Stage: build containerd + shim fully static from source.
+#
+# make STATIC=1 produces fully static containerd + shim (verified: "not a dynamic
+# executable"); a fully static binary runs on musl AND glibc. The clone is pinned
+# to an immutable commit (CONTAINERD_COMMIT); a mismatch fails the build loud.
+# ----------------------------------------------------------------------------
+FROM ${STATIC_BUILDER_IMAGE} AS containerd-build
+ARG CONTAINERD_VERSION
+ARG CONTAINERD_COMMIT
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends make git \
+ && rm -rf /var/lib/apt/lists/*
+# Clone the version tag, then PIN to the expected commit (see KUBERNETES_COMMIT).
+RUN git clone --depth 1 --branch "v${CONTAINERD_VERSION}" \
+      https://github.com/containerd/containerd /src \
+ && got="$(git -C /src rev-parse HEAD)" \
+ && if [ "${got}" != "${CONTAINERD_COMMIT}" ]; then \
+      echo "containerd v${CONTAINERD_VERSION} resolved to ${got}, expected ${CONTAINERD_COMMIT}; update CONTAINERD_COMMIT to match CONTAINERD_VERSION" >&2; exit 1; \
+    fi
+WORKDIR /src
+# Lay the static binaries out under /bin/containerd/bin so the final stage can
+# COPY the whole bin/ tree in one shot.
+RUN set -eux; \
+    make STATIC=1 bin/containerd bin/containerd-shim-runc-v2; \
+    mkdir -p /bin/containerd/bin; \
+    cp bin/containerd bin/containerd-shim-runc-v2 /bin/containerd/bin/
+
+# ----------------------------------------------------------------------------
 # Final stage: a Kairos image with everything wired up.
+#
+# Order matters: we lay down every bundled binary and config FIRST, then run
+# kairos-init LAST so the install/init phases (which regenerate the kernel/initrd
+# and wire the installer machinery) see the final on-disk layout.
 # ----------------------------------------------------------------------------
 FROM ${KAIROS_BASE_IMAGE}
 ARG KUBERNETES_VERSION
 
-# --- Kubernetes binaries (verified) -----------------------------------------
-COPY --from=k8s-binaries /bin/kubeadm  /usr/bin/kubeadm
-COPY --from=k8s-binaries /bin/kubelet  /usr/bin/kubelet
-COPY --from=k8s-binaries /bin/kubectl  /usr/bin/kubectl
-COPY --from=k8s-binaries /bin/crictl   /usr/bin/crictl
+# --- Kubernetes binaries -----------------------------------------------------
+# kubeadm/kubectl/crictl are the verified official static binaries; kubelet is
+# built static from source (musl base).
+COPY --from=k8s-binaries  /bin/kubeadm  /usr/bin/kubeadm
+COPY --from=kubelet-build  /bin/kubelet  /usr/bin/kubelet
+COPY --from=k8s-binaries  /bin/kubectl  /usr/bin/kubectl
+COPY --from=k8s-binaries  /bin/crictl   /usr/bin/crictl
 
-# --- Container runtime (verified) -------------------------------------------
-COPY --from=runtime-binaries /bin/containerd/bin/ /usr/bin/
+# --- Container runtime -------------------------------------------------------
+# containerd + shim are built static from source; runc and CNI are verified
+# official static binaries.
+COPY --from=containerd-build /bin/containerd/bin/ /usr/bin/
 COPY --from=runtime-binaries /bin/runc            /usr/bin/runc
 RUN mkdir -p /opt/cni/bin
 COPY --from=runtime-binaries /bin/cni/            /opt/cni/bin/
@@ -175,13 +267,16 @@ RUN systemctl enable containerd.service kubelet.service
 # kept short; the provider also detects/enforces the version at runtime).
 RUN echo "BUNDLED_KUBERNETES_VERSION=${KUBERNETES_VERSION}" >> /etc/os-release
 
-# --- kairos-init finalize ---------------------------------------------------
-# Regenerates the initramfs and wires the installer machinery for our custom
-# image. MUST be the last layer touched before the build artifact is finalized.
+# --- kairos-init: transform the pure Hadron base into a Kairos system --------
+# Mirrors the canonical Kairos image build (images/Dockerfile): two phases in one
+# RUN -- "install" then "init" -- no "validate". This runs LAST so it sees every
+# bundled binary/config above. kairos-init regenerates the kernel/initramfs and
+# wires the installer machinery; without it kairos-installer.service exits 1 and
+# auto-install does not fire on the LiveCD.
 #
-# kairos-init's --version is strict semver. PROVIDER_VERSION can be a git SHA
-# or 'dev', so we lift it into a synthesized semver (the SHA/string is preserved
-# as semver build metadata after '+').
+# kairos-init's --version is strict semver. PROVIDER_VERSION can be a git SHA or
+# 'dev', so we lift it into a synthesized semver (the SHA/string is preserved as
+# semver build metadata after '+').
 ARG PROVIDER_VERSION
 # OCI provenance: links the published package back to the repo + records the
 # provider/Kubernetes versions baked in. Applied to every build (local, CI, release).
@@ -189,9 +284,9 @@ LABEL org.opencontainers.image.source="https://github.com/kairos-io/provider-kub
       org.opencontainers.image.description="Kairos provider-kubernetes: kubeadm + provider, Kubernetes ${KUBERNETES_VERSION}" \
       org.opencontainers.image.version="${PROVIDER_VERSION}" \
       org.opencontainers.image.licenses="Apache-2.0"
-COPY --from=kairos-init /kairos-init /kairos-init
-RUN sanitized=$(printf '%s' "${PROVIDER_VERSION}" | tr -c 'A-Za-z0-9-' '-' | sed 's/^-*//; s/-*$//') \
- && image_version="v0.0.0-dev+${sanitized:-unset}" \
- && /kairos-init -l info -m generic --version "${image_version}" \
- && /kairos-init validate \
- && rm /kairos-init
+RUN --mount=type=bind,from=kairos-init,src=/kairos-init,dst=/kairos-init \
+    set -eux; \
+    sanitized=$(printf '%s' "${PROVIDER_VERSION}" | tr -c 'A-Za-z0-9-' '-' | sed 's/^-*//; s/-*$//'); \
+    image_version="v0.0.0-dev+${sanitized:-unset}"; \
+    /kairos-init -l debug -s install -m generic -t false --version "${image_version}"; \
+    /kairos-init -l debug -s init    -m generic -t false --version "${image_version}"

@@ -23,6 +23,7 @@ Usage documentation for **provider-kubernetes**, the Go-native
 | [mint-join reference](./mint-join.md) | The `agent-provider-kubernetes mint-join` subcommand. |
 | [Upgrades](./upgrades.md) | Upgrading between Kubernetes minors (`kubeadm upgrade`): pin + image, single-node and HA, kubelet-config repair, etcd snapshots, rollback. |
 | [CNI](./cni.md) | Installing a CNI (the provider installs none). |
+| [Running on Hadron](./hadron.md) | Building a provider image on the Kairos Hadron (musl) base: the two build flags, static runtime, supply-chain pinning. |
 | [Security model](./security.md) | `cluster_token`, certificate-key blast radius, CA pinning, at-rest encryption, the trust boundary. |
 | [Lifecycle and reset](./lifecycle.md) | Reboot idempotency, reset / `EventClusterReset`, the supported version window, upgrades. |
 | [Node status](./status.md) | Why a node did or did not converge: the local status file and the own-Node annotations. |

@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -33,6 +34,45 @@ import (
 	"github.com/kairos-io/provider-kubernetes/internal/reset"
 	"github.com/kairos-io/provider-kubernetes/version"
 )
+
+// eventInitProviderInfo is the event emitted by kairos-init (v0.14+) to discover
+// the provider name and version during the image build phase.
+// Defined locally because kairos-sdk v0.5.0 does not yet expose this constant;
+// the value must match the string used by kairos-init / kairos-sdk >=v0.17.
+const eventInitProviderInfo pluggable.EventType = "init.provider.info"
+
+// providerInfoPayload mirrors the bus.ProviderInstalledVersionPayload from
+// kairos-sdk >=v0.17. kairos-init unmarshals resp.Data into this type.
+// Fields must remain JSON-tagged exactly as the upstream struct.
+type providerInfoPayload struct {
+	Provider string `json:"provider"`
+	Version  string `json:"version"`
+}
+
+// handleProviderInfo responds to the init.provider.info probe emitted by kairos-init.
+// kairos-init invokes our binary as:
+//
+//	agent-provider-kubernetes init.provider.info
+//
+// with a JSON Event on stdin ({"name":"init.provider.info","data":"null","file":""}).
+// It expects EventResponse.Data to contain a JSON-serialized ProviderInstalledVersionPayload;
+// an empty Data string causes "unexpected end of JSON input" in kairos-init's unmarshaller.
+func handleProviderInfo(_ *pluggable.Event) pluggable.EventResponse {
+	payload := providerInfoPayload{
+		Provider: "kubernetes",
+		Version:  version.Version,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return pluggable.EventResponse{
+			Error: fmt.Sprintf("marshal provider info: %v", err),
+		}
+	}
+	return pluggable.EventResponse{
+		State: "success",
+		Data:  string(data),
+	}
+}
 
 func main() {
 	args := os.Args[1:]
@@ -55,10 +95,16 @@ func main() {
 
 	logrus.Infof("starting agent-provider-kubernetes %s", version.Version)
 	plugin := clusterplugin.ClusterPlugin{Provider: provider.Provider}
-	if err := plugin.Run(pluggable.FactoryPlugin{
-		EventType:     clusterplugin.EventClusterReset,
-		PluginHandler: provider.HandleClusterReset,
-	}); err != nil {
+	if err := plugin.Run(
+		pluggable.FactoryPlugin{
+			EventType:     clusterplugin.EventClusterReset,
+			PluginHandler: provider.HandleClusterReset,
+		},
+		pluggable.FactoryPlugin{
+			EventType:     eventInitProviderInfo,
+			PluginHandler: handleProviderInfo,
+		},
+	); err != nil {
 		logrus.Fatal(err)
 	}
 }
