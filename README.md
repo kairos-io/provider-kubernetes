@@ -67,6 +67,12 @@ built and verified in CI):
   [`samples/cni-calico/`](./samples/cni-calico/) shows two ways to add Calico
   (apply after the cluster is up, or bundle it in the control-plane
   cloud-config).
+- **Built on Hadron (musl).** Images are built on the Kairos **Hadron**
+  minimal/musl immutable OS, via the canonical Kairos `kairos-init` flow.
+  containerd and kubelet are built static from pinned source (the official glibc
+  binaries can't exec on musl); the rest are verified static downloads. Validated
+  on libvirt (a control plane converges on Hadron). See
+  [`docs/hadron.md`](./docs/hadron.md).
 - **CI and releases.** Every push runs build / vet / test / lint, a Kairos image
   build across the supported Kubernetes window, and a real-kubeadm **end-to-end
   suite** (init, worker join, externally-managed-CP join, reset, and the
@@ -87,7 +93,7 @@ implemented and validated on VMs. See the roadmap discussion in the issue above.
 | Cluster bootstrap (init / worker / controlplane) | implemented, validated on KVM/libvirt |
 | Multi-control-plane HA (stacked etcd) | implemented, validated on libvirt (3 CPs) |
 | `mint-join` join-material helper | implemented, validated |
-| Kairos image build (pinned, checksum-verified) | implemented |
+| Kairos image build on Hadron (musl; canonical kairos-init, static runtime) | implemented, validated on libvirt (manual smoke) |
 | CI (build/vet/test/lint + image build across 1.34/1.35/1.36) | implemented |
 | E2E suite (real kubeadm in-container: init/join/external-CP/reset/guards, per-PR) | implemented |
 | Release automation (per-minor images to ghcr + binary) | implemented |
@@ -118,12 +124,15 @@ publisher's HTTPS-served `.sha256` file:
 
 ```sh
 make image KUBERNETES_VERSION=v1.34.0 VERSION=dev
-# or:
-docker build \
-  --build-arg KUBERNETES_VERSION=v1.34.0 \
-  --build-arg PROVIDER_VERSION=$(git describe --always) \
-  -t kairos-kubeadm:dev .
 ```
+
+The base is the Kairos **[Hadron](./docs/hadron.md)** minimal/musl immutable OS,
+which `kairos-init` transforms into a bootable Kairos system (mirroring the
+canonical Kairos image build). Because Hadron is musl, containerd and kubelet are
+built **fully static from pinned source** (the official glibc binaries can't exec
+on musl); kubeadm/kubectl/crictl/runc are the verified static downloads. This is
+automatic - no build flags. To build a non-default Kubernetes minor, also pass the
+matching `KUBERNETES_COMMIT` (see [`docs/hadron.md`](./docs/hadron.md)).
 
 Convert the resulting Docker image into a bootable ISO/raw artifact with
 [auroraboot](https://kairos.io/docs/reference/auroraboot/), and provision it

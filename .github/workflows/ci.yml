@@ -88,7 +88,9 @@ jobs:
     name: image build (k8s ${{ matrix.minor }})
     needs: discover
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The Hadron (musl) image builds containerd AND kubelet static from source,
+    # which adds several minutes per leg over the old binary-download path.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -100,7 +102,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Resolve Kubernetes patch + crictl versions
+      - name: Resolve Kubernetes patch + commit + crictl versions
         id: ver
         run: |
           set -euo pipefail
@@ -109,10 +111,24 @@ jobs:
             v${{ matrix.minor }}.*) : ;;
             *) echo "unexpected patch ${k8s} for minor ${{ matrix.minor }}" >&2; exit 1 ;;
           esac
+          # The Hadron (musl) image builds kubelet static from source, pinning the
+          # clone to an immutable commit SHA. Resolve the SHA the resolved tag
+          # points at and pass it to `make image`, or the from-source build's
+          # commit assertion fails. Prefer the peeled tag (^{} -> the commit the
+          # annotated tag wraps, i.e. clone HEAD); fall back to the bare ref.
+          kcommit="$(git ls-remote https://github.com/kubernetes/kubernetes "refs/tags/${k8s}^{}" | cut -f1)"
+          if [ -z "$kcommit" ]; then
+            kcommit="$(git ls-remote https://github.com/kubernetes/kubernetes "refs/tags/${k8s}" | cut -f1)"
+          fi
+          case "$kcommit" in
+            ?*) : ;;
+            *) echo "could not resolve commit SHA for ${k8s}" >&2; exit 1 ;;
+          esac
           # cri-tools publishes one release per minor: v<minor>.0.
           crictl="v${{ matrix.minor }}.0"
-          echo "k8s=${k8s} crictl=${crictl}"
+          echo "k8s=${k8s} kcommit=${kcommit} crictl=${crictl}"
           echo "k8s=${k8s}" >> "$GITHUB_OUTPUT"
+          echo "kcommit=${kcommit}" >> "$GITHUB_OUTPUT"
           echo "crictl=${crictl}" >> "$GITHUB_OUTPUT"
 
       - name: Build Kairos image
@@ -120,6 +136,7 @@ jobs:
           make image \
             VERSION=ci-${{ matrix.minor }} \
             KUBERNETES_VERSION=${{ steps.ver.outputs.k8s }} \
+            KUBERNETES_COMMIT=${{ steps.ver.outputs.kcommit }} \
             CRICTL_VERSION=${{ steps.ver.outputs.crictl }}
 
       - name: Verify bundled binaries match the target minor
@@ -191,10 +208,11 @@ jobs:
   # step below sweeps leaked containers by label.
   #
   # Image strategy: option (a) -- rebuild kairos-kubeadm + e2e-node in this job
-  # using the same stable-<minor>.txt patch-resolution as the image job. This is
-  # self-contained (no artifact upload/download between jobs), fault-isolated
-  # per-minor-leg, and avoids docker/actions-artifact size limits. The ~4 min
-  # build overhead is well within the 30 min per-leg timeout.
+  # using the same stable-<minor>.txt patch + commit resolution as the image job.
+  # This is self-contained (no artifact upload/download between jobs),
+  # fault-isolated per-minor-leg, and avoids docker/actions-artifact size limits.
+  # The from-source containerd+kubelet build dominates the build overhead; the
+  # per-leg timeout below carries headroom for it.
   #
   # GitHub-hosted ubuntu-latest supports --privileged containers, /boot/config-*,
   # and /lib/modules. The harness mounts those read-only so kubeadm's
@@ -213,7 +231,9 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    # Adds the from-source containerd+kubelet build of the Hadron base image on
+    # top of the e2e suite itself; raised from 50 to keep headroom per leg.
+    timeout-minutes: 65
     strategy:
       fail-fast: false
       matrix:
@@ -231,7 +251,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Resolve Kubernetes patch + crictl versions
+      - name: Resolve Kubernetes patch + commit + crictl versions
         id: ver
         run: |
           set -euo pipefail
@@ -240,9 +260,21 @@ jobs:
             v${{ matrix.minor }}.*) : ;;
             *) echo "unexpected patch ${k8s} for minor ${{ matrix.minor }}" >&2; exit 1 ;;
           esac
+          # The Hadron base builds kubelet static from source and asserts the
+          # cloned tag resolves to this commit SHA; resolve and forward it (see
+          # the image job for the full rationale).
+          kcommit="$(git ls-remote https://github.com/kubernetes/kubernetes "refs/tags/${k8s}^{}" | cut -f1)"
+          if [ -z "$kcommit" ]; then
+            kcommit="$(git ls-remote https://github.com/kubernetes/kubernetes "refs/tags/${k8s}" | cut -f1)"
+          fi
+          case "$kcommit" in
+            ?*) : ;;
+            *) echo "could not resolve commit SHA for ${k8s}" >&2; exit 1 ;;
+          esac
           crictl="v${{ matrix.minor }}.0"
-          echo "k8s=${k8s} crictl=${crictl}"
+          echo "k8s=${k8s} kcommit=${kcommit} crictl=${crictl}"
           echo "k8s=${k8s}" >> "$GITHUB_OUTPUT"
+          echo "kcommit=${kcommit}" >> "$GITHUB_OUTPUT"
           echo "crictl=${crictl}" >> "$GITHUB_OUTPUT"
 
       - name: Build kairos-kubeadm base image
@@ -250,6 +282,7 @@ jobs:
           make image \
             VERSION=ci-${{ matrix.minor }} \
             KUBERNETES_VERSION=${{ steps.ver.outputs.k8s }} \
+            KUBERNETES_COMMIT=${{ steps.ver.outputs.kcommit }} \
             CRICTL_VERSION=${{ steps.ver.outputs.crictl }} \
             IMAGE=kairos-kubeadm:${{ steps.ver.outputs.k8s }}
 
