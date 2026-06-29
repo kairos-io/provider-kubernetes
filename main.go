@@ -28,6 +28,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 
+	"github.com/kairos-io/provider-kubernetes/internal/imageimport"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 	"github.com/kairos-io/provider-kubernetes/internal/provider"
@@ -84,6 +85,8 @@ func main() {
 			os.Exit(runReset(args[1:]))
 		case "mint-join":
 			os.Exit(runMintJoin(args[1:]))
+		case "import-images":
+			os.Exit(runImportImages(args[1:]))
 		case "version", "--version", "-v":
 			fmt.Println(version.Version)
 			return
@@ -257,6 +260,30 @@ func runReset(args []string) int {
 		return 1
 	}
 	logrus.Info("provider-kubernetes reset: done")
+	return 0
+}
+
+// runImportImages imports the pre-bundled control-plane image tarballs into
+// containerd's k8s.io namespace (ADR-16), so kubeadm init finds them locally and
+// a first boot converges with no registry access. Invoked at boot by the
+// provider-kubernetes-image-import.service oneshot, ordered before kubelet.
+func runImportImages(args []string) int {
+	fs := flag.NewFlagSet("import-images", flag.ContinueOnError)
+	dir := fs.String("dir", imageimport.DefaultDir, "directory of *.tar control-plane images to import")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	// Bounded so the boot path can never hang (#4099-1); importing local tarballs
+	// is fast, this is generous headroom for many/large images on slow disks.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	logrus.Infof("provider-kubernetes import-images %s: importing from %s", version.Version, *dir)
+	if err := imageimport.Import(ctx, *dir, kubeadm.ExecRunner{Path: "ctr"}); err != nil {
+		logrus.Errorf("import-images: %v", err)
+		return 1
+	}
+	logrus.Info("provider-kubernetes import-images: done")
 	return 0
 }
 

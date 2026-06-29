@@ -67,6 +67,19 @@ func Provider(cluster clusterplugin.Cluster) yip.YipConfig {
 					Content:     string(clusterYAML),
 				}},
 			}, {
+				Name: "provider-kubernetes: import pre-bundled images",
+				Commands: []string{
+					// ADR-16: import the pre-bundled control-plane images into
+					// containerd BEFORE reconcile runs kubeadm init/join, so init
+					// finds them locally (air-gap) and never pulls. yip runs stage
+					// steps in array order, so this deterministically precedes the
+					// reconcile step below -- the systemd oneshot races this stage
+					// and cannot be relied on for ordering. No-op when nothing is
+					// bundled; failures are logged but do not abort the boot (yip
+					// continues to reconcile, which surfaces any missing image).
+					ProviderBinaryPath + " import-images >>" + ImportLogPath + " 2>&1 || true",
+				},
+			}, {
 				Name: "provider-kubernetes: reconcile",
 				Commands: []string{
 					// argv would be cleaner than a shell, but yip Commands run via

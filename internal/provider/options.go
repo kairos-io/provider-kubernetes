@@ -18,6 +18,12 @@ const (
 	// stdout/stderr; surfacing failures to operators (OQ-4 logs-only for v1).
 	ReconcileLogPath = "/var/log/provider-kubernetes-reconcile.log"
 
+	// ImportLogPath is where the boot-time import-images step (ADR-16) writes its
+	// stdout/stderr. The import runs as a yip step ordered BEFORE reconcile so the
+	// pre-bundled control-plane images are in containerd before kubeadm init/join
+	// runs (a systemd oneshot alone races the kairos-agent reconcile stage).
+	ImportLogPath = "/var/log/provider-kubernetes-image-import.log"
+
 	// The Layer-1 structured status paths are defined in internal/status:
 	//   status.StatusRunPath = "/run/provider-kubernetes/status.yaml"  (tmpfs, 0640)
 	//   status.StatusLogPath = "/var/log/provider-kubernetes/status.yaml"  (persistent, 0640)
