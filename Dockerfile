@@ -260,6 +260,21 @@ COPY systemd/kubelet.service.d/10-kubeadm.conf /etc/systemd/system/kubelet.servi
 COPY sysctl/k8s.conf                        /etc/sysctl.d/k8s.conf
 COPY modules-load/k8s.conf                  /etc/modules-load.d/k8s.conf
 
+# Pin containerd's pod-sandbox (pause) image to the EXACT version the bundled
+# kubeadm expects for this Kubernetes minor, instead of a hardcoded tag. kubeadm
+# bumps the pause version per release (e.g. 3.10.1 in 1.34/1.35 -> 3.10.2 in 1.36);
+# a stale tag means containerd pulls a different pause than kubeadm pre-pulled
+# (duplicate image / drift -- pitfall C4). Resolved from kubeadm at build time so
+# it always matches the bundled toolchain. kubeadm is static and runs here on musl.
+RUN set -eux; \
+    pause="$(/usr/bin/kubeadm config images list \
+      --kubernetes-version "${KUBERNETES_VERSION}" \
+      --image-repository registry.k8s.io | grep -E '/pause:[0-9]')"; \
+    test -n "${pause}"; \
+    sed -i "s#^\([[:space:]]*sandbox_image[[:space:]]*=\).*#\1 \"${pause}\"#" /etc/containerd/config.toml; \
+    grep -q "sandbox_image = \"${pause}\"" /etc/containerd/config.toml; \
+    echo "pinned containerd sandbox_image to ${pause}"
+
 # --- Boot-time setup: enable services; modules and sysctls load via /etc -----
 RUN systemctl enable containerd.service kubelet.service
 
