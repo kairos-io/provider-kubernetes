@@ -157,6 +157,20 @@ jobs:
           esac
           echo "OK: image bundles the k8s ${{ matrix.minor }} toolchain"
 
+      - name: Verify containerd sandbox (pause) image is version-matched (C4)
+        run: |
+          set -euo pipefail
+          img="kairos-kubeadm:ci-${{ matrix.minor }}"
+          # The build pins containerd's sandbox_image to the pause kubeadm expects;
+          # assert they match so a stale/hardcoded pause tag can't regress (C4).
+          want="$(docker run --rm --entrypoint /usr/bin/kubeadm "$img" \
+            config images list --image-repository registry.k8s.io | grep -E '/pause:[0-9]')"
+          got="$(docker run --rm --entrypoint sh "$img" -c \
+            "grep -oE 'registry.k8s.io/pause:[0-9.]+' /etc/containerd/config.toml")"
+          echo "kubeadm pause: ${want}; containerd sandbox_image: ${got}"
+          [ "$got" = "$want" ] || { echo "pause mismatch (C4): containerd ${got} != kubeadm ${want}" >&2; exit 1; }
+          echo "OK: sandbox_image is version-matched to kubeadm"
+
       - name: Verify kubeadm exposes the upgrade-path surface (ADR-12)
         run: |
           set -euo pipefail

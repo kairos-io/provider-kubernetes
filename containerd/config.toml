@@ -1,12 +1,15 @@
 # containerd configuration for kubeadm clusters built with provider-kubernetes.
-# - sandbox image pinned to registry.k8s.io (NOT the dead k8s.gcr.io).
+# - sandbox_image uses registry.k8s.io (NOT the dead k8s.gcr.io). The pause TAG
+#   below is a placeholder: the image build overwrites it with the exact pause
+#   version the bundled kubeadm expects for the target Kubernetes minor (see the
+#   Dockerfile), so it is always version-matched rather than a stale hardcoded tag.
 # - SystemdCgroup = true, matching the kubelet's default cgroup driver
 #   ("systemd"); see https://kubernetes.io/docs/setup/production-environment/container-runtimes/.
 version = 2
 root = "/var/lib/containerd"
 
 [plugins."io.containerd.grpc.v1.cri"]
-  sandbox_image = "registry.k8s.io/pause:3.10"
+  sandbox_image = "registry.k8s.io/pause:3.10.1"
 
   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
     runtime_type = "io.containerd.runc.v2"
