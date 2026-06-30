@@ -25,10 +25,12 @@ CNI_PLUGINS_VERSION ?= v1.8.0
 # Kairos OS base the image is built FROM. Defaults to the pure upstream Hadron
 # (musl) OS, which kairos-init transforms into a Kairos system in the final stage
 # (mirroring the canonical Kairos image build). Override to test another base.
-KAIROS_BASE_IMAGE  ?= ghcr.io/kairos-io/hadron:v0.4.0
+# DIGEST-pinned (kairos#4203); must match the Dockerfile ARG defaults. Re-resolve
+# with `docker buildx imagetools inspect <image:tag>` when bumping the tag.
+KAIROS_BASE_IMAGE  ?= ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940f58d899e72f6776f4d64934cd6f402f4a4186ccc40d4d
 # kairos-init image used in the final stage. Defaults to the Dockerfile's pin
 # (the version Kairos itself uses to build Hadron); override for testing.
-KAIROS_INIT_IMAGE  ?= quay.io/kairos/kairos-init:v0.14.6
+KAIROS_INIT_IMAGE  ?= quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
 IMAGE              ?= kairos-kubeadm:$(VERSION)
 
 # e2e (ADR-13). The node image FROM-derives the kairos-kubeadm base so it reuses
@@ -39,7 +41,7 @@ BASE_IMAGE       ?= kairos-kubeadm:$(KUBERNETES_VERSION)
 E2E_NODE_IMAGE   ?= kairos-kubeadm-e2e-node:$(KUBERNETES_VERSION)
 E2E_TIMEOUT      ?= 40m
 
-.PHONY: all build test vet fmt fmt-check lint tidy image clean e2e-node-image e2e
+.PHONY: all build test vet fmt fmt-check lint tidy verify-pins image clean e2e-node-image e2e
 
 all: build
 
@@ -70,6 +72,22 @@ lint:
 ## tidy: sync go.mod/go.sum
 tidy:
 	$(GO) mod tidy
+
+## verify-pins: fail if a digest-pinned base image drifts between Dockerfile and
+## Makefile, or is not digest-pinned at all (kairos#4203 supply-chain guard).
+verify-pins:
+	@fail=0; \
+	for var in KAIROS_BASE_IMAGE KAIROS_INIT_IMAGE; do \
+	  df="$$(sed -n "s/^ARG $$var=//p" Dockerfile | head -1)"; \
+	  mk="$$(sed -n "s/^$$var[[:space:]]*?=[[:space:]]*//p" Makefile | head -1)"; \
+	  case "$$df" in *@sha256:*) : ;; *) echo "FAIL: Dockerfile $$var is not digest-pinned: '$$df'"; fail=1 ;; esac; \
+	  if [ "$$df" != "$$mk" ]; then \
+	    echo "FAIL: $$var drift:"; echo "  Dockerfile: $$df"; echo "  Makefile:   $$mk"; fail=1; \
+	  else \
+	    echo "ok: $$var = $$df"; \
+	  fi; \
+	done; \
+	if [ "$$fail" != 0 ]; then echo "re-resolve with: docker buildx imagetools inspect <image:tag>"; exit 1; fi
 
 ## image: build the Kairos image bundling provider + kubeadm + containerd
 ## (requires Docker; supply-chain-verified downloads inside the Dockerfile).
