@@ -20,16 +20,22 @@
 # (https://kairos.io/docs/reference/auroraboot/). See samples/README.md.
 
 # ----------------------------------------------------------------------------
-# Versions: pinned by default. Bump together via build args; CI should pin via
-# image digest as well once a release pipeline lands.
+# Versions: pinned by default. Bump together via build args. Base images are
+# digest-pinned below (kairos#4203) for a reproducible, tamper-evident supply chain.
 # ----------------------------------------------------------------------------
 # Pure upstream Hadron base (musl). kairos-init transforms it into a Kairos OS in
 # the final stage, exactly as the canonical Kairos image build does.
-ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0
+# All base images are DIGEST-pinned (image:tag@sha256:...) for a reproducible,
+# tamper-evident supply chain (kairos#4203). The tag is kept for readability; the
+# digest is the multi-arch index digest, so cross-arch builds still resolve the
+# right manifest. When bumping a tag, re-resolve the digest
+# (docker buildx imagetools inspect <image:tag>) and update both here and in the
+# Makefile defaults that override these ARGs.
+ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940f58d899e72f6776f4d64934cd6f402f4a4186ccc40d4d
 # kairos-init that matches the version Kairos itself uses to build Hadron. Older
 # pins (e.g. v0.6.0) cannot regenerate Hadron's initramfs (dracut -f ... fails).
-ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6
-ARG GO_BUILDER_IMAGE=golang:1.26.4-alpine
+ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
+ARG GO_BUILDER_IMAGE=golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648
 ARG TARGETARCH=amd64
 
 # containerd and kubelet are ALWAYS built fully static from source: Hadron is
@@ -37,8 +43,7 @@ ARG TARGETARCH=amd64
 # runs on musl AND glibc. STATIC_BUILDER is the from-source toolchain (Debian Go,
 # matching the validated recipe); patch-pinned (matches GO_BUILDER_IMAGE's pin
 # level) so the from-source compiler is reproducible across Go patch releases.
-# Digest-pinning all base images remains a tracked backlog item.
-ARG STATIC_BUILDER_IMAGE=golang:1.26.4
+ARG STATIC_BUILDER_IMAGE=golang:1.26.4@sha256:f96cc555eb8db430159a3aa6797cd5bae561945b7b0fe7d0e284c63a3b291609
 
 # Kubernetes (must be within the supported window the provider enforces at
 # runtime: 1.34 / 1.35 / 1.36 as of 2026).
@@ -93,7 +98,7 @@ RUN go build \
 # kubeadm/kubectl/crictl are already static and run on musl unchanged. kubelet is
 # NOT downloaded here -- it is built static from source (see kubelet-build).
 # ----------------------------------------------------------------------------
-FROM alpine:3.21 AS k8s-binaries
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS k8s-binaries
 ARG KUBERNETES_VERSION
 ARG CRICTL_VERSION
 ARG TARGETARCH
@@ -127,7 +132,7 @@ RUN set -eux; \
 # (runc, CNI). containerd is built static from source (see containerd-build);
 # runc and the CNI plugins are already static and run on musl unchanged.
 # ----------------------------------------------------------------------------
-FROM alpine:3.21 AS runtime-binaries
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS runtime-binaries
 ARG RUNC_VERSION
 ARG CNI_PLUGINS_VERSION
 ARG TARGETARCH
@@ -231,7 +236,7 @@ RUN set -eux; \
 # image and imported into containerd at boot, so a first boot converges with NO
 # registry access (air-gap). CNI is intentionally NOT bundled (operator's choice).
 # ----------------------------------------------------------------------------
-FROM alpine:3.21 AS image-bundler
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS image-bundler
 ARG KUBERNETES_VERSION
 ARG TARGETARCH
 # Pinned; crane is a static Go binary that runs on musl.
