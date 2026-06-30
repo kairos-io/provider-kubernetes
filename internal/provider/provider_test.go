@@ -139,11 +139,20 @@ func TestProviderEmitsBootStage(t *testing.T) {
 	if got.Role != clusterplugin.RoleInit {
 		t.Fatalf("cluster role round-trip failed: %q", got.Role)
 	}
-	// Second stage invokes the reconcile subcommand.
-	if len(stages[1].Commands) != 1 {
-		t.Fatalf("expected reconcile stage to have exactly one Command, got %+v", stages[1].Commands)
+	// Second stage imports the pre-bundled control-plane images (ADR-16). It MUST
+	// come before the reconcile stage so kubeadm init/join finds images locally.
+	if len(stages) < 3 {
+		t.Fatalf("expected three stages under network.after (write, import, reconcile), got %d", len(stages))
 	}
-	cmd := stages[1].Commands[0]
+	importCmd := stages[1].Commands[0]
+	if !strings.Contains(importCmd, ProviderBinaryPath+" import-images") {
+		t.Fatalf("expected import-images step before reconcile, got %q", importCmd)
+	}
+	// Third stage invokes the reconcile subcommand.
+	if len(stages[2].Commands) != 1 {
+		t.Fatalf("expected reconcile stage to have exactly one Command, got %+v", stages[2].Commands)
+	}
+	cmd := stages[2].Commands[0]
 	if !strings.Contains(cmd, ProviderBinaryPath+" reconcile") {
 		t.Fatalf("reconcile command shape wrong: %q", cmd)
 	}

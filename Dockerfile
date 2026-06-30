@@ -216,11 +216,61 @@ RUN git clone --depth 1 --branch "v${CONTAINERD_VERSION}" \
     fi
 WORKDIR /src
 # Lay the static binaries out under /bin/containerd/bin so the final stage can
-# COPY the whole bin/ tree in one shot.
+# COPY the whole bin/ tree in one shot. ctr is built too: the boot-time image
+# import (ADR-16) uses `ctr -n k8s.io images import`, and it must be static (musl).
 RUN set -eux; \
-    make STATIC=1 bin/containerd bin/containerd-shim-runc-v2; \
+    make STATIC=1 bin/containerd bin/containerd-shim-runc-v2 bin/ctr; \
     mkdir -p /bin/containerd/bin; \
-    cp bin/containerd bin/containerd-shim-runc-v2 /bin/containerd/bin/
+    cp bin/containerd bin/containerd-shim-runc-v2 bin/ctr /bin/containerd/bin/
+
+# ----------------------------------------------------------------------------
+# Stage: pre-bundle the control-plane container images (ADR-16). Resolve the EXACT
+# set from the bundled kubeadm (same source as the pause pin, so refs never drift)
+# and fetch each as a ctr-importable tarball with crane (daemonless, no docker/
+# containerd needed at build). The tarballs are embedded read-only in the final
+# image and imported into containerd at boot, so a first boot converges with NO
+# registry access (air-gap). CNI is intentionally NOT bundled (operator's choice).
+# ----------------------------------------------------------------------------
+FROM alpine:3.21 AS image-bundler
+ARG KUBERNETES_VERSION
+ARG TARGETARCH
+# Pinned; crane is a static Go binary that runs on musl.
+ARG CRANE_VERSION=v0.20.3
+RUN apk add --no-cache curl ca-certificates
+COPY --from=k8s-binaries /bin/kubeadm /usr/bin/kubeadm
+# Install crane (checksum-verified), then resolve the control-plane image set from
+# the bundled kubeadm (single source of truth, shared with the pause pin) and fetch
+# each as a ctr-importable tarball. NOTE: no inline '#' comments inside this RUN --
+# the backslash continuations join it into one logical line, where a '#' would
+# comment out everything after it.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) arch="x86_64" ;; \
+      arm64) arch="arm64" ;; \
+      *) echo "unsupported TARGETARCH ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    base="https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}"; \
+    asset="go-containerregistry_Linux_${arch}.tar.gz"; \
+    curl -fsSL -o "${asset}" "${base}/${asset}"; \
+    curl -fsSL -o checksums.txt "${base}/checksums.txt"; \
+    grep " ${asset}\$" checksums.txt | sha256sum -c -; \
+    tar -xzf "${asset}" crane; install -m0755 crane /usr/bin/crane; \
+    rm -f "${asset}" checksums.txt crane; \
+    /usr/bin/kubeadm config images list \
+      --kubernetes-version "${KUBERNETES_VERSION}" \
+      --image-repository registry.k8s.io > /tmp/imglist; \
+    test -s /tmp/imglist; \
+    grep -q '/pause:' /tmp/imglist; \
+    mkdir -p /images; \
+    while read -r ref; do \
+      [ -n "${ref}" ] || continue; \
+      f="/images/$(echo "${ref}" | tr '/:' '__').tar"; \
+      crane pull "${ref}" "${f}"; \
+      echo "bundled ${ref} -> $(basename "${f}")"; \
+    done < /tmp/imglist; \
+    n="$(ls /images/*.tar | wc -l)"; \
+    echo "bundled ${n} control-plane image tarball(s)"; \
+    [ "${n}" -ge 5 ]
 
 # ----------------------------------------------------------------------------
 # Final stage: a Kairos image with everything wired up.
@@ -259,6 +309,13 @@ COPY systemd/kubelet.service                /etc/systemd/system/kubelet.service
 COPY systemd/kubelet.service.d/10-kubeadm.conf /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
 COPY sysctl/k8s.conf                        /etc/sysctl.d/k8s.conf
 COPY modules-load/k8s.conf                  /etc/modules-load.d/k8s.conf
+COPY systemd/provider-kubernetes-image-import.service /etc/systemd/system/provider-kubernetes-image-import.service
+
+# --- Pre-bundled control-plane images (ADR-16) ------------------------------
+# Embed the control-plane image tarballs (fetched by the image-bundler stage)
+# read-only in the OS image; the import oneshot loads them into containerd at boot
+# so a first boot converges with no registry access (air-gap).
+COPY --from=image-bundler /images /opt/provider-kubernetes/images
 
 # Pin containerd's pod-sandbox (pause) image to the EXACT version the bundled
 # kubeadm expects for this Kubernetes minor, instead of a hardcoded tag. kubeadm
@@ -276,7 +333,7 @@ RUN set -eux; \
     echo "pinned containerd sandbox_image to ${pause}"
 
 # --- Boot-time setup: enable services; modules and sysctls load via /etc -----
-RUN systemctl enable containerd.service kubelet.service
+RUN systemctl enable containerd.service kubelet.service provider-kubernetes-image-import.service
 
 # Record the bundled Kubernetes version on the image (OS_VERSION style banner
 # kept short; the provider also detects/enforces the version at runtime).
