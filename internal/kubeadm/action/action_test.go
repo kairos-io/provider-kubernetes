@@ -387,3 +387,82 @@ func TestRepairKubeletConfig_BoundedWait(t *testing.T) {
 		t.Fatal("expected a bounded error when the local API never returns")
 	}
 }
+
+// C2: with a custom serviceSubnet, runInit emits a KubeletConfiguration document
+// pinning clusterDNS to the derived DNS IP. With the default (empty) subnet it
+// emits no KubeletConfiguration (kubeadm derives clusterDNS itself).
+func TestRunInitEmitsKubeletClusterDNSForCustomSubnet(t *testing.T) {
+	capture := func(in kubeadmconfig.Input) string {
+		t.Helper()
+		var content string
+		fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+			switch {
+			case args[0] == "token" && args[1] == "generate":
+				return kubeadm.Result{Stdout: "abcdef.0123456789abcdef\n"}, nil
+			case args[0] == "certs" && args[1] == "certificate-key":
+				return kubeadm.Result{Stdout: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"}, nil
+			case args[0] == "init":
+				b, _ := os.ReadFile(configArg(args))
+				content = string(b)
+			}
+			return kubeadm.Result{}, nil
+		}}
+		e := &KubeadmExecutor{
+			Runner: fr, Minter: credential.Minter{Runner: fr, RootPath: "/"},
+			RootPath: "/", RunDir: t.TempDir(), Role: actualstate.RoleInit,
+			Input: in, TokenTTL: time.Hour,
+		}
+		if err := e.Execute(context.Background(), reconcile.ActionRunInit); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return content
+	}
+
+	custom := capture(kubeadmconfig.Input{
+		KubernetesVersion:    "v1.34.0",
+		ControlPlaneEndpoint: "10.0.0.1:6443",
+		ServiceSubnet:        "172.20.0.0/16",
+	})
+	if !strings.Contains(custom, "kind: KubeletConfiguration") {
+		t.Fatalf("custom subnet init config missing KubeletConfiguration:\n%s", custom)
+	}
+	if !strings.Contains(custom, "172.20.0.10") {
+		t.Fatalf("custom subnet init config missing derived clusterDNS 172.20.0.10:\n%s", custom)
+	}
+
+	def := capture(kubeadmconfig.Input{
+		KubernetesVersion:    "v1.34.0",
+		ControlPlaneEndpoint: "10.0.0.1:6443",
+	})
+	if strings.Contains(def, "kind: KubeletConfiguration") {
+		t.Fatalf("default subnet must NOT emit a KubeletConfiguration:\n%s", def)
+	}
+}
+
+// C2/ADR-17: the join path must NOT emit a KubeletConfiguration even with a custom
+// serviceSubnet -- joining nodes inherit clusterDNS from the kubelet-config
+// ConfigMap kubeadm uploaded at init. Locks the init-emits/join-omits split.
+func TestRunJoinOmitsKubeletConfiguration(t *testing.T) {
+	var content string
+	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if args[0] == "join" {
+			b, _ := os.ReadFile(configArg(args))
+			content = string(b)
+		}
+		return kubeadm.Result{}, nil
+	}}
+	e := &KubeadmExecutor{
+		Runner: fr, RootPath: "/", RunDir: t.TempDir(), Role: actualstate.RoleWorker,
+		Input: kubeadmconfig.Input{ControlPlaneEndpoint: "10.0.0.1:6443", ServiceSubnet: "172.20.0.0/16"},
+		Join: &credential.JoinMaterial{
+			Token:        "abcdef.0123456789abcdef",
+			CACertHashes: []string{"sha256:deadbeef"},
+		},
+	}
+	if err := e.Execute(context.Background(), reconcile.ActionRunJoin); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(content, "kind: KubeletConfiguration") {
+		t.Fatalf("join config must NOT contain a KubeletConfiguration:\n%s", content)
+	}
+}

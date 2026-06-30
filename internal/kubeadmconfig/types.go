@@ -133,6 +133,21 @@ type JoinControlPlane struct {
 	CertificateKey   string      `json:"certificateKey,omitempty"`
 }
 
+// KubeletConfiguration is the kubelet component config (kubelet.config.k8s.io/
+// v1beta1). We emit it only to pin clusterDNS to the value derived from a CUSTOM
+// serviceSubnet (pitfall C2); kubeadm otherwise derives clusterDNS implicitly from
+// its own service CIDR. clusterDNS is a LIST in the kubelet API, not a scalar.
+// This document carries no credentials.
+type KubeletConfiguration struct {
+	TypeMeta   `json:",inline"`
+	ClusterDNS []string `json:"clusterDNS,omitempty"`
+}
+
+// NewKubeletConfiguration returns a KubeletConfiguration with TypeMeta set.
+func NewKubeletConfiguration() KubeletConfiguration {
+	return KubeletConfiguration{TypeMeta: TypeMeta{APIVersion: KubeletAPIVersion, Kind: KindKubeletConfiguration}}
+}
+
 // NewClusterConfiguration returns a ClusterConfiguration with TypeMeta set.
 func NewClusterConfiguration() ClusterConfiguration {
 	return ClusterConfiguration{TypeMeta: TypeMeta{APIVersion: KubeadmAPIVersion, Kind: KindClusterConfiguration}}

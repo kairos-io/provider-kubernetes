@@ -138,7 +138,21 @@ func (e *KubeadmExecutor) runInit(ctx context.Context) error {
 	}}
 	initCfg.CertificateKey = certKey
 
-	content, err := kubeadmconfig.Marshal(cluster, initCfg)
+	// C2: when the operator set a custom serviceSubnet, pin clusterDNS to the IP
+	// derived from it so the kubelet's DNS matches the service CIDR. The init-time
+	// KubeletConfiguration is uploaded to the kubelet-config ConfigMap by kubeadm,
+	// so joining workers inherit the same clusterDNS. Omitted for the default
+	// subnet (kubeadm derives it) so the default path is byte-for-byte unchanged.
+	kubeletCfg, err := kubeadmconfig.BuildKubeletConfiguration(e.Input)
+	if err != nil {
+		return err
+	}
+	docs := []any{cluster, initCfg}
+	if len(kubeletCfg.ClusterDNS) > 0 {
+		docs = append(docs, kubeletCfg)
+	}
+
+	content, err := kubeadmconfig.Marshal(docs...)
 	if err != nil {
 		return err
 	}
@@ -299,7 +313,19 @@ func (e *KubeadmExecutor) runUpgradeApply(ctx context.Context) error {
 func (e *KubeadmExecutor) runRepairKubeletConfig(ctx context.Context) error {
 	cluster := kubeadmconfig.BuildClusterConfiguration(e.Input)
 	initCfg := kubeadmconfig.BuildInitConfiguration(e.Input)
-	content, err := kubeadmconfig.Marshal(cluster, initCfg)
+	// C2/ADR-17: this regenerates /var/lib/kubelet/config.yaml, so it must pin the
+	// SAME clusterDNS we own at init for a custom serviceSubnet -- otherwise the
+	// repair would re-derive it implicitly and could disagree with the init-time
+	// value. Omitted (kubeadm derives) for the default subnet, as in runInit.
+	kubeletCfg, err := kubeadmconfig.BuildKubeletConfiguration(e.Input)
+	if err != nil {
+		return err
+	}
+	docs := []any{cluster, initCfg}
+	if len(kubeletCfg.ClusterDNS) > 0 {
+		docs = append(docs, kubeletCfg)
+	}
+	content, err := kubeadmconfig.Marshal(docs...)
 	if err != nil {
 		return err
 	}

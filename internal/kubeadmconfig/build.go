@@ -51,6 +51,26 @@ func BuildClusterConfiguration(in Input) ClusterConfiguration {
 	return c
 }
 
+// BuildKubeletConfiguration builds a KubeletConfiguration that pins clusterDNS to
+// the IP derived from a CUSTOM serviceSubnet (pitfall C2). When ServiceSubnet is
+// empty it returns a config with NO clusterDNS so kubeadm derives it from its own
+// default service CIDR -- preserving today's default-path behavior exactly. We
+// only override clusterDNS when the operator customized serviceSubnet. Callers
+// should emit the document only when ClusterDNS is non-empty (see runInit); this
+// document is credential-free.
+func BuildKubeletConfiguration(in Input) (KubeletConfiguration, error) {
+	k := NewKubeletConfiguration()
+	if strings.TrimSpace(in.ServiceSubnet) == "" {
+		return k, nil
+	}
+	dns, err := DeriveDNSIP(in.ServiceSubnet)
+	if err != nil {
+		return KubeletConfiguration{}, fmt.Errorf("derive clusterDNS: %w", err)
+	}
+	k.ClusterDNS = []string{dns}
+	return k, nil
+}
+
 // BuildInitConfiguration builds the non-credential parts of an InitConfiguration.
 // BootstrapTokens and CertificateKey are populated later by the credential layer.
 func BuildInitConfiguration(in Input) InitConfiguration {
