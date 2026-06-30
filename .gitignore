@@ -4,7 +4,12 @@ CLAUDE.md
 PROJECT_CONTEXT.md
 /bin/
 /dist/
-/build/
+# build/ holds local-only VM test artifacts (ISOs, disks, RESULTS-*.md), but the
+# image-build helper scripts the Dockerfile/release pipeline depend on must be
+# tracked. Ignore build/ contents, then re-include those scripts.
+/build/*
+!/build/bundle-images.sh
+!/build/gen-bundled-sbom.py
 vendor/
 *.test
 *.out

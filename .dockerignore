@@ -7,7 +7,10 @@
 .git
 .github
 .claude
-build
+# Exclude build/ contents (multi-GB VM ISOs/disks under build/vmtest) but keep the
+# image-bundler script the Dockerfile COPYs into the image-bundler stage.
+build/*
+!build/bundle-images.sh
 bin
 docs
 samples

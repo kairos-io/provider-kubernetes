@@ -230,24 +230,24 @@ RUN set -eux; \
 
 # ----------------------------------------------------------------------------
 # Stage: pre-bundle the control-plane container images (ADR-16). Resolve the EXACT
-# set from the bundled kubeadm (same source as the pause pin, so refs never drift)
-# and fetch each as a ctr-importable tarball with crane (daemonless, no docker/
-# containerd needed at build). The tarballs are embedded read-only in the final
-# image and imported into containerd at boot, so a first boot converges with NO
-# registry access (air-gap). CNI is intentionally NOT bundled (operator's choice).
+# set from the bundled kubeadm (same source as the pause pin, so refs never drift),
+# cosign-VERIFY each against the Kubernetes release identity, and fetch each as a
+# ctr-importable tarball with crane (daemonless). The tarballs + a digest lockfile
+# are embedded read-only in the final image and imported into containerd at boot,
+# so a first boot converges with NO registry access (air-gap). Because the images
+# land in the immutable OS with no later admission check, signature verification is
+# done here at BUILD time (P5). CNI is intentionally NOT bundled (operator choice).
 # ----------------------------------------------------------------------------
 FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS image-bundler
 ARG KUBERNETES_VERSION
 ARG TARGETARCH
-# Pinned; crane is a static Go binary that runs on musl.
+# crane + cosign are static Go binaries that run on musl; both are version-pinned
+# and checksum-verified at install, matching the rest of the binary supply chain.
 ARG CRANE_VERSION=v0.20.3
+ARG COSIGN_VERSION=v2.4.3
 RUN apk add --no-cache curl ca-certificates
 COPY --from=k8s-binaries /bin/kubeadm /usr/bin/kubeadm
-# Install crane (checksum-verified), then resolve the control-plane image set from
-# the bundled kubeadm (single source of truth, shared with the pause pin) and fetch
-# each as a ctr-importable tarball. NOTE: no inline '#' comments inside this RUN --
-# the backslash continuations join it into one logical line, where a '#' would
-# comment out everything after it.
+# Install crane (checksum-verified against the release checksums.txt).
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) arch="x86_64" ;; \
@@ -260,22 +260,21 @@ RUN set -eux; \
     curl -fsSL -o checksums.txt "${base}/checksums.txt"; \
     grep " ${asset}\$" checksums.txt | sha256sum -c -; \
     tar -xzf "${asset}" crane; install -m0755 crane /usr/bin/crane; \
-    rm -f "${asset}" checksums.txt crane; \
-    /usr/bin/kubeadm config images list \
-      --kubernetes-version "${KUBERNETES_VERSION}" \
-      --image-repository registry.k8s.io > /tmp/imglist; \
-    test -s /tmp/imglist; \
-    grep -q '/pause:' /tmp/imglist; \
-    mkdir -p /images; \
-    while read -r ref; do \
-      [ -n "${ref}" ] || continue; \
-      f="/images/$(echo "${ref}" | tr '/:' '__').tar"; \
-      crane pull "${ref}" "${f}"; \
-      echo "bundled ${ref} -> $(basename "${f}")"; \
-    done < /tmp/imglist; \
-    n="$(ls /images/*.tar | wc -l)"; \
-    echo "bundled ${n} control-plane image tarball(s)"; \
-    [ "${n}" -ge 5 ]
+    rm -f "${asset}" checksums.txt crane
+# Install cosign (checksum-verified against the release cosign_checksums.txt).
+RUN set -eux; \
+    case "${TARGETARCH}" in amd64|arm64) : ;; *) echo "unsupported TARGETARCH ${TARGETARCH}" >&2; exit 1 ;; esac; \
+    base="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}"; \
+    asset="cosign-linux-${TARGETARCH}"; \
+    curl -fsSL -o "${asset}" "${base}/${asset}"; \
+    curl -fsSL -o cosign_checksums.txt "${base}/cosign_checksums.txt"; \
+    grep " ${asset}\$" cosign_checksums.txt | sha256sum -c -; \
+    install -m0755 "${asset}" /usr/bin/cosign; \
+    rm -f "${asset}" cosign_checksums.txt
+# Resolve -> verify -> pull each control-plane image, and write the digest lockfile.
+COPY build/bundle-images.sh /usr/local/bin/bundle-images.sh
+RUN KUBERNETES_VERSION="${KUBERNETES_VERSION}" OUT_DIR=/images \
+      sh /usr/local/bin/bundle-images.sh
 
 # ----------------------------------------------------------------------------
 # Final stage: a Kairos image with everything wired up.
