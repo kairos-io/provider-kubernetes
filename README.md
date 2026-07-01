@@ -179,7 +179,22 @@ gh attestation verify \
 A successful verification confirms the artifact was built by this repository's
 `Release` workflow from a tagged commit. That command checks the provenance; add
 `--predicate-type https://cyclonedx.org/bom` to verify the CycloneDX SBOM
-attestation specifically. See
+attestation specifically.
+
+Each image additionally carries an attestation of the **pre-bundled control-plane
+images** it baked (ADR-16): which images, by digest, and whether each was
+upstream-cosign-verified at build vs. digest-pinned only. It uses a custom
+predicate type, so select it explicitly:
+
+```sh
+gh attestation verify \
+  oci://ghcr.io/kairos-io/provider-kubernetes@${digest} \
+  --repo kairos-io/provider-kubernetes \
+  --predicate-type https://kairos.io/attestations/bundled-control-plane-images/v1
+```
+
+The predicate is the image's `/opt/provider-kubernetes/images/images.lock`
+(`{ref, digest, verified, verifyReason}` per image). See
 [`docs/testing.md`](./docs/testing.md) for the full supply-chain picture.
 
 Maintainers cut a release by pushing a signed semver tag; the `Release` workflow
