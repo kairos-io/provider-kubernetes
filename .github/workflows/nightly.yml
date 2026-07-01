@@ -1,0 +1,234 @@
+name: Nightly E2E
+
+# ADR-13 Tier-2 (slice E4), kairos-io/kairos#4202: the heavier e2e scenarios that
+# exceed the per-PR budget -- multi-control-plane stacked-etcd HA bring-up, the
+# pre-membership failure-status path, and a kubeadm-layer in-place minor upgrade.
+# These run on a nightly schedule and on demand (workflow_dispatch), NOT per-PR.
+#
+# Gating: the nightly-only scenarios are behind `//go:build e2e && nightly`, so the
+# per-PR `e2e` job (ci.yml, `-tags e2e`) never compiles them. This workflow runs
+# `go test -tags "e2e nightly"` to compile + run the full set.
+#
+# SECURITY NOTE (privileged containers, same posture as ci.yml's e2e job, ADR-13
+# E3 verdict): the e2e node container runs --privileged because
+# kubeadm/kubelet/containerd/etcd require real cgroup v2 control, mount namespaces,
+# netns creation, and /sys/fs/cgroup write access (the same constraint kind has).
+# The ONLY image run privileged is OUR OWN built kairos-kubeadm-e2e-node image,
+# derived from the kairos-kubeadm base built in this same job from the checkout
+# source; no third-party image is pulled. The load-bearing controls are identical
+# to ci.yml: (1) GitHub-HOSTED ephemeral runner only -- NEVER self-hosted;
+# (2) NO secrets and an explicit read-only token -- NEVER add secrets or
+# packages:write; (3) `schedule`/`workflow_dispatch` triggers only (no
+# pull_request_target). Ephemeral per-run kubeadm bootstrap tokens (bounded TTL,
+# never persisted) are the only secrets. Teardown is guaranteed (t.Cleanup +
+# label-scoped prune-on-failure below).
+
+on:
+  schedule:
+    # 03:00 UTC daily (ADR-13 OQ-E3).
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+# Cancel a superseded manual re-run on the same ref; scheduled runs are unaffected.
+concurrency:
+  group: nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Derive the supported-minor window from the single source of truth
+  # (kubeadm.SupportedMinors in version.go, ADR-3) -- same extraction as ci.yml.
+  discover:
+    name: resolve supported version window
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      minors: ${{ steps.minors.outputs.minors }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Extract SupportedMinors -> JSON matrix
+        id: minors
+        run: |
+          set -euo pipefail
+          # SupportedMinors is a static string-literal slice; pull each
+          # "major.minor" token off its declaration line.
+          minors="$(grep 'SupportedMinors *=' internal/kubeadm/version.go \
+            | grep -oE '[0-9]+\.[0-9]+' \
+            | jq -R . | jq -cs .)"
+          if [ "$minors" = "[]" ]; then
+            echo "could not parse SupportedMinors from version.go" >&2
+            exit 1
+          fi
+          echo "Supported window: $minors"
+          echo "minors=$minors" >> "$GITHUB_OUTPUT"
+
+  # Tier-2 nightly e2e: real kubeadm in privileged systemd node containers. Per
+  # supported minor leg, this job:
+  #   - builds the kairos-kubeadm base + e2e node image at the LOWER minor;
+  #   - if a higher adjacent minor exists in the supported window, ALSO builds a
+  #     second e2e node image at that HIGHER minor and exposes it to the test via
+  #     E2E_UPGRADE_TO_NODE_IMAGE / E2E_UPGRADE_TO_VERSION so the in-place upgrade
+  #     scenario runs N -> N+1 (otherwise that one scenario self-skips);
+  #   - runs the full `go test -tags "e2e nightly"` suite.
+  #
+  # The from-source containerd+kubelet build of the Hadron base dominates the
+  # wall-clock; building TWO bases on the upgrade legs is why timeout-minutes is
+  # generous. Legs are independent (fail-fast: false).
+  nightly-e2e:
+    name: nightly e2e (k8s ${{ matrix.minor }})
+    needs: discover
+    # SECURITY (mirrors ci.yml e2e): privileged node container on a GitHub-HOSTED
+    # ephemeral runner, explicit read-only token, no secrets, schedule/dispatch
+    # triggers only. These conditions -- not the container flags -- are the
+    # containment for the privileged workload.
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    # Two from-source base builds (lower + higher) on the upgrade legs plus the
+    # heavier multi-container HA/upgrade scenarios. Generous ceiling; the test
+    # harness itself is bounded (#4099-1) well under this.
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ${{ fromJSON(needs.discover.outputs.minors) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Resolve lower-minor patch + commit + crictl versions
+        id: lower
+        run: |
+          set -euo pipefail
+          k8s="$(curl -fsSL "https://dl.k8s.io/release/stable-${{ matrix.minor }}.txt")"
+          case "$k8s" in
+            v${{ matrix.minor }}.*) : ;;
+            *) echo "unexpected patch ${k8s} for minor ${{ matrix.minor }}" >&2; exit 1 ;;
+          esac
+          # The Hadron base builds kubelet static from source and asserts the cloned
+          # tag resolves to this commit SHA; resolve and forward it (see ci.yml for
+          # the full rationale).
+          kcommit="$(git ls-remote https://github.com/kubernetes/kubernetes "refs/tags/${k8s}^{}" | cut -f1)"
+          if [ -z "$kcommit" ]; then
+            kcommit="$(git ls-remote https://github.com/kubernetes/kubernetes "refs/tags/${k8s}" | cut -f1)"
+          fi
+          case "$kcommit" in
+            ?*) : ;;
+            *) echo "could not resolve commit SHA for ${k8s}" >&2; exit 1 ;;
+          esac
+          crictl="v${{ matrix.minor }}.0"
+          echo "k8s=${k8s} kcommit=${kcommit} crictl=${crictl}"
+          echo "k8s=${k8s}" >> "$GITHUB_OUTPUT"
+          echo "kcommit=${kcommit}" >> "$GITHUB_OUTPUT"
+          echo "crictl=${crictl}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve higher adjacent minor (for the in-place upgrade scenario)
+        id: higher
+        run: |
+          set -euo pipefail
+          # The next adjacent minor IS the upgrade target. It is only valid if it is
+          # inside the supported window (kubeadm only supports +1 minor per upgrade,
+          # and ADR-3 refuses out-of-window targets). If stable-<higher>.txt does not
+          # resolve (e.g. this leg is the newest minor), leave the outputs empty so
+          # the upgrade scenario self-skips rather than fakes a no-op.
+          major="$(echo "${{ matrix.minor }}" | cut -d. -f1)"
+          minor="$(echo "${{ matrix.minor }}" | cut -d. -f2)"
+          hi_mm="${major}.$((minor + 1))"
+          window='${{ needs.discover.outputs.minors }}'
+          if ! echo "$window" | jq -e --arg m "$hi_mm" 'index($m)' >/dev/null; then
+            echo "no higher minor ${hi_mm} in supported window ${window}; upgrade scenario will self-skip on this leg"
+            echo "k8s=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! k8s="$(curl -fsSL "https://dl.k8s.io/release/stable-${hi_mm}.txt")"; then
+            echo "could not resolve stable patch for higher minor ${hi_mm}; upgrade scenario will self-skip"
+            echo "k8s=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$k8s" in
+            v${hi_mm}.*) : ;;
+            *) echo "unexpected patch ${k8s} for higher minor ${hi_mm}; upgrade scenario will self-skip"; echo "k8s=" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          kcommit="$(git ls-remote https://github.com/kubernetes/kubernetes "refs/tags/${k8s}^{}" | cut -f1)"
+          if [ -z "$kcommit" ]; then
+            kcommit="$(git ls-remote https://github.com/kubernetes/kubernetes "refs/tags/${k8s}" | cut -f1)"
+          fi
+          case "$kcommit" in
+            ?*) : ;;
+            *) echo "could not resolve commit SHA for higher ${k8s}; upgrade scenario will self-skip"; echo "k8s=" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          crictl="v${hi_mm}.0"
+          echo "higher minor: k8s=${k8s} kcommit=${kcommit} crictl=${crictl}"
+          echo "k8s=${k8s}" >> "$GITHUB_OUTPUT"
+          echo "kcommit=${kcommit}" >> "$GITHUB_OUTPUT"
+          echo "crictl=${crictl}" >> "$GITHUB_OUTPUT"
+
+      - name: Build kairos-kubeadm base image (lower minor)
+        run: |
+          make image \
+            VERSION=ci-${{ matrix.minor }} \
+            KUBERNETES_VERSION=${{ steps.lower.outputs.k8s }} \
+            KUBERNETES_COMMIT=${{ steps.lower.outputs.kcommit }} \
+            CRICTL_VERSION=${{ steps.lower.outputs.crictl }} \
+            IMAGE=kairos-kubeadm:${{ steps.lower.outputs.k8s }}
+
+      - name: Build e2e node image (lower minor)
+        run: |
+          make e2e-node-image \
+            KUBERNETES_VERSION=${{ steps.lower.outputs.k8s }} \
+            BASE_IMAGE=kairos-kubeadm:${{ steps.lower.outputs.k8s }} \
+            E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:${{ steps.lower.outputs.k8s }}
+
+      - name: Build kairos-kubeadm base image (higher minor, upgrade target)
+        if: steps.higher.outputs.k8s != ''
+        run: |
+          make image \
+            VERSION=ci-upgrade \
+            KUBERNETES_VERSION=${{ steps.higher.outputs.k8s }} \
+            KUBERNETES_COMMIT=${{ steps.higher.outputs.kcommit }} \
+            CRICTL_VERSION=${{ steps.higher.outputs.crictl }} \
+            IMAGE=kairos-kubeadm:${{ steps.higher.outputs.k8s }}
+
+      - name: Build e2e node image (higher minor, upgrade target)
+        if: steps.higher.outputs.k8s != ''
+        run: |
+          make e2e-node-image \
+            KUBERNETES_VERSION=${{ steps.higher.outputs.k8s }} \
+            BASE_IMAGE=kairos-kubeadm:${{ steps.higher.outputs.k8s }} \
+            E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:${{ steps.higher.outputs.k8s }}
+
+      - name: Run nightly e2e suite (e2e + nightly)
+        run: |
+          E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:${{ steps.lower.outputs.k8s }} \
+          E2E_KUBERNETES_VERSION=${{ steps.lower.outputs.k8s }} \
+          E2E_UPGRADE_TO_NODE_IMAGE=${{ steps.higher.outputs.k8s != '' && format('kairos-kubeadm-e2e-node:{0}', steps.higher.outputs.k8s) || '' }} \
+          E2E_UPGRADE_TO_VERSION=${{ steps.higher.outputs.k8s }} \
+          go test -tags "e2e nightly" -count=1 -timeout 90m -v ./test/e2e/...
+
+      - name: Prune e2e containers, volumes, and images on failure
+        if: failure()
+        run: |
+          docker ps -aq --filter 'label=provider-kubernetes-e2e=1' \
+            | xargs -r docker rm -fv || true
+          docker image rm -f \
+            "kairos-kubeadm-e2e-node:${{ steps.lower.outputs.k8s }}" \
+            "kairos-kubeadm:${{ steps.lower.outputs.k8s }}" || true
+          if [ -n "${{ steps.higher.outputs.k8s }}" ]; then
+            docker image rm -f \
+              "kairos-kubeadm-e2e-node:${{ steps.higher.outputs.k8s }}" \
+              "kairos-kubeadm:${{ steps.higher.outputs.k8s }}" || true
+          fi
+          docker volume prune -f || true
