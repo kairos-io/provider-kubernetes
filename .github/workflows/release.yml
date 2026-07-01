@@ -190,23 +190,27 @@ jobs:
           push-to-registry: true
 
       # ADR-16 P5: attest the pre-bundled control-plane images by DIGEST, including
-      # whether each was upstream-signature-verified at build (from the baked-in
-      # images.lock). This records exactly what air-gap content the released image
-      # baked and at what trust level (cosign-verified vs digest-pinned-only).
-      - name: Generate bundled control-plane image SBOM (CycloneDX)
+      # whether each was upstream-signature-verified at build. We attest the
+      # baked-in images.lock DIRECTLY as a custom in-toto predicate (not an SBOM):
+      # images.lock IS the authoritative ref->digest->verified/verifyReason record,
+      # and a generic predicate avoids actions/attest-sbom's SBOM-format detector
+      # (which rejects a compliant hand-rolled CycloneDX) -- more robust and
+      # future-proof. `gh attestation verify --predicate-type <type>` selects it.
+      - name: Extract bundled control-plane image lockfile
         run: |
           set -euo pipefail
-          img="${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}"
-          docker run --rm --entrypoint cat "$img" \
+          docker run --rm --entrypoint cat \
+            "${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}" \
             /opt/provider-kubernetes/images/images.lock > images.lock
-          python3 build/gen-bundled-sbom.py images.lock bundled-images.cdx.json
+          test -s images.lock
 
-      - name: Attest bundled control-plane image SBOM
-        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+      - name: Attest bundled control-plane images
+        uses: actions/attest@ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc # v2
         with:
           subject-name: ${{ steps.build.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
-          sbom-path: bundled-images.cdx.json
+          predicate-type: https://kairos.io/attestations/bundled-control-plane-images/v1
+          predicate-path: images.lock
           push-to-registry: true
 
       # R-4: prove the attestation is real before a tester relies on it. A broken
