@@ -40,13 +40,10 @@ IMAGE              ?= kairos-kubeadm:$(VERSION)
 BASE_IMAGE       ?= kairos-kubeadm:$(KUBERNETES_VERSION)
 E2E_NODE_IMAGE   ?= kairos-kubeadm-e2e-node:$(KUBERNETES_VERSION)
 E2E_TIMEOUT      ?= 40m
-# Tier-2 nightly suite runs heavier multi-container scenarios (HA, upgrade), so it
-# carries a longer wall-clock ceiling than the per-PR Tier-1 suite.
+# Tier-2 nightly suite runs heavier multi-container scenarios (HA, failure-status),
+# so it carries a longer wall-clock ceiling than the per-PR Tier-1 suite. (The
+# kubeadm-layer upgrade is validated on the libvirt VM boundary, not here -- ADR-13-B1.)
 E2E_NIGHTLY_TIMEOUT ?= 90m
-# Higher-minor node image + version for the in-place kubeadm upgrade scenario; set
-# by the nightly workflow. Empty -> the upgrade scenario self-skips (never faked).
-E2E_UPGRADE_TO_NODE_IMAGE ?=
-E2E_UPGRADE_TO_VERSION    ?=
 
 .PHONY: all build test vet fmt fmt-check lint tidy verify-pins image clean e2e-node-image e2e e2e-nightly
 
@@ -137,16 +134,13 @@ e2e: e2e-node-image
 	$(GO) test -tags e2e -timeout $(E2E_TIMEOUT) -v ./test/e2e/...
 
 ## e2e-nightly: run the heavier Tier-2 (ADR-13 E4) scenarios that are too slow for
-## per-PR (CP-join/HA, pre-membership failure-status, kubeadm-layer upgrade). It
-## mirrors `e2e` but compiles the nightly-gated files too (-tags "e2e nightly", so
+## per-PR (multi-CP stacked-etcd HA, pre-membership failure-status). It mirrors
+## `e2e` but compiles the nightly-gated files too (-tags "e2e nightly", so
 ## //go:build e2e && nightly files are included) and allows a longer timeout. The
-## upgrade scenario also consumes E2E_UPGRADE_TO_NODE_IMAGE / E2E_UPGRADE_TO_VERSION
-## (the higher-minor node image); when unset that one scenario self-skips.
+## kubeadm-layer upgrade is validated on the libvirt VM boundary, not here (ADR-13-B1).
 e2e-nightly: e2e-node-image
 	E2E_NODE_IMAGE=$(E2E_NODE_IMAGE) \
 	E2E_KUBERNETES_VERSION=$(KUBERNETES_VERSION) \
-	E2E_UPGRADE_TO_NODE_IMAGE=$(E2E_UPGRADE_TO_NODE_IMAGE) \
-	E2E_UPGRADE_TO_VERSION=$(E2E_UPGRADE_TO_VERSION) \
 	$(GO) test -tags "e2e nightly" -count=1 -timeout $(E2E_NIGHTLY_TIMEOUT) -v ./test/e2e/...
 
 ## clean: remove build artifacts
