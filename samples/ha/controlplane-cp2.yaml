@@ -3,7 +3,7 @@
 # cluster initialized by init-cp1.yaml. cp3, cp4, ... are identical except for
 # control_plane_host and localAPIEndpoint.advertiseAddress (each node's own IP).
 #
-# STATUS: under active development; NOT field-ready.
+# STATUS: early public release; adapt to your environment, not yet certified for production.
 #
 # SECURITY -- READ THIS. The certificateKey below is a CLUSTER ROOT CREDENTIAL.
 # It decrypts the uploaded cluster PKI, INCLUDING THE CA PRIVATE KEY. Anyone who

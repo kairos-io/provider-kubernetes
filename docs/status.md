@@ -41,7 +41,7 @@ budget:
   maxAttempts: 3
 updatedAt: "2026-06-03T12:00:00Z"
 bootID: 7c9e6679-7425-40de-944b-e07fc1f90ae7
-version: v0.2.0
+version: v0.3.0
 ```
 
 ### Fields

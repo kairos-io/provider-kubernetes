@@ -7,7 +7,7 @@
 # This is the FIRST control-plane node (`role: init`). For additional control
 # planes use `samples/controlplane.yaml`; for workers use `samples/worker.yaml`.
 #
-# STATUS: under active development; not field-ready.
+# STATUS: early public release; adapt to your environment, not yet certified for production.
 
 # -----------------------------------------------------------------------------
 # Install — Kairos copies the image to disk on first (LiveCD) boot, then reboots

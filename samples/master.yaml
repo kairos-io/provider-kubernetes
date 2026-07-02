@@ -2,7 +2,7 @@
 # Kairos cloud-config for the FIRST control-plane node of a kubeadm cluster
 # bootstrapped by provider-kubernetes.
 #
-# STATUS: this provider is under active development and is NOT field-ready.
+# STATUS: early public release; adapt to your environment, not yet certified for production.
 #
 # Read before deploying:
 # - cluster_token MUST be at least 16 characters and SHOULD have >= 128 bits of

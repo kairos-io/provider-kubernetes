@@ -2,7 +2,7 @@
 # Kairos cloud-config for a WORKER node joining a kubeadm cluster bootstrapped
 # by provider-kubernetes.
 #
-# STATUS: this provider is under active development and is NOT field-ready.
+# STATUS: early public release; adapt to your environment, not yet certified for production.
 #
 # Join material (token + CA cert hash) is delivered HERE by the
 # operator / management plane that already holds control-plane access. The node

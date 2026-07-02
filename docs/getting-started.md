@@ -28,7 +28,7 @@ Tagged releases publish one image per supported Kubernetes minor:
 
 ```sh
 # choose the Kubernetes minor (1.34 / 1.35 / 1.36):
-docker pull ghcr.io/kairos-io/provider-kubernetes:v0.1.0-k8s1.34
+docker pull ghcr.io/kairos-io/provider-kubernetes:v0.3.0-k8s1.34
 # the newest supported minor is also tagged plainly and as :latest
 docker pull ghcr.io/kairos-io/provider-kubernetes:latest
 ```

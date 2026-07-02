@@ -76,9 +76,8 @@ kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes
   one, change the other.
 - **`encapsulation: VXLANCrossSubnet`** tunnels pod traffic only between nodes
   on different subnets and routes natively within a subnet. VXLAN needs neither
-  BGP nor any fabric cooperation, so it works on a plain bridged or NAT'd LAN
-  (the libvirt host-bridge the repo's multi-node walkthrough uses). Switch to
-  BGP/IPIP if your environment calls for it.
+  BGP nor any fabric cooperation, so it works on a plain bridged or NAT'd LAN.
+  Switch to BGP/IPIP if your environment calls for it.
 - **Operator install, not the flat manifest.** The Tigera operator is Calico's
   recommended install path; the `Installation` CR is the supported way to set
   the pod CIDR declaratively rather than editing a generated DaemonSet env var.

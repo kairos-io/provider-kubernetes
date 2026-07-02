@@ -3,8 +3,8 @@
 This directory contains example Kairos cloud-configs for the three node roles
 the provider supports, and points at the `Dockerfile` you build the image with.
 
-**The project is under active development and is NOT field-ready.** Treat these
-samples as design demos, not as production templates.
+These are worked examples for the current release. Adapt them to your environment
+rather than using them verbatim; the project is not yet certified for production.
 
 ## Files
 
@@ -14,7 +14,13 @@ samples as design demos, not as production templates.
 | `controlplane.yaml` | `controlplane` | Additional control-plane node; joins via token + cert key. |
 | `worker.yaml`       | `worker`       | Worker node; joins via token + CA hash. |
 | `ha/`               | HA             | Multi-control-plane (stacked-etcd) walkthrough: stable endpoint, one-at-a-time bring-up, reset/etcd-orphan runbook. |
-| `cni-calico/`       | CNI            | Calico CNI examples (post-hoc apply and bundled-in-cloud-config). |
+| `cni-flannel/`      | CNI            | Flannel CNI examples (post-hoc apply and bundled-in-cloud-config). Simplest/most neutral; ideal for lab/single-node. |
+| `cni-calico/`       | CNI            | Calico CNI examples (post-hoc apply and bundled-in-cloud-config). For network policy / eBPF / HA-oriented clusters. |
+
+> The provider installs **no CNI** — a node stays `NotReady` until you apply one.
+> That is expected kubeadm behavior (the provider is CNI-agnostic by design —
+> principle #3, no vendor lock-in), not a bug. Pick the CNI that fits your cluster;
+> `cni-flannel/` and `cni-calico/` are two worked examples, not a default.
 
 ## Build the image
 
@@ -92,18 +98,3 @@ config_url field, etc.).
 5. Install a CNI plugin (Flannel, Calico, Cilium, ...). The provider does not
    install one.
 
-## Why each design choice
-
-- **Pinned + checksum-verified downloads:** integrity from the canonical
-  publisher's HTTPS-served `.sha256` files; an unverified or tampered binary
-  fails the image build, not a runtime cluster.
-- **`registry.k8s.io`, not `k8s.gcr.io`:** the latter was frozen in 2023 and is
-  deprecated.
-- **Bounded-TTL tokens, never persisted on joiners:** the provider mints
-  CSPRNG kubeadm-native tokens with a 1h default TTL; joiners consume them once
-  and store nothing. A reboot mid-bootstrap is recovered by re-minting and
-  redelivering, never by re-deriving a permanent secret.
-- **CA pinning is mandatory:** `caCertHashes` is required for token discovery;
-  `unsafeSkipCAVerification` is structurally never set true.
-- **`cluster_token` is a correlation value, not key material:** the provider
-  does not derive any kubeadm credential from it.

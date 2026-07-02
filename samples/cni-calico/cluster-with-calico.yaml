@@ -13,7 +13,7 @@
 # tigera-operator manifest and Calico images). The IP-pool cidr matches the
 # podSubnet below; keep them in sync.
 #
-# STATUS: provider under active development; NOT field-ready.
+# STATUS: early public release; adapt to your environment, not yet certified for production.
 
 install:
   device: "auto"

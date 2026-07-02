@@ -5,9 +5,9 @@ the Kairos maintainers' minimal, from-scratch, **musl-based** immutable OS. This
 page explains what that means for building and operating the provider; for the
 build command see [Building a Kairos image](../README.md#building-a-kairos-image).
 
-> Status: validated on KVM/libvirt - a single-node control plane converges end to
-> end on Hadron. As with the rest of the project, treat it as functional, not yet
-> field-hardened.
+> The provider images are built on Hadron; a single-node control plane converges
+> end to end on the Hadron base. As with the rest of the project, this is an early
+> public release and is not yet certified for production.
 
 ## How the image is built
 
@@ -64,14 +64,14 @@ Kubernetes version with `containerd://2.1.4`, OS-IMAGE `Hadron Linux`, and a
   lookup) are bypassed in favour of Go's built-in resolver
   (`/etc/resolv.conf` + `/etc/hosts`). **Unaffected:** seccomp, AppArmor, cgroups,
   and per-container enforcement (runc is the official static binary). SELinux-
-  enforcing has not been exercised on the static kubelet - validate before relying
+  enforcing mode is not covered on the static kubelet - confirm it before relying
   on it.
 - **Build-time module fetch:** the static **containerd** build resolves Go modules
   at build time (checksum-enforced via the pinned `go.sum`); the static **kubelet**
   build is fully vendored, so it pulls nothing beyond the pinned clone.
 - **Per-minor pinning:** building a non-default Kubernetes minor from source
   requires the matching `KUBERNETES_COMMIT` (above).
-- **arch:** validated on amd64.
+- **arch:** amd64 (arm64 not yet supported).
 
 See also [Getting started](./getting-started.md),
 [Configuration reference](./configuration.md), and [Testing](./testing.md).

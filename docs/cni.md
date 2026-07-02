@@ -4,11 +4,32 @@ The provider deliberately installs **no CNI**. It stays out of CNI policy so you
 can choose Flannel, Calico, Cilium, or whatever fits. Until a CNI is installed,
 nodes report `NotReady` and pods stay `Pending` - this is expected.
 
-Install a CNI **after** the control plane is up.
+Install a CNI **after** the control plane is up. Two worked examples ship in
+`samples/`: [`samples/cni-flannel/`](../samples/cni-flannel/) (the simplest,
+single-manifest option) and [`samples/cni-calico/`](../samples/cni-calico/) (for
+network policy / eBPF / HA-oriented clusters). Each shows both ways to install:
+apply after the cluster is up, or bundle it in the control-plane cloud-config.
+
+## Flannel (simplest worked example)
+
+[`samples/cni-flannel/`](../samples/cni-flannel/) installs Flannel from a single
+upstream manifest (no operator, no CRDs). Flannel's default pod network is
+`10.244.0.0/16`, which already matches the sample `podSubnet`, so it is the
+least-friction way to a `Ready` cluster.
+
+```sh
+# after the control plane is up:
+kubectl apply -f https://github.com/flannel-io/flannel/releases/download/v0.28.5/kube-flannel.yml
+```
+
+Or bundle it in the control-plane cloud-config with
+[`samples/cni-flannel/cluster-with-flannel.yaml`](../samples/cni-flannel/cluster-with-flannel.yaml)
+(same self-waiting, idempotent one-shot pattern as the Calico example below). If
+you change `podSubnet`, edit Flannel's `net-conf.json` `Network` to match.
 
 ## Calico (worked example)
 
-[`samples/cni-calico/`](../samples/cni-calico/) has two validated approaches.
+[`samples/cni-calico/`](../samples/cni-calico/) has two approaches.
 
 ### A. Apply after the cluster is up
 
