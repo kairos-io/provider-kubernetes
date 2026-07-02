@@ -3,7 +3,7 @@
 # multi-control-plane (HA, stacked-etcd) kubeadm cluster bootstrapped by
 # provider-kubernetes.
 #
-# STATUS: this provider is under active development and is NOT field-ready.
+# STATUS: early public release; adapt to your environment, not yet certified for production.
 #
 # HA REQUIREMENT (ADR-11): controlPlaneEndpoint MUST be a STABLE address that
 # outlives any single control-plane node -- a VIP, an external L4 load balancer,

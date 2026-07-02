@@ -4,50 +4,31 @@ A [Kairos](https://kairos.io) cluster provider that bootstraps **upstream
 Kubernetes** using `kubeadm`, while remaining native to the Kairos ecosystem
 (the `clusterplugin` / `yip` contract).
 
-> ## Under active development — NOT ready for field testing
->
-> This project is in **early development**. It is **not** production-hardened
-> and is **not** ready for field testing, staging, or production use. It can
-> bootstrap clusters in validation (see "What works today"), but interfaces,
-> configuration, and behavior **will** change without notice. Do not deploy it
-> on machines you care about.
-
 ## What this is
 
 `provider-kubernetes` gives Kairos users a first-class way to **create and
-manage kubeadm-based Kubernetes clusters**. It is a new, **fully Go-native**
-provider — no shell scripts driving the bootstrap — that plugs into the Kairos
+manage kubeadm-based Kubernetes clusters**, that plugs into the Kairos
 cluster lifecycle.
 
 Its design takes the feedback in
 [kairos-io/kairos#4099](https://github.com/kairos-io/kairos/issues/4099) as a
 starting point, notably:
 
-- **No more bash-driven orchestration** — kubeadm is driven through Go, so
-  behavior is unit-testable rather than only verifiable end-to-end.
-- **Fail fast, never hang** — failures surface as errors and never block
-  subsequent Kairos boot stages.
-- **No vendor lock-in** — upstream kubeadm first; FIPS and downstream
-  distributions are optional build variants, not core assumptions.
-- **Secure by default** — sound credential handling, join-time CA
-  verification (mandatory CA pinning, never `unsafeSkipCAVerification`), least
-  privilege, and a checksum-verified supply chain.
 - **Externally-managed control planes** are a supported topology, not an
   afterthought.
+- **Tracks upstream Kubernetes (N, N-1, N-2).** The provider supports the three
+  most recent in-support upstream Kubernetes minors (currently 1.34 / 1.35 /
+  1.36), rolling the window forward as new minors ship — matching upstream's
+  support policy.
 
 ## What works today
-
-Validated end-to-end on KVM/QEMU and libvirt (clusters bootstrapped on
-Kubernetes v1.34.0; images for the whole supported window 1.34 / 1.35 / 1.36 are
-built and verified in CI):
 
 - **Single-node and multi-node clusters.** A `role: init` node runs
   `kubeadm init`; `worker` and `controlplane` nodes join with CA pinning.
 - **Multi-control-plane HA (stacked etcd).** Additional control planes join an
   existing cluster behind a stable endpoint, etcd membership grows correctly,
   and a misconfigured second `role: init` is refused rather than clobbering the
-  cluster. Validated live on a 3-control-plane libvirt cluster (CP join, etcd
-  quorum, failover). See [`samples/ha/`](./samples/ha/).
+  cluster. See [`samples/ha/`](./samples/ha/).
 - **Unattended install.** Booting a Kairos image built from this repo with one
   of the sample cloud-configs installs to disk and bootstraps the cluster with
   no manual steps.
@@ -61,17 +42,17 @@ built and verified in CI):
   (control plane via `upgrade apply`, followers/workers via `upgrade node`),
   refusing downgrades / skip-level / out-of-window. It auto-repairs the kubelet
   config when an image swap leaves the new kubelet unable to start, and takes a
-  best-effort etcd snapshot (only onto encrypted storage). Validated live for
-  1.34 -> 1.35. See [`docs/upgrades.md`](./docs/upgrades.md).
-- **CNI is the operator's choice.** The provider installs no CNI;
-  [`samples/cni-calico/`](./samples/cni-calico/) shows two ways to add Calico
-  (apply after the cluster is up, or bundle it in the control-plane
-  cloud-config).
-- **Built on Hadron (musl).** Images are built on the Kairos **Hadron**
-  minimal/musl immutable OS, via the canonical Kairos `kairos-init` flow.
-  containerd and kubelet are built static from pinned source (the official glibc
-  binaries can't exec on musl); the rest are verified static downloads. Validated
-  on libvirt (a control plane converges on Hadron). See
+  best-effort etcd snapshot (only onto encrypted storage). See
+  [`docs/upgrades.md`](./docs/upgrades.md).
+- **CNI is the operator's choice.** The provider installs no CNI by design (no
+  vendor lock-in). Two worked examples ship in `samples/` —
+  [`samples/cni-flannel/`](./samples/cni-flannel/) and
+  [`samples/cni-calico/`](./samples/cni-calico/) — each showing both ways to
+  install one: apply it after the cluster is up, or bundle it in the
+  control-plane cloud-config.
+- **Built on Hadron (musl).** Images are built on the Kairos **Hadron** minimal,
+  musl-based immutable OS. containerd and kubelet are built static from pinned
+  source; the remaining binaries are verified static downloads. See
   [`docs/hadron.md`](./docs/hadron.md).
 - **CI and releases.** Every push runs build / vet / test / lint, a Kairos image
   build across the supported Kubernetes window, and a real-kubeadm **end-to-end
@@ -80,29 +61,9 @@ built and verified in CI):
   per-minor images to ghcr (see "Released images"). See
   [`docs/testing.md`](./docs/testing.md) for the test layers and coverage boundary.
 
-The full lifecycle - bootstrap, join, **upgrade**, and reset - plus credential
-handling, multi-control-plane HA, the image build, CI, and release publishing are
-implemented and validated on VMs. See the roadmap discussion in the issue above.
-
-## Status
-
-| Area | State |
-|------|-------|
-| Project bootstrap | in place |
-| Architecture / design | foundational decisions made |
-| Cluster bootstrap (init / worker / controlplane) | implemented, validated on KVM/libvirt |
-| Multi-control-plane HA (stacked etcd) | implemented, validated on libvirt (3 CPs) |
-| `mint-join` join-material helper | implemented, validated |
-| Kairos image build on Hadron (musl; canonical kairos-init, static runtime) | implemented, validated on libvirt (manual smoke) |
-| CI (build/vet/test/lint + image build across 1.34/1.35/1.36) | implemented |
-| E2E suite (real kubeadm in-container: init/join/external-CP/reset/guards, per-PR) | implemented |
-| Release automation (per-minor images to ghcr + binary) | implemented |
-| Cluster upgrades (`kubeadm upgrade`) | implemented, validated on libvirt (1.34 -> 1.35) |
-| Field readiness | not ready |
-
 ## Building
 
-Requires Go 1.26.3+.
+Requires Go 1.26.4+.
 
 ```sh
 make build      # produces ./bin/agent-provider-kubernetes
@@ -126,7 +87,7 @@ publisher's HTTPS-served `.sha256` file:
 make image KUBERNETES_VERSION=v1.34.0 VERSION=dev
 ```
 
-The base is the Kairos **[Hadron](./docs/hadron.md)** minimal/musl immutable OS,
+The base is the Kairos **[Hadron](./docs/hadron.md)** minimal, musl-based immutable OS,
 which `kairos-init` transforms into a bootable Kairos system (mirroring the
 canonical Kairos image build). Because Hadron is musl, containerd and kubelet are
 built **fully static from pinned source** (the official glibc binaries can't exec
@@ -145,65 +106,22 @@ GitHub Container Registry, so you can test without building locally:
 
 ```sh
 # pick the Kubernetes minor you want (1.34 / 1.35 / 1.36):
-docker pull ghcr.io/kairos-io/provider-kubernetes:v0.2.0-k8s1.34
+docker pull ghcr.io/kairos-io/provider-kubernetes:v0.3.0-k8s1.34
 
 # the newest supported minor is also published as the plain tag and :latest:
-docker pull ghcr.io/kairos-io/provider-kubernetes:v0.2.0
+docker pull ghcr.io/kairos-io/provider-kubernetes:v0.3.0
 docker pull ghcr.io/kairos-io/provider-kubernetes:latest
 ```
 
 Each release also attaches the provider binary (linux/amd64) plus a sha256
-checksum. **These are development releases and are not field-ready.**
+checksum. This is an early public release supporting the 1.34 / 1.35 / 1.36
+Kubernetes window; see [`docs/testing.md`](./docs/testing.md) for the coverage
+boundary. It is not yet certified for production use, and configuration and
+behavior may still change between minor releases — pin a released image tag.
 
-### Verifying a release
-
-Every published image and the release binary carry **keyless SLSA build-provenance
-and CycloneDX SBOM attestations**, signed via the release workflow's OIDC identity (no
-private key). Verify them with the GitHub CLI -- no extra tooling:
-
-```sh
-# Image -- verify by digest (resolve it first so you verify the exact bytes):
-digest=$(docker buildx imagetools inspect \
-  ghcr.io/kairos-io/provider-kubernetes:v0.2.0-k8s1.34 \
-  --format '{{.Manifest.Digest}}')
-gh attestation verify \
-  oci://ghcr.io/kairos-io/provider-kubernetes@${digest} \
-  --repo kairos-io/provider-kubernetes
-
-# Binary tarball (downloaded from the GitHub Release):
-gh attestation verify \
-  agent-provider-kubernetes_v0.2.0_linux_amd64.tar.gz \
-  --repo kairos-io/provider-kubernetes
-```
-
-A successful verification confirms the artifact was built by this repository's
-`Release` workflow from a tagged commit. That command checks the provenance; add
-`--predicate-type https://cyclonedx.org/bom` to verify the CycloneDX SBOM
-attestation specifically.
-
-Each image additionally carries an attestation of the **pre-bundled control-plane
-images** it baked (ADR-16): which images, by digest, and whether each was
-upstream-cosign-verified at build vs. digest-pinned only. It uses a custom
-predicate type, so select it explicitly:
-
-```sh
-gh attestation verify \
-  oci://ghcr.io/kairos-io/provider-kubernetes@${digest} \
-  --repo kairos-io/provider-kubernetes \
-  --predicate-type https://kairos.io/attestations/bundled-control-plane-images/v1
-```
-
-The predicate is the image's `/opt/provider-kubernetes/images/images.lock`
-(`{ref, digest, verified, verifyReason}` per image). See
-[`docs/testing.md`](./docs/testing.md) for the full supply-chain picture.
-
-Maintainers cut a release by pushing a signed semver tag; the `Release` workflow
-builds + pushes the per-minor images (with attestations) and creates the GitHub
-Release:
-
-```sh
-git tag -s v0.2.0 -m "v0.2.0" && git push origin v0.2.0
-```
+Every image and release binary is signed with keyless SLSA build-provenance and
+CycloneDX SBOM attestations. To verify them (and for the release process), see
+[`CONTRIBUTING.md`](./CONTRIBUTING.md#verifying-a-release).
 
 ## Creating a cluster
 
@@ -216,6 +134,7 @@ and its [README](./samples/README.md) walks through the end-to-end flow:
 | [`samples/controlplane.yaml`](./samples/controlplane.yaml) | additional control-plane join |
 | [`samples/worker.yaml`](./samples/worker.yaml) | worker join |
 | [`samples/cluster.yaml`](./samples/cluster.yaml) | annotated reference covering the full kubeadm v1beta4 surface |
+| [`samples/cni-flannel/`](./samples/cni-flannel/) | Flannel CNI (simplest), post-hoc or bundled in the cloud-config |
 | [`samples/cni-calico/`](./samples/cni-calico/) | Calico CNI, post-hoc or bundled in the cloud-config |
 
 The flow: boot the first control-plane node from a sample; once it is up, mint
@@ -234,17 +153,19 @@ Usage documentation lives in [`docs/`](./docs/):
 | [High availability](./docs/high-availability.md) | Multi-control-plane (stacked etcd). |
 | [mint-join](./docs/mint-join.md) | The join-material CLI. |
 | [Upgrades](./docs/upgrades.md) | Upgrading between Kubernetes minors with `kubeadm upgrade`. |
-| [CNI](./docs/cni.md) | Installing a CNI. |
+| [CNI](./docs/cni.md) | Installing a CNI (Flannel or Calico). |
+| [Running on Hadron](./docs/hadron.md) | The Hadron (musl) base: static runtime, supply-chain pinning. |
 | [Security model](./docs/security.md) | Tokens, the cert-key blast radius, CA pinning, at-rest encryption. |
 | [Lifecycle and reset](./docs/lifecycle.md) | Reconcile, reset, the version window, upgrades. |
 | [Node status](./docs/status.md) | Why a node did or did not converge: status file + Node annotations. |
+| [Testing](./docs/testing.md) | Test layers, coverage boundary, and release provenance. |
 | [Troubleshooting](./docs/troubleshooting.md) | Logs, common failures, filing issues. |
 
 ## Contributing
 
-This project is moving quickly and its architecture is still being defined.
-Please open an issue to discuss substantial changes before submitting a pull
-request.
+Contributions are welcome. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for building,
+testing, sign-off (DCO), and release/verification details. Please open an issue to
+discuss substantial changes before submitting a pull request.
 
 ## License
 

@@ -5,9 +5,10 @@ driving `kubeadm upgrade`. Upgrades are **image-driven and explicitly pinned**:
 you boot a newer provider-kubernetes image and bump the version pin; on the next
 boot the provider detects the delta and converges the cluster.
 
-> Validated live for 1.34 -> 1.35 on a single control plane. Multi-node/HA upgrade
-> ordering is implemented (see below) but exercise it carefully. As always, this
-> provider is under active development and not field-ready.
+> Single-control-plane and multi-node/HA upgrade ordering are implemented (see
+> below). HA upgrades are operator-sequenced one node at a time; test them in your
+> environment before relying on them. This is an early public release, not yet
+> certified for production.
 
 ## The model
 

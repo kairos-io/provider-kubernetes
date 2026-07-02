@@ -5,12 +5,19 @@ Usage documentation for **provider-kubernetes**, the Go-native
 **kubeadm-based Kubernetes clusters**. The provider binary is
 `agent-provider-kubernetes` (Kairos discovers `agent-provider-*` binaries).
 
-> This project is under active development and is **not** field-ready. Interfaces,
-> configuration, and behavior change without notice. Do not deploy it on machines
-> you care about.
+> This is an early public release. The supported Kubernetes window is 1.34 / 1.35
+> / 1.36. Configuration and behavior may still change between minor releases, so
+> pin a released image tag. It is not yet certified for production use.
 >
 > Not to be confused with `provider-kairos` (the k3s/k0s provider); this is the
 > kubeadm provider.
+
+> **New here?** Read [Getting started](./getting-started.md), then
+> [Creating a cluster](./creating-a-cluster.md) and the
+> [Configuration reference](./configuration.md); reach for
+> [High availability](./high-availability.md), [Upgrades](./upgrades.md), and
+> [CNI](./cni.md) as needed; consult [Security](./security.md) and
+> [Troubleshooting](./troubleshooting.md) before operating.
 
 ## Contents
 
@@ -23,12 +30,12 @@ Usage documentation for **provider-kubernetes**, the Go-native
 | [mint-join reference](./mint-join.md) | The `agent-provider-kubernetes mint-join` subcommand. |
 | [Upgrades](./upgrades.md) | Upgrading between Kubernetes minors (`kubeadm upgrade`): pin + image, single-node and HA, kubelet-config repair, etcd snapshots, rollback. |
 | [CNI](./cni.md) | Installing a CNI (the provider installs none). |
-| [Running on Hadron](./hadron.md) | Building a provider image on the Kairos Hadron (musl) base: the two build flags, static runtime, supply-chain pinning. |
+| [Running on Hadron](./hadron.md) | Building a provider image on the Kairos Hadron (musl) base: static runtime, supply-chain pinning. |
 | [Security model](./security.md) | `cluster_token`, certificate-key blast radius, CA pinning, at-rest encryption, the trust boundary. |
 | [Lifecycle and reset](./lifecycle.md) | Reboot idempotency, reset / `EventClusterReset`, the supported version window, upgrades. |
 | [Node status](./status.md) | Why a node did or did not converge: the local status file and the own-Node annotations. |
 | [Troubleshooting](./troubleshooting.md) | Where logs are, common failures, and what "fail loud, never hang" means in practice. |
-| [Testing](./testing.md) | The test layers (unit, real-kubeadm e2e, manual VM smokes), how to run them, and the explicit CI-coverage boundary. |
+| [Testing](./testing.md) | The test layers (unit, real-kubeadm e2e, manual VM scenarios), how to run them, and the explicit CI-coverage boundary. |
 
 ## How it works in one paragraph
 
@@ -46,5 +53,6 @@ failure surfaces loudly and never blocks later Kairos boot stages.
 
 - [`samples/`](../samples/) - ready-to-edit cloud-configs and an end-to-end walkthrough.
 - [`samples/ha/`](../samples/ha/) - the multi-control-plane walkthrough.
+- [`samples/cni-flannel/`](../samples/cni-flannel/) - Flannel CNI examples.
 - [`samples/cni-calico/`](../samples/cni-calico/) - Calico CNI examples.
 - Root [`README.md`](../README.md) - project overview and status.

@@ -93,5 +93,5 @@ add more. See [High availability](./high-availability.md).
 
 Include: the role and `config:` of the affected node (redact `cluster_token` and
 any token/cert key), the tail of the reconcile log, `kubectl get nodes -o wide`,
-and the image tag / Kubernetes version. The project is moving quickly - mention
-the commit or release you are on.
+and the image tag / Kubernetes version. Mention the release (or commit) you are
+on so the report is reproducible.

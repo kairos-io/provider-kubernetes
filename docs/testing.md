@@ -16,8 +16,8 @@ Two design principles drive the test strategy:
   every wait is bounded, and the e2e harness always tears its containers down.
 
 The result is a layered pyramid: fast pure tests on every change, real-kubeadm
-end-to-end tests on every PR, and a small set of full-VM smokes that remain
-manual by necessity.
+end-to-end tests on every PR, heavier multi-node scenarios nightly, and a set of
+full-VM scenarios that require real hardware and fall outside per-PR CI.
 
 ## The layers at a glance
 
@@ -25,7 +25,8 @@ manual by necessity.
 |-------|---------|------|----------------|----------|
 | Unit / behavior | `make test` | every PR (gates job) | config generation, pure `Plan`, version skew, prober parsing, status `BuildStatus`, credential/PKI math | none |
 | End-to-end (e2e) | `make e2e` | every PR (e2e matrix, 1.34/1.35/1.36) | real `kubeadm`/`kubelet`/`containerd` accept our config and converge: init, join, reset, the refuse-guards, status, externally-managed join | Docker + privileged container |
-| Manual VM smokes | by hand (libvirt) | before notable releases / risky changes | full Kairos image boot, A/B reboot upgrade, HA failover, kube-vip, TPM2/kcrypt | KVM/libvirt host |
+| Nightly e2e | `make e2e-nightly` | nightly + on demand | heavier multi-container scenarios: multi-control-plane stacked-etcd HA and the pre-membership failure-status path | Docker + privileged container |
+| Full-VM scenarios | KVM/libvirt | boundary (see below) | full Kairos ISO boot, A/B reboot upgrade, HA failover, kube-vip, TPM2/kcrypt | KVM/libvirt host |
 
 ## Unit and behavior tests
 
@@ -137,19 +138,20 @@ attacker-influenceable PR code, so the controls matter):
 
 These conditions -- not the container flags -- are what contain a hostile PR.
 
-## Nightly tier (planned)
+## Nightly tier
 
-A heavier `nightly` workflow for the multi-step scenarios that are too slow for
-per-PR (multi-control-plane stacked-etcd HA bring-up, the pre-membership
-failure-status path under a real unreachable endpoint, and a kubeadm-layer
-1.34 -> 1.35 in-place upgrade) is designed but **not yet wired**. Until it lands,
-those paths are covered by unit tests plus the manual VM smokes below.
+A heavier `nightly` workflow (`make e2e-nightly`, cron + on demand) runs the
+multi-container scenarios that are too slow for per-PR: multi-control-plane
+stacked-etcd HA bring-up and the pre-membership failure-status path under a real
+unreachable endpoint. The kubeadm-layer in-place upgrade is exercised on the
+full-VM boundary rather than in a container (its preflight requires a functional
+pod-scheduling cluster; see the boundary below).
 
 ## Coverage boundary -- what e2e does NOT cover
 
 The container-based e2e cannot reproduce events that need a real machine, a reboot,
-or hardware. These are validated **by hand** on a KVM/libvirt host and are an
-explicit, documented boundary -- not a gap to be silently closed by CI:
+or hardware. These require a KVM/libvirt host and are an explicit, documented
+boundary -- not a gap to be silently closed by per-PR CI:
 
 - **Full Kairos image boot.** The e2e runs the provider binary in a node
   container; it does not boot a Kairos ISO, install to disk, or exercise the
@@ -162,10 +164,9 @@ explicit, documented boundary -- not a gap to be silently closed by CI:
 - **kube-vip / cross-host networking.** A real VIP and a multi-host LAN.
 - **TPM2 / kcrypt at-rest encryption.** Real hardware/firmware.
 
-The manual smokes use libvirt + auroraboot-built ISOs from this repo's image; the
-maintainer keeps the run logs and results locally (under `build/vmtest/`, which is
-git-ignored). When you change anything in those areas, run the relevant smoke
-before release and record the outcome.
+These scenarios are exercised on a KVM/libvirt host with ISOs built from this
+repo's image. When you change anything in these areas, run the relevant scenario
+before release.
 
 ## Release artifact provenance
 

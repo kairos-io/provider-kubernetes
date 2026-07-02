@@ -2,7 +2,7 @@
 # Kairos cloud-config for an ADDITIONAL control-plane node joining a kubeadm
 # cluster bootstrapped by provider-kubernetes.
 #
-# STATUS: this provider is under active development and is NOT field-ready.
+# STATUS: early public release; adapt to your environment, not yet certified for production.
 #
 # For a true multi-control-plane (HA, stacked-etcd) cluster, see ./ha/ which
 # covers the stable-endpoint requirement and the one-at-a-time bring-up. This

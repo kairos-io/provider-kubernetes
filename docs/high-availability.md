@@ -2,7 +2,7 @@
 
 The provider supports **stacked-etcd HA**: three or more control-plane nodes, each
 running etcd, behind a stable API endpoint. This page covers the concepts and
-rules; [`samples/ha/`](../samples/ha/) has a full, validated walkthrough
+rules; [`samples/ha/`](../samples/ha/) has a full walkthrough
 (init + two CP joins + the reset/orphan runbook).
 
 ## The one hard prerequisite: a stable endpoint
@@ -64,10 +64,10 @@ Removing a control plane is a two-part operation:
    etcdctl member remove <member-id>
    ```
 
-## Validated end-to-end
+## What the HA path covers
 
-A 3-control-plane libvirt cluster behind a VIP has been validated live: CP joins
-with per-node advertise addresses, etcd quorum growth, the init-clobber guard
-(a stray `role: init` is refused, not allowed to clobber), and failover (a
-control plane lost, the cluster surviving on remaining quorum). See
+A three-control-plane cluster behind a VIP supports: control-plane joins with
+per-node advertise addresses, etcd quorum growth, the init-clobber guard (a stray
+`role: init` is refused, not allowed to clobber the cluster), and failover (losing
+a control plane while the cluster survives on remaining quorum). See
 [`samples/ha/README.md`](../samples/ha/README.md).

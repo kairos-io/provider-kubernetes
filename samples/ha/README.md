@@ -1,8 +1,8 @@
 # Multi-control-plane (HA, stacked-etcd) walkthrough
 
 How to stand up a 3-control-plane, stacked-etcd kubeadm cluster with
-provider-kubernetes. **This provider is under active development and is NOT
-field-ready** -- treat this as a design demo.
+provider-kubernetes. Adapt the addresses and endpoint to your environment; this
+is an early public release, not yet certified for production.
 
 | File | Role | Notes |
 |------|------|-------|
