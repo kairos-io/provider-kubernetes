@@ -1,5 +1,10 @@
 # provider-kubernetes
 
+> [!WARNING]
+> **Community supported.** Support here is done by the community that manages
+> this repository, not by the Kairos team. Open issues here, on this
+> repository.
+
 A [Kairos](https://kairos.io) cluster provider that bootstraps **upstream
 Kubernetes** using `kubeadm`, while remaining native to the Kairos ecosystem
 (the `clusterplugin` / `yip` contract).
