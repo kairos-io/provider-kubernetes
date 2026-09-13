@@ -38,7 +38,7 @@ func TestRunInitPipeline(t *testing.T) {
 	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
 		switch {
 		case args[0] == "version":
-			return kubeadm.Result{Stdout: "v1.34.0\n"}, nil
+			return kubeadm.Result{Stdout: "v1.37.0\n"}, nil
 		case args[0] == "token" && args[1] == "generate":
 			return kubeadm.Result{Stdout: "abcdef.0123456789abcdef\n"}, nil
 		case args[0] == "certs":

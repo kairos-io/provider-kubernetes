@@ -12,7 +12,7 @@
 #
 # Build:
 #   docker build \
-#     --build-arg KUBERNETES_VERSION=v1.34.0 \
+#     --build-arg KUBERNETES_VERSION=v1.37.0 \
 #     --build-arg PROVIDER_VERSION=$(git describe --always) \
 #     -t ghcr.io/<you>/kairos-kubeadm:<tag> .
 #
@@ -53,14 +53,14 @@ ARG TARGETARCH=amd64
 ARG STATIC_BUILDER_IMAGE=golang:1.26.8@sha256:3c3e25a4da13fd0478eed2df1eb35a0e667094a7124d3993a6a1d30f71c17e79
 
 # Kubernetes (must be within the supported window the provider enforces at
-# runtime: 1.34 / 1.35 / 1.36 as of 2026).
-ARG KUBERNETES_VERSION=v1.34.0
+# runtime: 1.35 / 1.36 / 1.37 as of September 2026).
+ARG KUBERNETES_VERSION=v1.37.0
 # Commit SHA the KUBERNETES_VERSION tag must resolve to. Used by the static
 # from-source kubelet build to pin the clone to an immutable commit (a git tag is
 # mutable; a commit SHA is content-addressed), matching the checksum discipline of
 # the binary-download path. MUST be updated together with KUBERNETES_VERSION or
 # the build fails loud.
-ARG KUBERNETES_COMMIT=f28b4c9efbca5c5c0af716d9f2d5702667ee8a45
+ARG KUBERNETES_COMMIT=f54c212e3a2f75d674b717a9b29052b20b60aefc
 
 # Container runtime stack.
 ARG CONTAINERD_VERSION=2.1.4
@@ -69,7 +69,7 @@ ARG CONTAINERD_VERSION=2.1.4
 ARG CONTAINERD_COMMIT=75cb2b7193e4e490e9fbdc236c0e811ccaba3376
 ARG RUNC_VERSION=v1.3.0
 ARG CNI_PLUGINS_VERSION=v1.8.0
-ARG CRICTL_VERSION=v1.34.0
+ARG CRICTL_VERSION=v1.37.0
 
 # Provider build version (injected into the binary via -ldflags).
 ARG PROVIDER_VERSION=dev
@@ -340,7 +340,7 @@ COPY --from=image-bundler /images /opt/provider-kubernetes/images
 
 # Pin containerd's pod-sandbox (pause) image to the EXACT version the bundled
 # kubeadm expects for this Kubernetes minor, instead of a hardcoded tag. kubeadm
-# bumps the pause version per release (e.g. 3.10.1 in 1.34/1.35 -> 3.10.2 in 1.36);
+# bumps the pause version per release (e.g. 3.10.1 in 1.35 -> 3.10.2 in 1.36/1.37);
 # a stale tag means containerd pulls a different pause than kubeadm pre-pulled
 # (duplicate image / drift -- pitfall C4). Resolved from kubeadm at build time so
 # it always matches the bundled toolchain. kubeadm is static and runs here on musl.

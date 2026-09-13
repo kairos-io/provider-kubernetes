@@ -32,13 +32,13 @@ supply-chain pitfall of the previous kubeadm provider.
 
 ```sh
 docker build \
-  --build-arg KUBERNETES_VERSION=v1.34.0 \
+  --build-arg KUBERNETES_VERSION=v1.37.0 \
   --build-arg PROVIDER_VERSION=$(git describe --always) \
   -t ghcr.io/<you>/kairos-kubeadm:dev .
 ```
 
 Supported `KUBERNETES_VERSION` values track the provider's runtime
-supported-window (currently `v1.34.x` / `v1.35.x` / `v1.36.x`). A mismatch
+supported-window (currently `v1.35.x` / `v1.36.x` / `v1.37.x`). A mismatch
 between the pinned version and the bundled `kubeadm` binary is a hard error at
 runtime (no best-effort "close enough" behavior).
 

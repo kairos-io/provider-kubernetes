@@ -21,13 +21,13 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) (Result, error) {
 
 func TestDetectVersion(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
-		fr := &fakeRunner{out: "v1.34.2\n"}
+		fr := &fakeRunner{out: "v1.35.2\n"}
 		v, err := DetectVersion(context.Background(), fr)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if v != "v1.34.2" {
-			t.Fatalf("got %q want v1.34.2", v)
+		if v != "v1.35.2" {
+			t.Fatalf("got %q want v1.35.2", v)
 		}
 	})
 	t.Run("unparseable", func(t *testing.T) {
@@ -52,12 +52,14 @@ func TestResolve(t *testing.T) {
 		want      string
 		wantError bool
 	}{
-		{name: "supported no pin", detected: "v1.34.2", want: "v1.34.2"},
-		{name: "supported matching pin", detected: "v1.35.0", pinned: "v1.35.3", want: "v1.35.0"},
-		{name: "pin minor mismatch", detected: "v1.34.2", pinned: "v1.35.0", wantError: true},
+		{name: "supported no pin", detected: "v1.35.2", want: "v1.35.2"},
+		{name: "supported matching pin", detected: "v1.36.0", pinned: "v1.36.3", want: "v1.36.0"},
+		{name: "newest minor supported", detected: "v1.37.0", want: "v1.37.0"},
+		{name: "pin minor mismatch", detected: "v1.35.2", pinned: "v1.36.0", wantError: true},
+		{name: "detected dropped minor 1.34", detected: "v1.34.11", wantError: true},
 		{name: "detected out of window", detected: "v1.30.0", wantError: true},
 		{name: "detected invalid", detected: "nope", wantError: true},
-		{name: "pin invalid", detected: "v1.34.0", pinned: "nope", wantError: true},
+		{name: "pin invalid", detected: "v1.35.0", pinned: "nope", wantError: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -79,14 +81,14 @@ func TestResolve(t *testing.T) {
 }
 
 func TestMinorAndIsSupported(t *testing.T) {
-	if Minor("v1.34.7") != "1.34" {
-		t.Fatalf("Minor failed: %q", Minor("v1.34.7"))
+	if Minor("v1.35.7") != "1.35" {
+		t.Fatalf("Minor failed: %q", Minor("v1.35.7"))
 	}
-	if !IsSupported("v1.36.0") {
-		t.Fatal("expected 1.36 supported")
+	if !IsSupported("v1.37.0") {
+		t.Fatal("expected 1.37 supported")
 	}
-	if IsSupported("v1.33.99") {
-		t.Fatal("expected 1.33 unsupported")
+	if IsSupported("v1.34.99") {
+		t.Fatal("expected 1.34 unsupported (dropped from the window)")
 	}
 }
 
@@ -139,14 +141,18 @@ func TestUpgradePath(t *testing.T) {
 		wantTgt   string
 		wantError bool
 	}{
-		{name: "one minor up is due", cluster: "v1.34.8", target: "v1.35.5", wantDue: true, wantTgt: "v1.35.5"},
-		{name: "one minor up into window", cluster: "v1.35.0", target: "v1.36.1", wantDue: true, wantTgt: "v1.36.1"},
-		{name: "same minor not due", cluster: "v1.34.0", target: "v1.34.8", wantDue: false},
-		{name: "skip-level refused", cluster: "v1.34.0", target: "v1.36.0", wantError: true},
-		{name: "downgrade refused", cluster: "v1.35.0", target: "v1.34.0", wantError: true},
-		{name: "target out of window refused", cluster: "v1.36.0", target: "v1.37.0", wantError: true},
+		// Only the TARGET must be in the window: a cluster still on the minor just
+		// dropped from it (1.34) must keep a supported path out.
+		{name: "upgrade out of dropped minor is due", cluster: "v1.34.11", target: "v1.35.8", wantDue: true, wantTgt: "v1.35.8"},
+		{name: "one minor up is due", cluster: "v1.35.8", target: "v1.36.4", wantDue: true, wantTgt: "v1.36.4"},
+		{name: "one minor up to newest", cluster: "v1.36.4", target: "v1.37.0", wantDue: true, wantTgt: "v1.37.0"},
+		{name: "same minor not due", cluster: "v1.35.0", target: "v1.35.8", wantDue: false},
+		{name: "skip-level refused", cluster: "v1.35.0", target: "v1.37.0", wantError: true},
+		{name: "downgrade refused", cluster: "v1.36.0", target: "v1.35.0", wantError: true},
+		{name: "target is dropped minor refused", cluster: "v1.33.9", target: "v1.34.11", wantError: true},
+		{name: "target out of window refused", cluster: "v1.37.0", target: "v1.38.0", wantError: true},
 		{name: "invalid cluster", cluster: "nope", target: "v1.35.0", wantError: true},
-		{name: "invalid target", cluster: "v1.34.0", target: "nope", wantError: true},
+		{name: "invalid target", cluster: "v1.35.0", target: "nope", wantError: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

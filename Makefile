@@ -11,11 +11,11 @@ LDFLAGS := -X github.com/kairos-io/provider-kubernetes/version.Version=$(VERSION
 # unset override behaves identically whether the image is built via `make image`
 # or a bare `docker build`. The `image` target forwards every one of these, so a
 # missing forward can never silently fall back to the Dockerfile default again.
-KUBERNETES_VERSION ?= v1.34.0
+KUBERNETES_VERSION ?= v1.37.0
 # Commit SHA the version tags resolve to; pins the static from-source kubelet
 # build. Update together with KUBERNETES_VERSION.
-KUBERNETES_COMMIT  ?= f28b4c9efbca5c5c0af716d9f2d5702667ee8a45
-CRICTL_VERSION     ?= v1.34.0
+KUBERNETES_COMMIT  ?= f54c212e3a2f75d674b717a9b29052b20b60aefc
+CRICTL_VERSION     ?= v1.37.0
 CONTAINERD_VERSION ?= 2.1.4
 # Commit SHA pinning the static from-source containerd build. Update together
 # with CONTAINERD_VERSION.

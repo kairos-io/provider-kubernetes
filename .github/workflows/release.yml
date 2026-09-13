@@ -5,7 +5,7 @@ name: Release
 #
 # Produces, per tag:
 #   - one Kairos image per supported Kubernetes minor, pushed to
-#     ghcr.io/<owner>/provider-kubernetes:<tag>-k8s<minor> (e.g. v0.1.0-k8s1.34).
+#     ghcr.io/<owner>/provider-kubernetes:<tag>-k8s<minor> (e.g. v0.1.0-k8s1.37).
 #     The newest supported minor is additionally tagged <tag> and latest.
 #   - a GitHub Release with the provider binary + sha256 checksum.
 #   - SLSA build-provenance + CycloneDX SBOM attestations for every image (by digest)

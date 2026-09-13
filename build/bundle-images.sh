@@ -11,9 +11,11 @@
 # Binding verify and pull to one digest closes the TOCTOU window.
 #
 # Verification policy (security-reviewed; registry.k8s.io signature coverage is
-# empirically incomplete -- the kube-apiserver/controller-manager/proxy images for
-# v1.34.0 carry NO discoverable cosign signature at either registry.k8s.io or the
-# canonical us-central1 backing registry, while scheduler/coredns/pause/etcd do):
+# empirically incomplete and varies by PATCH release -- e.g. the kube-apiserver/
+# controller-manager/proxy images for v1.34.0 and v1.35.0 carry NO discoverable
+# cosign signature at either registry.k8s.io or the canonical us-central1 backing
+# registry, while all seven images verify for v1.35.8, v1.36.4 and v1.37.0 as of
+# 2026-09-13):
 #   - signature verifies            -> verified=true.
 #   - "no signatures found"         -> verified=false, reason "no-upstream-signature"
 #                                      (digest-pinned from kubeadm's own list; the

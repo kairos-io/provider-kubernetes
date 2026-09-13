@@ -6,8 +6,10 @@ Flannel, ...). Until a CNI is installed, nodes stay `NotReady` and CoreDNS stays
 `Pending`. This is by design.
 
 This directory installs **Calico v3.32.0** via the Tigera operator. Calico v3.32
-is tested against Kubernetes 1.34 / 1.35 / 1.36 — the provider's supported
-window. Two ways to apply it:
+is tested upstream against Kubernetes 1.34 / 1.35 / 1.36, which covers the
+provider's 1.35 and 1.36 minors; 1.37 is not yet on Calico's
+[tested list](https://docs.tigera.io/calico/latest/getting-started/kubernetes/requirements),
+so check it before using this sample with 1.37. Two ways to apply it:
 
 | File | Approach | When |
 |------|----------|------|

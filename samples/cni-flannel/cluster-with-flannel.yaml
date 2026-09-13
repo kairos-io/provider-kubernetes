@@ -48,7 +48,7 @@ cluster:
     cluster_root_path: "/"
   config: |
     clusterConfiguration:
-      kubernetesVersion: v1.34.0
+      kubernetesVersion: v1.37.0
       controlPlaneEndpoint: "192.168.1.10:6443"
       networking:
         podSubnet: 10.244.0.0/16

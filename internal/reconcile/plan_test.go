@@ -146,9 +146,11 @@ func TestPlanUpgrade(t *testing.T) {
 			want:  []Action{ActionRefuseUpgrade},
 		},
 		{
-			name:    "CP refuse downgrade (manifest 1.35 -> target 1.34)",
-			desired: actualstate.RoleControlPlane, target: "v1.34.0",
-			state: actualstate.State{Membership: actualstate.Initialized, APIServerReachable: true, NodeComponentVersion: t135},
+			// Both minors are inside the window, so this is refused as a downgrade,
+			// not as an out-of-window target.
+			name:    "CP refuse downgrade (manifest 1.36 -> target 1.35)",
+			desired: actualstate.RoleControlPlane, target: t135,
+			state: actualstate.State{Membership: actualstate.Initialized, APIServerReachable: true, NodeComponentVersion: "v1.36.4"},
 			want:  []Action{ActionRefuseUpgrade},
 		},
 		{

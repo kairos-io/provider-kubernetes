@@ -35,7 +35,7 @@ private key). Verify them with the GitHub CLI -- no extra tooling:
 ```sh
 # Image -- verify by digest (resolve it first so you verify the exact bytes):
 digest=$(docker buildx imagetools inspect \
-  ghcr.io/kairos-io/provider-kubernetes:v0.3.0-k8s1.34 \
+  ghcr.io/kairos-io/provider-kubernetes:<release>-k8s1.37 \
   --format '{{.Manifest.Digest}}')
 gh attestation verify \
   oci://ghcr.io/kairos-io/provider-kubernetes@${digest} \
