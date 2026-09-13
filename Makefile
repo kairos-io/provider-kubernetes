@@ -16,12 +16,12 @@ KUBERNETES_VERSION ?= v1.37.0
 # build. Update together with KUBERNETES_VERSION.
 KUBERNETES_COMMIT  ?= f54c212e3a2f75d674b717a9b29052b20b60aefc
 CRICTL_VERSION     ?= v1.37.0
-CONTAINERD_VERSION ?= 2.1.4
+CONTAINERD_VERSION ?= 2.3.5
 # Commit SHA pinning the static from-source containerd build. Update together
 # with CONTAINERD_VERSION.
-CONTAINERD_COMMIT  ?= 75cb2b7193e4e490e9fbdc236c0e811ccaba3376
-RUNC_VERSION       ?= v1.3.0
-CNI_PLUGINS_VERSION ?= v1.8.0
+CONTAINERD_COMMIT  ?= 1294c24a7da8e5a793ed378161673abe94118892
+RUNC_VERSION       ?= v1.5.1
+CNI_PLUGINS_VERSION ?= v1.9.1
 # Kairos OS base the image is built FROM. Defaults to the pure upstream Hadron
 # (musl) OS, which kairos-init transforms into a Kairos system in the final stage
 # (mirroring the canonical Kairos image build). Override to test another base.

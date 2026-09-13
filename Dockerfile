@@ -63,12 +63,12 @@ ARG KUBERNETES_VERSION=v1.37.0
 ARG KUBERNETES_COMMIT=f54c212e3a2f75d674b717a9b29052b20b60aefc
 
 # Container runtime stack.
-ARG CONTAINERD_VERSION=2.1.4
+ARG CONTAINERD_VERSION=2.3.5
 # Commit SHA for CONTAINERD_VERSION (same rationale as KUBERNETES_COMMIT; used by
 # the static from-source containerd build).
-ARG CONTAINERD_COMMIT=75cb2b7193e4e490e9fbdc236c0e811ccaba3376
-ARG RUNC_VERSION=v1.3.0
-ARG CNI_PLUGINS_VERSION=v1.8.0
+ARG CONTAINERD_COMMIT=1294c24a7da8e5a793ed378161673abe94118892
+ARG RUNC_VERSION=v1.5.1
+ARG CNI_PLUGINS_VERSION=v1.9.1
 ARG CRICTL_VERSION=v1.37.0
 
 # Provider build version (injected into the binary via -ldflags).
@@ -261,7 +261,7 @@ ARG TARGETARCH
 # crane + cosign are static Go binaries that run on musl; both are version-pinned
 # and checksum-verified at install, matching the rest of the binary supply chain.
 ARG CRANE_VERSION=v0.20.3
-ARG COSIGN_VERSION=v2.4.3
+ARG COSIGN_VERSION=v2.6.5
 RUN apk add --no-cache curl ca-certificates
 COPY --from=k8s-binaries /bin/kubeadm /usr/bin/kubeadm
 # Install crane (checksum-verified against the release checksums.txt).

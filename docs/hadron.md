@@ -54,7 +54,7 @@ A Hadron node is a normal provider-kubernetes node: on boot the reconcile runs a
 writes `/run/provider-kubernetes/status.yaml` (`phase: Converged` on success) and
 the `provider-kubernetes.kairos.io/*` Node annotations - see
 [Node status](./status.md). A converged control plane shows the node at the bundled
-Kubernetes version with `containerd://2.1.4`, OS-IMAGE `Hadron Linux`, and a
+Kubernetes version with `containerd://2.3.5`, OS-IMAGE `Hadron Linux`, and a
 `...-hadron` kernel. The node is `NotReady` until you install a CNI ([CNI](./cni.md)).
 
 ## Caveats
