@@ -50,8 +50,9 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          # Pin to the version validated locally against the v2 config.
-          version: v2.12.2
+          # Pin to the version validated locally against the v2 config. Must be
+          # built with a Go >= the go.mod `go` directive (v2.13.2: go1.27.0).
+          version: v2.13.2
 
   # Derive the image-build matrix from the single source of truth for the
   # supported Kubernetes window: kubeadm.SupportedMinors in version.go (ADR-3).

@@ -63,7 +63,7 @@ starting point, notably:
 
 ## Building
 
-Requires Go 1.26.4+.
+Requires Go 1.27.1+.
 
 ```sh
 make build      # produces ./bin/agent-provider-kubernetes

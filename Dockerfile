@@ -35,7 +35,9 @@ ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940
 # kairos-init that matches the version Kairos itself uses to build Hadron. Older
 # pins (e.g. v0.6.0) cannot regenerate Hadron's initramfs (dracut -f ... fails).
 ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
-ARG GO_BUILDER_IMAGE=golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648
+# Provider toolchain: its tag MUST match the go.mod `go` directive (enforced by
+# `make verify-pins`), so the image build never drifts from CI.
+ARG GO_BUILDER_IMAGE=golang:1.27.1-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125
 ARG TARGETARCH=amd64
 
 # containerd and kubelet are ALWAYS built fully static from source: Hadron is
@@ -43,7 +45,12 @@ ARG TARGETARCH=amd64
 # runs on musl AND glibc. STATIC_BUILDER is the from-source toolchain (Debian Go,
 # matching the validated recipe); patch-pinned (matches GO_BUILDER_IMAGE's pin
 # level) so the from-source compiler is reproducible across Go patch releases.
-ARG STATIC_BUILDER_IMAGE=golang:1.26.4@sha256:f96cc555eb8db430159a3aa6797cd5bae561945b7b0fe7d0e284c63a3b291609
+# It deliberately tracks the Go MINOR that upstream Kubernetes builds every
+# release in the supported window with (.go-version: 1.26.x for 1.35-1.37), at its
+# latest patch, rather than the provider's Go: kubelet is upstream code, so it is
+# compiled with the toolchain upstream qualifies it against. Move it to a newer
+# Go minor only once upstream release branches do.
+ARG STATIC_BUILDER_IMAGE=golang:1.26.8@sha256:3c3e25a4da13fd0478eed2df1eb35a0e667094a7124d3993a6a1d30f71c17e79
 
 # Kubernetes (must be within the supported window the provider enforces at
 # runtime: 1.34 / 1.35 / 1.36 as of 2026).
@@ -181,6 +188,16 @@ RUN git clone --depth 1 --branch "${KUBERNETES_VERSION}" \
  && if [ "${got}" != "${KUBERNETES_COMMIT}" ]; then \
       echo "kubernetes ${KUBERNETES_VERSION} resolved to ${got}, expected ${KUBERNETES_COMMIT}; update KUBERNETES_COMMIT to match KUBERNETES_VERSION" >&2; exit 1; \
     fi
+# Fail loud if upstream qualified this release on a NEWER Go than STATIC_BUILDER
+# provides (the builder would be missing Go fixes upstream ships with); warn when
+# the Go minors differ so a builder minor bump is not forgotten.
+RUN set -eu; \
+    want="$(cat /src/.go-version)"; have="$(go env GOVERSION)"; have="${have#go}"; \
+    if [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -1)" != "$want" ]; then \
+      echo "kubernetes ${KUBERNETES_VERSION} is qualified on Go ${want}; STATIC_BUILDER_IMAGE is Go ${have}; bump STATIC_BUILDER_IMAGE" >&2; exit 1; \
+    fi; \
+    [ "${want%.*}" = "${have%.*}" ] || echo "WARNING: kubelet built with Go ${have}; upstream Go minor is ${want%.*}" >&2; \
+    echo "kubelet Go toolchain ${have} >= upstream .go-version ${want}"
 WORKDIR /src
 RUN set -eux; \
     V="${KUBERNETES_VERSION}"; \
