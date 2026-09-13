@@ -20,7 +20,9 @@ CONTAINERD_VERSION ?= 2.3.5
 # Commit SHA pinning the static from-source containerd build. Update together
 # with CONTAINERD_VERSION.
 CONTAINERD_COMMIT  ?= 1294c24a7da8e5a793ed378161673abe94118892
+# renovate: datasource=github-releases depName=opencontainers/runc
 RUNC_VERSION       ?= v1.5.1
+# renovate: datasource=github-releases depName=containernetworking/plugins
 CNI_PLUGINS_VERSION ?= v1.9.1
 # Kairos OS base the image is built FROM. Defaults to the pure upstream Hadron
 # (musl) OS, which kairos-init transforms into a Kairos system in the final stage

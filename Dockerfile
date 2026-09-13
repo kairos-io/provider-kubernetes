@@ -67,7 +67,9 @@ ARG CONTAINERD_VERSION=2.3.5
 # Commit SHA for CONTAINERD_VERSION (same rationale as KUBERNETES_COMMIT; used by
 # the static from-source containerd build).
 ARG CONTAINERD_COMMIT=1294c24a7da8e5a793ed378161673abe94118892
+# renovate: datasource=github-releases depName=opencontainers/runc
 ARG RUNC_VERSION=v1.5.1
+# renovate: datasource=github-releases depName=containernetworking/plugins
 ARG CNI_PLUGINS_VERSION=v1.9.1
 ARG CRICTL_VERSION=v1.37.0
 
@@ -260,7 +262,9 @@ ARG KUBERNETES_VERSION
 ARG TARGETARCH
 # crane + cosign are static Go binaries that run on musl; both are version-pinned
 # and checksum-verified at install, matching the rest of the binary supply chain.
+# renovate: datasource=github-releases depName=google/go-containerregistry
 ARG CRANE_VERSION=v0.20.3
+# renovate: datasource=github-releases depName=sigstore/cosign
 ARG COSIGN_VERSION=v2.6.5
 RUN apk add --no-cache curl ca-certificates
 COPY --from=k8s-binaries /bin/kubeadm /usr/bin/kubeadm
