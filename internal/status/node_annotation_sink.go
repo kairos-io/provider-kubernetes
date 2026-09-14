@@ -108,8 +108,8 @@ type KubeconfigResolver func() string
 // but the closed-enum fields above carry all machine-readable signal. An
 // operator who needs the full message reads the Layer-1 file.
 type NodeAnnotationSink struct {
-	// Runner executes kubectl. In production this is a kubeadm.ExecRunner whose
-	// Path is set to "kubectl". Tests inject a fake that records calls.
+	// Runner executes kubectl. In production this is kubeadm.KubectlRunner().
+	// Tests inject a fake that records calls.
 	Runner KubectlRunner
 	// ResolveNode returns the name of this node as the Kubernetes API knows it.
 	// Returning an error causes the sink to no-op for this Record call.
@@ -129,7 +129,7 @@ type NodeAnnotationSink struct {
 // kubeconfig exists at Record time the sink no-ops.
 func NewNodeAnnotationSink(rootPath, nodeName string) *NodeAnnotationSink {
 	return &NodeAnnotationSink{
-		Runner:            &kubeadm.ExecRunner{Path: "kubectl"},
+		Runner:            kubeadm.KubectlRunner(),
 		ResolveNode:       MakeNodeResolver(nodeName),
 		ResolveKubeconfig: func() string { return resolveKubeconfig(rootPath) },
 	}

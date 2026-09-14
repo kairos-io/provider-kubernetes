@@ -23,7 +23,7 @@ import (
 // payload and performs a bounded, idempotent reset (ADR-4). It deliberately does
 // NOT run cluster_token validation: reset must succeed regardless of token state.
 func HandleClusterReset(event *pluggable.Event) pluggable.EventResponse {
-	return handleClusterReset(event, kubeadm.ExecRunner{}, status.NewFileSink())
+	return handleClusterReset(event, kubeadm.DefaultRunner(), status.NewFileSink())
 }
 
 // maxResetPayloadBytes caps the event payload size before unmarshaling, to bound

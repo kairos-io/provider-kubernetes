@@ -34,6 +34,10 @@ handling:
 This is all automatic - there are no build flags to set. `make image` produces a
 Hadron image.
 
+The provider executes `kubeadm`, `kubectl`, `ctr`, `systemctl` and `etcdctl` only
+by their `/usr/bin` paths (see [Security model](./security.md#exec-hygiene)), so an
+image derived from this one must keep them there.
+
 ## Supply-chain pinning
 
 The static builds clone the upstream **version tag** and then verify it resolves

@@ -14,6 +14,7 @@ import (
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 
 	"github.com/kairos-io/provider-kubernetes/internal/etcdsnapshot"
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 )
 
 // kubernetesVersion is the version the bundled kubeadm provides (the e2e node
@@ -52,8 +53,18 @@ var wantAnnotationSuffixes = []string{
 //
 // The node will be NotReady (no CNI installed) -- that is expected and correct;
 // we assert on convergence + registration, NOT Ready.
+//
+// It also carries E-B7, the ADR-1-A1 security gate that the provider runs every
+// tool by absolute path with a closed environment (see exec_hardening.go): image
+// invariants first, then PATH-first shadow shims and a hostile KUBERC around
+// reconcile, and a hostile CONTAINERD_ADDRESS around import-images.
 func TestSingleNodeInitConverges(t *testing.T) {
 	nc := startNode(t, uniqueName("init"))
+
+	// E-B7 (a): the binaries the provider runs by absolute path are trustworthy
+	// on this image. Before anything else, so no later step can have altered them.
+	assertExecPathImageInvariants(t, nc)
+
 	ip := nc.IP(t)
 
 	// Build the Cluster exactly as Kairos would hand it to the provider:
@@ -84,8 +95,26 @@ func TestSingleNodeInitConverges(t *testing.T) {
 	// container (does not touch the reconcile path).
 	prepullControlPlaneImages(t, nc, kubernetesVersion())
 
+	// E-B7 (b): from here on, running kubeadm, kubectl, kubelet, systemctl or ctr
+	// by name lands in a shim that records the exec and fails. The prepull above
+	// is not under test, so it runs before the shims exist. From this point every
+	// harness exec inside the container uses an absolute path too.
+	plantShadowShims(t, nc)
+
+	// E-B7 (c): reconcile runs with KUBERC pointing at a malformed kuberc. kubectl
+	// fails every command under it, so step 5 (annotations the provider writes
+	// through kubectl) passes only if the provider's kubectl environment is closed.
+	hostileReconcileEnv := plantMalformedKuberc(t, nc)
+
+	// E-B7 (c2): a valid kuberc at /.kube/kuberc, the path kubectl reads with no
+	// HOME from working directory /, stops every annotate from landing. Reconcile
+	// runs from / like the kairos-agent service, so step 5 also passes only if
+	// the provider's kubectl keeps KUBECTL_KUBERC=false and KUBERC=off.
+	plantDefaultLocationKuberc(t, nc)
+
 	// Run reconcile -- the real binary, real kubeadm, mirroring the yip stage.
-	out, err := writeClusterAndReconcile(t, nc, cluster)
+	out, err := writeClusterAndReconcileOpts(t, nc, cluster,
+		execOptions{Env: hostileReconcileEnv, Workdir: reconcileWorkdir})
 	if err != nil {
 		t.Fatalf("reconcile failed: %v\n--- reconcile output ---\n%s", err, out)
 	}
@@ -98,7 +127,7 @@ func TestSingleNodeInitConverges(t *testing.T) {
 
 	// 2. apiserver /healthz OK (bounded wait; apiserver may still be settling).
 	nc.waitFor(t, "apiserver /healthz ok", 90*time.Second, func() bool {
-		o, e := nc.execErr("kubectl", "--kubeconfig", adminConf,
+		o, e := nc.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf,
 			"get", "--raw", "/healthz")
 		return e == nil && strings.TrimSpace(o) == "ok"
 	})
@@ -106,7 +135,7 @@ func TestSingleNodeInitConverges(t *testing.T) {
 	// 3. node registered (bounded wait for kubelet to register with the apiserver).
 	var nodeName string
 	nc.waitFor(t, "node registered", 90*time.Second, func() bool {
-		o, e := nc.execErr("kubectl", "--kubeconfig", adminConf,
+		o, e := nc.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf,
 			"get", "nodes", "-o", "jsonpath={.items[*].metadata.name}")
 		if e != nil {
 			return false
@@ -137,8 +166,11 @@ func TestSingleNodeInitConverges(t *testing.T) {
 	// 5. the own-Node provider-kubernetes.kairos.io/* annotations are present
 	//    (Layer-2 proof; the NodeAnnotationSink ran post-membership).
 	//    Bounded retry: the annotate kubectl call races the just-registered node.
+	//    Under E-B7 (c) and (c2) this also proves the provider's kubectl ignored
+	//    both the malformed KUBERC set on the reconcile exec and the hostile
+	//    /.kube/kuberc.
 	var annotations map[string]string
-	nc.waitFor(t, "own-Node provider annotations present", 60*time.Second, func() bool {
+	nc.waitFor(t, "own-Node provider annotations present (if missing, also suspect E-B7 (c)/(c2): the provider's kubectl inherited KUBERC or read /.kube/kuberc)", 60*time.Second, func() bool {
 		annotations = nodeAnnotations(t, nc, nodeName)
 		return len(annotations) >= len(wantAnnotationSuffixes)
 	})
@@ -166,7 +198,7 @@ func TestSingleNodeInitConverges(t *testing.T) {
 	// code -- this proves only the save mechanics.
 	const snapshotDest = "/tmp/e2e-etcd-snapshot.db"
 	argv, env := etcdsnapshot.SaveCommand(etcdsnapshot.EtcdctlPath, "/", snapshotDest)
-	saveArgv := append(append([]string{"env", "-i"}, env...), argv...)
+	saveArgv := append(append([]string{binEnv, "-i"}, env...), argv...)
 	if out, err := nc.ExecTimeout(3*time.Minute, saveArgv...); err != nil {
 		t.Fatalf("etcd snapshot save failed: %v\n--- output ---\n%s", err, out)
 	}
@@ -196,5 +228,51 @@ func TestSingleNodeInitConverges(t *testing.T) {
 		t.Errorf("snapshot totalKey = %d, want > 0", status.TotalKey)
 	}
 
-	nc.Exec("rm", "-f", snapshotDest)
+	nc.Exec(binRm, "-f", snapshotDest)
+
+	// 7. E-B7 (d): a real air-gap import with the ctr shim still planted and
+	//    CONTAINERD_ADDRESS pointing at a socket that does not exist. It succeeds
+	//    only if the provider runs /usr/bin/ctr by absolute path with an empty
+	//    environment (ADR-1-A1): a PATH lookup hits the shim, an inherited address
+	//    cannot reach containerd. The base image bundles the tarballs; re-importing
+	//    images the boot-time oneshot already imported is idempotent.
+	importOut, err := nc.ExecEnvTimeout(importImagesTimeout,
+		[]string{"CONTAINERD_ADDRESS=" + hostileContainerdAddress},
+		providerBinaryPath, "import-images")
+	if err != nil {
+		t.Fatalf("import-images under a hostile CONTAINERD_ADDRESS failed: %v\n--- output ---\n%s", err, importOut)
+	}
+	t.Logf("import-images output:\n%s", importOut)
+	imported, importDir, err := importedTarballCount(importOut)
+	if err != nil {
+		t.Fatalf("import-images output: %v\n--- output ---\n%s", err, importOut)
+	}
+	if importDir != bundledImagesDir {
+		t.Errorf("import-images imported from %q, want %q", importDir, bundledImagesDir)
+	}
+	if imported <= 0 {
+		t.Errorf("import-images imported %d tarball(s), want > 0: the air-gap import did nothing", imported)
+	}
+	if bundled := countBundledTarballs(t, nc); imported != bundled {
+		t.Errorf("import-images imported %d tarball(s), but %s holds %d", imported, bundledImagesDir, bundled)
+	}
+	ctrHits := 0
+	for _, hit := range parseShadowHits(readShadowHits(t, nc)) {
+		if hit.Tool == "ctr" {
+			ctrHits++
+			t.Errorf("E-B7: ctr was run by name through PATH (ADR-1-A1): %s", hit.Line)
+		}
+	}
+	t.Logf("E-B7 (d): import-images exited 0 under CONTAINERD_ADDRESS=%s; imported %d tarball(s) from %s; ctr shim hits: %d",
+		hostileContainerdAddress, imported, importDir, ctrHits)
+
+	// 8. E-B7 (b): across reconcile, the assertions, and the import, nothing ran a
+	//    shadowed tool by name. A hit names the tool, its argv, and its parent
+	//    (agent-provider-, kubeadm, ...), which points at the exec to fix.
+	if raw := readShadowHits(t, nc); strings.TrimSpace(raw) != "" {
+		t.Errorf("E-B7: %d exec(s) resolved a tool by name through PATH instead of its absolute path (ADR-1-A1); shadow-shim hits in %s:\n%s",
+			len(parseShadowHits(raw)), shadowHitsPath, raw)
+	} else {
+		t.Logf("E-B7 (b): shadow marker %s is empty after reconcile, the assertions and import-images", shadowHitsPath)
+	}
 }

@@ -365,6 +365,43 @@ func TestUpgradeApply_SnapshotOutcomeLogging(t *testing.T) {
 	}
 }
 
+// ADR-1-A1/E-B5: defaultKubeletRestart runs through kubeadm.SystemctlRunner(),
+// daemon-reload then restart kubelet, in order, stopping at the first error.
+func TestRestartKubeletVia_OrderAndArgv(t *testing.T) {
+	r := &fakeRunner{}
+	if err := restartKubeletVia(context.Background(), r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := [][]string{{"daemon-reload"}, {"restart", "kubelet"}}
+	if len(r.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", r.calls, want)
+	}
+	for i, args := range want {
+		if strings.Join(r.calls[i], " ") != strings.Join(args, " ") {
+			t.Fatalf("call %d = %v, want %v", i, r.calls[i], args)
+		}
+	}
+}
+
+func TestRestartKubeletVia_StopsOnFirstError(t *testing.T) {
+	r := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if args[0] == "daemon-reload" {
+			return kubeadm.Result{}, errors.New("daemon-reload failed")
+		}
+		return kubeadm.Result{}, nil
+	}}
+	err := restartKubeletVia(context.Background(), r)
+	if err == nil {
+		t.Fatal("expected an error when daemon-reload fails")
+	}
+	if !strings.Contains(err.Error(), "daemon-reload") {
+		t.Fatalf("error does not name the failing command: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected exactly 1 call (stop on first error), got %v", r.calls)
+	}
+}
+
 func TestUpgradeNode(t *testing.T) {
 	r := &fakeRunner{}
 	restarted := false

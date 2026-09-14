@@ -136,7 +136,7 @@ func runReconcile(args []string) int {
 		return 1
 	}
 
-	if err := provider.Run(context.Background(), cluster, provider.Options{Runner: kubeadm.ExecRunner{}}); err != nil {
+	if err := provider.Run(context.Background(), cluster, provider.Options{Runner: kubeadm.DefaultRunner()}); err != nil {
 		logrus.Errorf("reconcile: %v", err)
 		return 1
 	}
@@ -174,7 +174,7 @@ func runMintJoin(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	minter := credential.Minter{Runner: kubeadm.ExecRunner{}, RootPath: *rootPath}
+	minter := credential.Minter{Runner: kubeadm.DefaultRunner(), RootPath: *rootPath}
 	jm, err := minter.MintJoinMaterial(ctx, roleNorm == "controlplane", *ttl)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mint join material: %v\n", err)
@@ -252,7 +252,7 @@ func runReset(args []string) int {
 	}
 
 	if err := reset.Run(context.Background(), reset.Options{
-		Runner:    kubeadm.ExecRunner{},
+		Runner:    kubeadm.DefaultRunner(),
 		RootPath:  rootPath,
 		CRISocket: criSocket,
 	}); err != nil {
@@ -279,7 +279,7 @@ func runImportImages(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	logrus.Infof("provider-kubernetes import-images %s: importing from %s", version.Version, *dir)
-	if err := imageimport.Import(ctx, *dir, kubeadm.ExecRunner{Path: "ctr"}); err != nil {
+	if err := imageimport.Import(ctx, *dir, kubeadm.CtrRunner()); err != nil {
 		logrus.Errorf("import-images: %v", err)
 		return 1
 	}

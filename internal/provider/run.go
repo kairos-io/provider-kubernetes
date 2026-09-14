@@ -181,13 +181,16 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	prober := actualstate.FileProber{RootPath: pctx.RootPath, ControlPlaneReachable: cpReachable}
 	if uc.ClusterConfiguration.KubernetesVersion != "" {
 		target = resolved
+		// One kubectl runner for both probes (ADR-1-A1): absolute path, closed
+		// environment, never PATH-resolved.
+		kubectlRunner := kubeadm.KubectlRunner()
 		prober.ClusterVersion = opts.ClusterVersionProbe
 		if prober.ClusterVersion == nil {
-			prober.ClusterVersion = clusterVersionViaKubectl(pctx.RootPath)
+			prober.ClusterVersion = clusterVersionViaKubectl(pctx.RootPath, kubectlRunner)
 		}
 		prober.RunningKubeletVersion = opts.RunningKubeletVersionProbe
 		if prober.RunningKubeletVersion == nil {
-			prober.RunningKubeletVersion = runningKubeletVersionViaKubectl(pctx.RootPath)
+			prober.RunningKubeletVersion = runningKubeletVersionViaKubectl(pctx.RootPath, kubectlRunner)
 		}
 		prober.APIServerReachable = opts.APIServerReachableProbe
 		if prober.APIServerReachable == nil {

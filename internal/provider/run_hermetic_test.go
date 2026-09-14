@@ -51,9 +51,13 @@ func (r *recordingSink) only(t *testing.T) status.Status {
 // hermeticRunOptions returns Run options that keep a test off the host: the
 // given kubeadm runner, a temp RunDir, an in-memory status sink, and an
 // unreachable control plane (no TCP dial to the cluster endpoint). The upgrade
-// hooks, whose nil defaults exec kubectl/systemctl, inspect the host's snapshot
-// dir and block devices, or probe the local apiserver, fail the test if
-// consulted. Tests override the fields their path needs.
+// hooks, whose nil defaults exec kubectl/systemctl (via kubeadm.KubectlRunner /
+// kubeadm.SystemctlRunner, ADR-1-A1), inspect the host's snapshot dir and block
+// devices, or probe the local apiserver, fail the test if consulted. Run always
+// builds a kubeadm.KubectlRunner() when an upgrade target is set (constructing
+// it is inert -- no exec happens), but only invokes it through these nil
+// defaults, so setting them below keeps a test hermetic. Tests override the
+// fields their path needs.
 func hermeticRunOptions(t *testing.T, runner kubeadm.Runner) (Options, *recordingSink) {
 	t.Helper()
 	sink := &recordingSink{}
