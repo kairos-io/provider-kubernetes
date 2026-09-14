@@ -169,6 +169,12 @@ What this does **not** cover:
   fails), and pulled by that digest. `images.lock` in the image records each
   digest and whether it verified. The sandbox image is the version-matched
   `registry.k8s.io/pause`.
+  Each image tarball records the exact reference kubeadm uses, for example
+  `registry.k8s.io/pause:3.10.2`. Pulling by digest makes crane store a placeholder
+  tag, so the build replaces that one name after the verified pull. It checks that
+  the image config and layers are byte-for-byte unchanged, and CI and the
+  end-to-end tests check that containerd lists each image under its exact
+  reference. This does not protect tarballs changed on the node after installation.
 - **`etcdctl` and `etcdutl`** are not downloaded separately: they are extracted
   from that verified etcd image, so they come from an attested digest and match
   the etcd version kubeadm deploys. CI checks that the shipped `/usr/bin` binaries
@@ -178,20 +184,23 @@ What this does **not** cover:
   [Testing](./testing.md#release-artifact-provenance)).
 
 To check the etcd tools on an image yourself, read the etcd entry (digest,
-`verified`) from the lockfile, load that tarball, and compare the binaries:
+`verified`) from the lockfile, then compare the binary inside that tarball with the
+shipped one. This uses [crane](https://github.com/google/go-containerregistry) to
+read the tarball offline, so nothing is loaded into your local image store (a
+`docker load` would create or overwrite your own `registry.k8s.io/etcd:<tag>`):
 
 ```sh
 img=<your image>
-docker run --rm --entrypoint cat "$img" /opt/provider-kubernetes/images/images.lock
-tar="$(docker run --rm --entrypoint cat "$img" /opt/provider-kubernetes/images/images.lock \
+dir=/opt/provider-kubernetes/images
+docker run --rm --entrypoint cat "$img" "$dir/images.lock"
+tar="$(docker run --rm --entrypoint cat "$img" "$dir/images.lock" \
   | jq -r '.images[] | select(.ref | test("/etcd:")) | .tarball')"
-etcd_ref="$(docker run --rm --entrypoint cat "$img" "/opt/provider-kubernetes/images/$tar" \
-  | docker load | sed -n 's/^Loaded image: //p')"   # registry.k8s.io/etcd:i-was-a-digest
-# docker create only materializes the filesystems; neither image is run.
-e="$(docker create --pull never "$etcd_ref" x)"; n="$(docker create --pull never "$img" x)"
-docker cp "$e:/usr/local/bin/etcdctl" - | tar -xO | sha256sum
+docker run --rm --entrypoint cat "$img" "$dir/$tar" > etcd.tar
+crane export - - < etcd.tar | tar -xO usr/local/bin/etcdctl | sha256sum
+# docker create only materializes the image filesystem; nothing is run.
+n="$(docker create --pull never "$img" x)"
 docker cp "$n:/usr/bin/etcdctl" - | tar -xO | sha256sum
-docker rm "$e" "$n"; docker image rm "$etcd_ref"
+docker rm "$n"; rm etcd.tar
 ```
 
 CI runs this comparison (plus `etcdutl`, file mode/owner, and the version) for every
