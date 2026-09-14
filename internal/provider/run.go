@@ -34,8 +34,9 @@ type Options struct {
 	CPReachableProbe func(ctx context.Context) bool
 
 	// StatusSink is the destination for the structured reconcile status
-	// (ADR-4-S, S4). Nil defaults to a FileSink writing to both the
-	// /run and /var/log production paths. Inject a fake in tests.
+	// (ADR-4-S, S4). Nil defaults to newDefaultStatusSink: a FileSink writing to
+	// both the /run and /var/log production paths plus the Node-annotation sink.
+	// Inject a fake in tests.
 	StatusSink status.StatusSink
 
 	// --- Upgrade probes (ADR-12); nil -> production exec defaults. Injectable for
@@ -67,12 +68,13 @@ type Options struct {
 // bounded to 2s per path, errors are logged and swallowed, and the real reconcile
 // exit code is never masked.
 func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error {
-	// S4+S3: construct the status sink once at the top. In production this is a
-	// MultiSink{FileSink, NodeAnnotationSink}: Layer 1 (always-written local file)
-	// plus Layer 2 (post-membership Node annotation via kubectl-argv, no-op when no
-	// kubeconfig exists). rootPath is extracted here (before NewContext) so the
-	// NodeAnnotationSink can be wired before the pctx parse error path. It uses the
-	// same ProviderOptions key as NewContext (providerOptRootPathKey / cluster_root_path).
+	// S4+S3: construct the status sink once at the top. In production this is
+	// newDefaultStatusSink's MultiSink{FileSink, NodeAnnotationSink}: Layer 1
+	// (always-written local file) plus Layer 2 (post-membership Node annotation via
+	// kubectl-argv, no-op when no kubeconfig exists). rootPath is extracted here
+	// (before NewContext) so the NodeAnnotationSink can be wired before the pctx
+	// parse error path. It uses the same ProviderOptions key as NewContext
+	// (providerOptRootPathKey / cluster_root_path).
 	// Tests may inject their own sink via opts.StatusSink.
 	sink := opts.StatusSink
 	// annotSink is the Layer-2 NodeAnnotationSink. It is declared here so it can
@@ -84,13 +86,7 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		if v := cluster.ProviderOptions[providerOptRootPathKey]; v != "" {
 			rootPath = v
 		}
-		// Construct with empty nodeName; ResolveNode will fall back to os.Hostname().
-		// After BuildInput we update ResolveNode to prefer the kubeadm node name.
-		annotSink = status.NewNodeAnnotationSink(rootPath, "")
-		sink = status.MultiSink{
-			status.NewFileSink(),
-			annotSink,
-		}
+		sink, annotSink = newDefaultStatusSink(rootPath)
 	}
 
 	bootID := readBootID()
@@ -262,6 +258,20 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		return finalErr
 	}
 	return nil
+}
+
+// newDefaultStatusSink builds the production status sink Run uses when
+// Options.StatusSink is nil (ADR-4-S): Layer 1, a FileSink on the /run and
+// /var/log paths, fanned out with Layer 2, a NodeAnnotationSink that execs
+// kubectl against the kubeconfig under rootPath. The annotation sink is also
+// returned so Run can late-bind the kubeadm node name into it (Finding D).
+// Both layers act on the host, so this is a variable: the package tests replace
+// it with a guard that fails any test reaching it.
+var newDefaultStatusSink = func(rootPath string) (status.StatusSink, *status.NodeAnnotationSink) {
+	// Construct with empty nodeName; ResolveNode falls back to os.Hostname() until
+	// Run updates it with the kubeadm node name after BuildInput.
+	annot := status.NewNodeAnnotationSink(rootPath, "")
+	return status.MultiSink{status.NewFileSink(), annot}, annot
 }
 
 // recordConfigInvalid writes a ConfigInvalid status when Run exits before
