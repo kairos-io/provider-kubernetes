@@ -3,6 +3,12 @@
 # checksum-verified against the publisher's HTTPS-served .sha256 file, fixing the
 # unverified-curl supply-chain pitfall of the previous kubeadm provider.
 #
+# etcdctl and etcdutl (used for the pre-upgrade etcd snapshot, ADR-12-A1) are not
+# downloaded at all: they are extracted from the etcd control-plane image the
+# image-bundler stage already digest-pins, cosign-verifies and bundles, so they are
+# static, version-matched to the etcd kubeadm deploys, and add no new download
+# origin or pin.
+#
 # Base is the Kairos Hadron immutable OS (musl). We mirror the canonical Kairos
 # image build flow (images/Dockerfile upstream): the base is a pure upstream OS
 # that kairos-init transforms into a Kairos system in two phases (install, init).
@@ -256,6 +262,14 @@ RUN set -eux; \
 # so a first boot converges with NO registry access (air-gap). Because the images
 # land in the immutable OS with no later admission check, signature verification is
 # done here at BUILD time (P5). CNI is intentionally NOT bundled (operator choice).
+#
+# The same run then extracts the static etcdctl + etcdutl from the bundled etcd
+# image tarball into /tools (never /images), offline, after the signature floor
+# (etcd MUST verify) and images.lock are settled (ADR-12-A1). Taking them from the
+# verified etcd image rather than a separate download keeps one trust root and
+# guarantees the tools match the etcd version kubeadm deploys for this release.
+# TARGETARCH is passed explicitly: crane pull selects that platform from each
+# verified multi-arch index (crane's implicit default is linux/amd64).
 # ----------------------------------------------------------------------------
 FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS image-bundler
 ARG KUBERNETES_VERSION
@@ -292,9 +306,11 @@ RUN set -eux; \
     grep " ${asset}\$" cosign_checksums.txt | sha256sum -c -; \
     install -m0755 "${asset}" /usr/bin/cosign; \
     rm -f "${asset}" cosign_checksums.txt
-# Resolve -> verify -> pull each control-plane image, and write the digest lockfile.
+# Resolve -> verify -> pull each control-plane image, write the digest lockfile,
+# then extract etcdctl/etcdutl from the verified etcd image into /tools.
 COPY build/bundle-images.sh /usr/local/bin/bundle-images.sh
-RUN KUBERNETES_VERSION="${KUBERNETES_VERSION}" OUT_DIR=/images \
+RUN KUBERNETES_VERSION="${KUBERNETES_VERSION}" TARGETARCH="${TARGETARCH}" \
+      OUT_DIR=/images TOOLS_DIR=/tools \
       sh /usr/local/bin/bundle-images.sh
 
 # ----------------------------------------------------------------------------
@@ -309,11 +325,14 @@ ARG KUBERNETES_VERSION
 
 # --- Kubernetes binaries -----------------------------------------------------
 # kubeadm/kubectl/crictl are the verified official static binaries; kubelet is
-# built static from source (musl base).
+# built static from source (musl base). etcdctl/etcdutl are the static binaries
+# from the cosign-verified etcd image kubeadm pins for this release (ADR-12-A1).
 COPY --from=k8s-binaries  /bin/kubeadm  /usr/bin/kubeadm
 COPY --from=kubelet-build  /bin/kubelet  /usr/bin/kubelet
 COPY --from=k8s-binaries  /bin/kubectl  /usr/bin/kubectl
 COPY --from=k8s-binaries  /bin/crictl   /usr/bin/crictl
+COPY --from=image-bundler /tools/etcdctl /usr/bin/etcdctl
+COPY --from=image-bundler /tools/etcdutl /usr/bin/etcdutl
 
 # --- Container runtime -------------------------------------------------------
 # containerd + shim are built static from source; runc and CNI are verified
