@@ -100,6 +100,62 @@ controlplane`), rather than running `kubeadm init` and destroying the existing
 cluster. This protects both Kairos-bootstrapped and externally-managed control
 planes.
 
+## Exec hygiene
+
+Every tool the provider runs is an absolute path in the booted image, started with
+an environment the provider builds itself. Nothing is looked up on `PATH`, and
+nothing else is inherited from the provider's own environment.
+
+| Tool | Path | Environment |
+|------|------|-------------|
+| kubeadm | `/usr/bin/kubeadm` | `PATH=/usr/sbin:/usr/bin:/sbin:/bin` plus the proxy variables |
+| kubectl | `/usr/bin/kubectl` | a tmpfs discovery cache (`/run/provider-kubernetes/kubectl-cache`), kuberc disabled, plus the proxy variables |
+| ctr | `/usr/bin/ctr` | empty |
+| systemctl | `/usr/bin/systemctl` | empty |
+| etcdctl | `/usr/bin/etcdctl` | empty |
+
+Why it matters on Kairos: `/usr/local` is the persistent partition and comes before
+`/usr/bin` in the default `PATH`. A binary placed in `/usr/local/bin` - by an
+operator, a sample script, or anyone with a one-time root write - would otherwise
+run instead of the bundled, verified tool and survive image upgrades. Inherited
+variables could also change what a tool does: `SYSTEMD_OFFLINE=1` turns
+`systemctl restart kubelet` into a successful no-op, `CONTAINERD_ADDRESS` sends the
+image import to another socket, a kuberc file injects kubectl flags such as
+`--server`, and `GODEBUG` or `SSL_CERT_FILE` change TLS behavior. The helpers
+kubeadm looks up itself (systemctl, kubelet, cp, mount, losetup, modprobe) use the
+fixed `PATH` above, so they never come from `/usr/local` either.
+
+Consequences to be aware of:
+
+- **Proxy variables.** Only `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (and their
+  lowercase forms) are passed on. kubeadm copies them verbatim into the
+  control-plane static pods and the kube-proxy DaemonSet, so credentials in a proxy
+  URL are readable by anyone who can read those objects. `ALL_PROXY` and other
+  `*_proxy` names are no longer copied. See
+  [Configuration](./configuration.md#proxy-environment).
+- **Not passed:** `KUBECONFIG`, `HOME`, `GODEBUG`, `SSL_CERT_FILE`/`SSL_CERT_DIR`,
+  and any `KUBEADM_*`, `KUBERC`, `SYSTEMD_*` or `CONTAINERD_*` variable. Go runtime
+  modes such as FIPS must come from how the tools were built, not from the
+  environment.
+- **Custom images** must install these tools at `/usr/bin`; otherwise the provider
+  fails loudly, naming the tool and path.
+
+What this does **not** cover:
+
+- It stops name-based shadowing for the provider's own commands. It trusts the
+  booted `/usr`: anyone who can change its contents (a tampered image, or an
+  activated systemd-sysext overlay) controls these binaries.
+- Daemons still use systemd's default `PATH`, which lists `/usr/local` first:
+  containerd looks up its runc shim by name for every pod start, and the kubelet
+  finds helpers such as `mount` the same way. This is tracked separately.
+- Kairos itself runs yip stage commands through a `sh` found on `PATH`, and plugin
+  discovery scans `PATH`. The provider only removes this for its own execs.
+- When a kubeadm run hits its deadline and is killed, a helper it started (for
+  example the `cp -r` of the etcd data directory during an upgrade) can keep
+  running; the provider stops waiting for it after 5 seconds.
+- Commands run by linked Kairos libraries themselves are outside these checks; the
+  provider's code paths are not known to reach them.
+
 ## Supply chain
 
 - **Downloaded binaries** (kubeadm, kubectl, crictl, runc, CNI plugins) are pinned

@@ -131,8 +131,17 @@ provider derives the pin and the worker registers on the external control plane.
 
 ## Proxy environment
 
-HTTP proxy variables (`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`) supplied via the
-Kairos `env` are honored for the provider's actions.
+The provider passes `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (and their
+lowercase forms) from its own process environment - the environment kairos-agent
+runs it with - to `kubeadm` and `kubectl`, and nothing else from that environment
+(see [Security model](./security.md#exec-hygiene)). kubeadm copies these values
+verbatim into the control-plane static pods and the kube-proxy DaemonSet, so do not
+put credentials in proxy URLs. Other `*_proxy` names such as `ALL_PROXY` are not
+passed on.
+
+The cluster config's `env` map is **not applied yet**: proxy variables set there
+have no effect on the provider, kubeadm, containerd or the kubelet. Configure
+proxies for containerd and the kubelet through their systemd units.
 
 ## What the provider emits
 

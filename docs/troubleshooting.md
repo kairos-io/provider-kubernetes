@@ -60,6 +60,15 @@ match the `kubeadm` binary in the image. A mismatch fails fast by design. Use th
 image tag for the minor you want, or adjust the pin. See
 [Lifecycle](./lifecycle.md#supported-version-window).
 
+### `fork/exec /usr/bin/<tool>: no such file or directory`
+
+The provider runs `kubeadm`, `kubectl`, `ctr`, `systemctl` and `etcdctl` only from
+`/usr/bin` in the image and never searches `PATH`. A custom or derived image must
+install them there. Copies you place in `/usr/local/bin` are ignored by the
+provider (containerd and the kubelet may still pick up tools there, so avoid putting
+Kubernetes binaries in that directory). See
+[Security model](./security.md#exec-hygiene).
+
 ### Upgrade didn't run, or was refused
 
 - **Nothing happened after booting a newer image.** An upgrade runs only when you
