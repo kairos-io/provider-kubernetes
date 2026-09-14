@@ -42,7 +42,7 @@ removal runbook in [High availability](./high-availability.md#removing-a-control
 ## Supported version window
 
 The provider targets the latest three in-support upstream Kubernetes minors,
-rolling forward (currently **1.34 / 1.35 / 1.36**). It uses the **v1beta4** kubeadm
+rolling forward (currently **1.35 / 1.36 / 1.37**). It uses the **v1beta4** kubeadm
 config API only (v1beta3 is EOL and deliberately unsupported).
 
 - The target minor can be pinned via `clusterConfiguration.kubernetesVersion`.

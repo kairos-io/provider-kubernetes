@@ -9,11 +9,11 @@
 # upstream-blessed kind node-image pattern.
 #
 # Build (via the Makefile, which sets BASE_IMAGE for you):
-#   make e2e-node-image KUBERNETES_VERSION=v1.34.0
+#   make e2e-node-image KUBERNETES_VERSION=v1.37.0
 # or directly:
 #   docker build \
-#     --build-arg BASE_IMAGE=kairos-kubeadm:v1.34.0 \
-#     -f Dockerfile.e2e-node -t kairos-kubeadm-e2e-node:v1.34.0 .
+#     --build-arg BASE_IMAGE=kairos-kubeadm:v1.37.0 \
+#     -f Dockerfile.e2e-node -t kairos-kubeadm-e2e-node:v1.37.0 .
 #
 # Run (the harness does this for you; recorded here for reference):
 #   docker run -d --privileged \
@@ -21,9 +21,9 @@
 #     --tmpfs /run --tmpfs /tmp \
 #     -v /var/lib/containerd -v /var/lib/kubelet -v /var/lib/etcd \
 #     --entrypoint /sbin/init \
-#     kairos-kubeadm-e2e-node:v1.34.0
+#     kairos-kubeadm-e2e-node:v1.37.0
 
-ARG BASE_IMAGE=kairos-kubeadm:v1.34.0
+ARG BASE_IMAGE=kairos-kubeadm:v1.37.0
 FROM ${BASE_IMAGE}
 
 # kubeadm refuses to run with swap on by default; a container has no swap, but be
@@ -57,7 +57,7 @@ RUN set -eux; \
     systemctl enable containerd.service kubelet.service || true
 
 # The kubelet must not be gated on swap; kind passes failSwapOn=false via the
-# kubelet config. kubeadm 1.34 defaults to handling swap, but a privileged
+# kubelet config. kubeadm in the supported window handles swap by default, but a privileged
 # container can momentarily see host swap, so we belt-and-braces the flag through
 # the kubeadm extra-args drop-in the unit already sources (/etc/default/kubelet).
 RUN set -eux; \

@@ -1,0 +1,199 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigestsToSemver"
+  ],
+  "schedule": [
+    "after 11pm every weekday",
+    "before 7am every weekday",
+    "every weekend"
+  ],
+  "timezone": "Europe/Brussels",
+  "rebaseWhen": "behind-base-branch",
+  "semanticCommits": "enabled",
+  "commitBody": "Signed-off-by: {{{gitAuthor}}}",
+  "osvVulnerabilityAlerts": true,
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Makefile defaults mirror the digest-pinned Dockerfile base images; make verify-pins fails if the two drift, so both are updated in the same PR (see the base image groups below).",
+      "managerFilePatterns": [
+        "/(^|/)Makefile$/"
+      ],
+      "matchStrings": [
+        "(?:KAIROS_BASE_IMAGE|KAIROS_INIT_IMAGE)\\s*\\?=\\s*(?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Checksum-verified tool/runtime versions annotated with a '# renovate: datasource=... depName=...' comment on the line above (Dockerfile ARGs and their Makefile mirrors).",
+      "managerFilePatterns": [
+        "/(^|/)Dockerfile$/",
+        "/(^|/)Makefile$/"
+      ],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s*\\n\\s*(?:ARG\\s+)?[A-Z_]+_VERSION\\s*\\??=\\s*(?<currentValue>\\S+)"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Supply-chain inputs (actions, container images, bundled binaries) are always human-reviewed; label them for triage.",
+      "matchManagers": [
+        "github-actions",
+        "dockerfile",
+        "custom.regex"
+      ],
+      "addLabels": [
+        "supply-chain"
+      ]
+    },
+    {
+      "description": "Org practice: automerge patch-level Go module updates once every check passes. platformAutomerge=false makes Renovate itself wait for all checks, independent of repo auto-merge settings.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "require",
+        "indirect"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true,
+      "platformAutomerge": false
+    },
+    {
+      "description": "Let new module, action and tool releases age before proposing them, so a compromised or yanked release is usually caught upstream first. Docker registries without timestamps are excluded.",
+      "matchDatasources": [
+        "go",
+        "github-tags",
+        "github-releases"
+      ],
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": "Actions are pinned to full-semver tags, so a digest-only change means the tag was moved (the tj-actions pattern). Never a routine PR: require explicit approval on the dependency dashboard.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchDepTypes": [
+        "action",
+        "workflow"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "dependencyDashboardApproval": true,
+      "addLabels": [
+        "tag-moved"
+      ]
+    },
+    {
+      "description": "Kairos release tags are immutable; a digest-only update means the tag was re-pushed (kairos#4203). Require explicit approval.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/kairos-io/hadron",
+        "quay.io/kairos/kairos-init"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "dependencyDashboardApproval": true,
+      "addLabels": [
+        "tag-moved"
+      ],
+      "prBodyNotes": [
+        "Digest-only update of an immutable release tag: confirm the re-push with the Kairos maintainers before approving."
+      ]
+    },
+    {
+      "description": "Go toolchain: the go.mod go directive and the provider builder image (golang:*-alpine) must move together; make verify-pins fails on drift.",
+      "groupName": "Go toolchain",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "golang"
+      ],
+      "rangeStrategy": "bump"
+    },
+    {
+      "description": "Go toolchain: provider builder image (GO_BUILDER_IMAGE).",
+      "groupName": "Go toolchain",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "golang"
+      ],
+      "matchCurrentValue": "/-alpine$/"
+    },
+    {
+      "description": "STATIC_BUILDER_IMAGE (plain golang tag) compiles upstream kubelet and containerd and tracks the Go minor upstream Kubernetes builds with: take patches only, move minors by hand (the kubelet-build stage fails if upstream's .go-version is newer).",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "golang"
+      ],
+      "matchCurrentValue": "/^\\d+\\.\\d+\\.\\d+$/",
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Hadron base OS image: Dockerfile ARG and Makefile default in one PR.",
+      "groupName": "Hadron base image",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/kairos-io/hadron"
+      ]
+    },
+    {
+      "description": "kairos-init image: Dockerfile ARG and Makefile default in one PR.",
+      "groupName": "kairos-init image",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "quay.io/kairos/kairos-init"
+      ]
+    },
+    {
+      "description": "runc: Dockerfile ARG and Makefile default in one PR.",
+      "groupName": "runc",
+      "matchPackageNames": [
+        "opencontainers/runc"
+      ]
+    },
+    {
+      "description": "CNI plugins: Dockerfile ARG and Makefile default in one PR.",
+      "groupName": "CNI plugins",
+      "matchPackageNames": [
+        "containernetworking/plugins"
+      ]
+    },
+    {
+      "description": "Locally built image (make image) used as the e2e node base; it is not published under this name.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "kairos-kubeadm"
+      ],
+      "enabled": false
+    }
+  ]
+}

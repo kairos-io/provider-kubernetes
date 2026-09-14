@@ -19,24 +19,36 @@ boot the provider detects the delta and converges the cluster.
   the new minor. A newer image **without** a matching pin bump does **not**
   auto-upgrade - it is a no-op (so a routine image refresh never silently
   re-versions your cluster).
-- Only **+1 minor** at a time (kubeadm's rule). Skipping a minor (1.34 -> 1.36),
+- Only **+1 minor** at a time (kubeadm's rule). Skipping a minor (1.35 -> 1.37),
   downgrades, and out-of-window targets are **refused loudly** before anything
   destructive runs.
 
 ## Supported edges
 
-Within the current window: **1.34 -> 1.35** and **1.35 -> 1.36**. To go 1.34 ->
-1.36, step through 1.35 (boot the 1.35 image first, let it converge, then the 1.36
+Within the current window: **1.35 -> 1.36** and **1.36 -> 1.37**. To go 1.35 ->
+1.37, step through 1.36 (boot the 1.36 image first, let it converge, then the 1.37
 image).
+
+A cluster still on **1.34** (dropped from the window) upgrades out the same way:
+boot the 1.35 image with the pin bumped to 1.35. Only the upgrade *target* has to
+be inside the window.
+
+**1.36 -> 1.37 moves etcd to 3.7.** kubeadm 1.37 upgrades stacked etcd from 3.6.8
+(what kubeadm 1.36.x deploys) directly to 3.7.0, while etcd's
+[3.7 upgrade guide](https://etcd.io/docs/v3.7/upgrades/upgrade_3_7/) asks for
+3.6.11 or later before a rolling upgrade. This edge is not yet validated on
+multi-control-plane (stacked etcd) clusters. Take your own etcd backup before
+upgrading (do not rely on the provider's best-effort snapshot, see below) and
+upgrade control planes strictly one at a time.
 
 ## Upgrading a single control plane
 
 1. Make sure the cluster is healthy (`kubectl get nodes`, control-plane pods
    Running). Take an **etcd backup** first - see "etcd snapshots" below.
 2. Bump the pin in the node's cloud-config (`/oem` on an installed node) to the new
-   minor, e.g. `kubernetesVersion: v1.35.5`.
+   minor, e.g. `kubernetesVersion: v1.37.0`.
 3. Upgrade the OS image to the matching minor and reboot. Either:
-   - `kairos-agent upgrade --source oci:<registry>/provider-kubernetes:<tag>-k8s1.35`
+   - `kairos-agent upgrade --source oci:<registry>/provider-kubernetes:<tag>-k8s1.37`
      (then reboot), or
    - boot the new image via your provisioning flow.
 4. On reboot the provider's reconcile detects that the bundled binary is a minor

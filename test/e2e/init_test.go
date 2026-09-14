@@ -20,7 +20,7 @@ func kubernetesVersion() string {
 	if v := os.Getenv("E2E_KUBERNETES_VERSION"); v != "" {
 		return v
 	}
-	return "v1.34.0"
+	return "v1.37.0"
 }
 
 // randomToken returns a 256-bit hex string -- well above the 128-bit cluster_token

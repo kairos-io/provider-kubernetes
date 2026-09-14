@@ -5,8 +5,8 @@ Usage documentation for **provider-kubernetes**, the Go-native
 **kubeadm-based Kubernetes clusters**. The provider binary is
 `agent-provider-kubernetes` (Kairos discovers `agent-provider-*` binaries).
 
-> This is an early public release. The supported Kubernetes window is 1.34 / 1.35
-> / 1.36. Configuration and behavior may still change between minor releases, so
+> This is an early public release. The supported Kubernetes window is 1.35 / 1.36
+> / 1.37. Configuration and behavior may still change between minor releases, so
 > pin a released image tag. It is not yet certified for production use.
 >
 > Not to be confused with `provider-kairos` (the k3s/k0s provider); this is the

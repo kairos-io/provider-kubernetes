@@ -37,14 +37,15 @@ The static builds clone the upstream **version tag** and then verify it resolves
 to a **pinned commit SHA** (`KUBERNETES_COMMIT` / `CONTAINERD_COMMIT`), because a
 git tag is mutable while a commit is content-addressed - giving the from-source
 path the same integrity guarantee as the checksum-verified download path. The
-defaults match the default `KUBERNETES_VERSION` (v1.34.0) and `CONTAINERD_VERSION`.
-Building a **different** Kubernetes minor requires the matching commit, or the
-build fails loud:
+defaults match the default `KUBERNETES_VERSION` (v1.37.0) and `CONTAINERD_VERSION`.
+Building a **different** Kubernetes minor requires the matching commit (and the
+matching `CRICTL_VERSION`), or the build fails loud:
 
 ```sh
 make image \
-  KUBERNETES_VERSION=v1.35.5 \
-  KUBERNETES_COMMIT=$(git ls-remote https://github.com/kubernetes/kubernetes refs/tags/v1.35.5^{} | cut -f1)
+  KUBERNETES_VERSION=v1.35.8 \
+  KUBERNETES_COMMIT=$(git ls-remote https://github.com/kubernetes/kubernetes refs/tags/v1.35.8^{} | cut -f1) \
+  CRICTL_VERSION=v1.35.0
 ```
 
 ## Verify
@@ -53,7 +54,7 @@ A Hadron node is a normal provider-kubernetes node: on boot the reconcile runs a
 writes `/run/provider-kubernetes/status.yaml` (`phase: Converged` on success) and
 the `provider-kubernetes.kairos.io/*` Node annotations - see
 [Node status](./status.md). A converged control plane shows the node at the bundled
-Kubernetes version with `containerd://2.1.4`, OS-IMAGE `Hadron Linux`, and a
+Kubernetes version with `containerd://2.3.5`, OS-IMAGE `Hadron Linux`, and a
 `...-hadron` kernel. The node is `NotReady` until you install a CNI ([CNI](./cni.md)).
 
 ## Caveats

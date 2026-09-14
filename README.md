@@ -17,8 +17,8 @@ starting point, notably:
 - **Externally-managed control planes** are a supported topology, not an
   afterthought.
 - **Tracks upstream Kubernetes (N, N-1, N-2).** The provider supports the three
-  most recent in-support upstream Kubernetes minors (currently 1.34 / 1.35 /
-  1.36), rolling the window forward as new minors ship — matching upstream's
+  most recent in-support upstream Kubernetes minors (currently 1.35 / 1.36 /
+  1.37), rolling the window forward as new minors ship — matching upstream's
   support policy.
 
 ## What works today
@@ -63,7 +63,7 @@ starting point, notably:
 
 ## Building
 
-Requires Go 1.26.4+.
+Requires Go 1.27.1+.
 
 ```sh
 make build      # produces ./bin/agent-provider-kubernetes
@@ -84,7 +84,7 @@ plugins. Every external binary download is **checksum-verified** against the
 publisher's HTTPS-served `.sha256` file:
 
 ```sh
-make image KUBERNETES_VERSION=v1.34.0 VERSION=dev
+make image KUBERNETES_VERSION=v1.37.0 VERSION=dev
 ```
 
 The base is the Kairos **[Hadron](./docs/hadron.md)** minimal, musl-based immutable OS,
@@ -105,17 +105,19 @@ Tagged releases publish a Kairos image per supported Kubernetes minor to the
 GitHub Container Registry, so you can test without building locally:
 
 ```sh
-# pick the Kubernetes minor you want (1.34 / 1.35 / 1.36):
-docker pull ghcr.io/kairos-io/provider-kubernetes:v0.3.0-k8s1.34
+# pick a release tag (https://github.com/kairos-io/provider-kubernetes/releases)
+# and the Kubernetes minor you want (1.35 / 1.36 / 1.37):
+docker pull ghcr.io/kairos-io/provider-kubernetes:<release>-k8s1.37
 
 # the newest supported minor is also published as the plain tag and :latest:
-docker pull ghcr.io/kairos-io/provider-kubernetes:v0.3.0
+docker pull ghcr.io/kairos-io/provider-kubernetes:<release>
 docker pull ghcr.io/kairos-io/provider-kubernetes:latest
 ```
 
 Each release also attaches the provider binary (linux/amd64) plus a sha256
-checksum. This is an early public release supporting the 1.34 / 1.35 / 1.36
-Kubernetes window; see [`docs/testing.md`](./docs/testing.md) for the coverage
+checksum. This is an early public release; the current Kubernetes window is
+1.35 / 1.36 / 1.37 (releases up to v0.3.0 shipped 1.34 / 1.35 / 1.36). See
+[`docs/testing.md`](./docs/testing.md) for the coverage
 boundary. It is not yet certified for production use, and configuration and
 behavior may still change between minor releases — pin a released image tag.
 

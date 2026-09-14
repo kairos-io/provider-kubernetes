@@ -25,7 +25,7 @@ cat > "$TMP/kubeadm" <<'STUB'
 #!/bin/sh
 echo "kubeadm $*" >> /tmp/kubeadm-calls.log
 case "$1 $2" in
-  "version -o")           printf "v1.34.0\n" ;;
+  "version -o")           printf "v1.37.0\n" ;;
   "token generate")       printf "abcdef.0123456789abcdef\n" ;;
   "certs certificate-key") printf "%64s\n" | tr ' ' a ;;
   "init --config")        exit 0 ;;
@@ -43,7 +43,7 @@ providerConfig:
   cluster_root_path: /tmp/oq3-root
 config: |
   clusterConfiguration:
-    kubernetesVersion: v1.34.0
+    kubernetesVersion: v1.37.0
     controlPlaneEndpoint: "10.0.0.1:6443"
     networking:
       podSubnet: 10.244.0.0/16

@@ -5,7 +5,7 @@ name: Release
 #
 # Produces, per tag:
 #   - one Kairos image per supported Kubernetes minor, pushed to
-#     ghcr.io/<owner>/provider-kubernetes:<tag>-k8s<minor> (e.g. v0.1.0-k8s1.34).
+#     ghcr.io/<owner>/provider-kubernetes:<tag>-k8s<minor> (e.g. v0.1.0-k8s1.37).
 #     The newest supported minor is additionally tagged <tag> and latest.
 #   - a GitHub Release with the provider binary + sha256 checksum.
 #   - SLSA build-provenance + CycloneDX SBOM attestations for every image (by digest)
@@ -246,6 +246,9 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+          # Release artifacts never consume Actions caches, which main-branch runs
+          # (including third-party actions there) can write.
+          cache: false
 
       - name: Build binary
         run: make build VERSION=${{ github.ref_name }}

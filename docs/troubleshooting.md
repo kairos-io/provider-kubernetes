@@ -63,7 +63,7 @@ image tag for the minor you want, or adjust the pin. See
   bump `clusterConfiguration.kubernetesVersion` to the new minor; a newer binary
   alone is a no-op by design.
 - **Reconcile logs `refuse-upgrade`.** The pin is a downgrade, skip-level
-  (e.g. 1.34 -> 1.36), or out-of-window. Upgrade one minor at a time within the
+  (e.g. 1.35 -> 1.37), or out-of-window. Upgrade one minor at a time within the
   window.
 - **Snapshot skipped warning.** The provider refuses to write a plaintext etcd
   snapshot when it can't confirm the persistent partition is encrypted - take a

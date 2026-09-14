@@ -69,7 +69,7 @@ cluster:
     clusterConfiguration:
       # Must match the bundled kubeadm binary's minor. Out-of-window or
       # mismatched is a HARD ERROR at boot (fail-fast).
-      kubernetesVersion: v1.34.0
+      kubernetesVersion: v1.37.0
 
       # Stable endpoint name/IP every node uses. Must equal control_plane_host
       # (with the API server port). The provider auto-derives this if you

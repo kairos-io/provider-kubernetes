@@ -50,8 +50,9 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          # Pin to the version validated locally against the v2 config.
-          version: v2.12.2
+          # Pin to the version validated locally against the v2 config. Must be
+          # built with a Go >= the go.mod `go` directive (v2.13.2: go1.27.0).
+          version: v2.13.2
 
   # Derive the image-build matrix from the single source of truth for the
   # supported Kubernetes window: kubeadm.SupportedMinors in version.go (ADR-3).
@@ -166,8 +167,11 @@ jobs:
           img="kairos-kubeadm:ci-${{ matrix.minor }}"
           # The build pins containerd's sandbox_image to the pause kubeadm expects;
           # assert they match so a stale/hardcoded pause tag can't regress (C4).
+          # Pass the bundled version explicitly: without it kubeadm resolves a
+          # remote "stable" label, which makes the expected pause network-dependent.
           want="$(docker run --rm --entrypoint /usr/bin/kubeadm "$img" \
-            config images list --image-repository registry.k8s.io | grep -E '/pause:[0-9]')"
+            config images list --kubernetes-version "${{ steps.ver.outputs.k8s }}" \
+            --image-repository registry.k8s.io | grep -E '/pause:[0-9]')"
           got="$(docker run --rm --entrypoint sh "$img" -c \
             "grep -oE 'registry.k8s.io/pause:[0-9.]+' /etc/containerd/config.toml")"
           echo "kubeadm pause: ${want}; containerd sandbox_image: ${got}"

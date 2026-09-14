@@ -24,7 +24,7 @@ full-VM scenarios that require real hardware and fall outside per-PR CI.
 | Layer | Command | Runs | What it proves | Hardware |
 |-------|---------|------|----------------|----------|
 | Unit / behavior | `make test` | every PR (gates job) | config generation, pure `Plan`, version skew, prober parsing, status `BuildStatus`, credential/PKI math | none |
-| End-to-end (e2e) | `make e2e` | every PR (e2e matrix, 1.34/1.35/1.36) | real `kubeadm`/`kubelet`/`containerd` accept our config and converge: init, join, reset, the refuse-guards, status, externally-managed join | Docker + privileged container |
+| End-to-end (e2e) | `make e2e` | every PR (e2e matrix, 1.35/1.36/1.37) | real `kubeadm`/`kubelet`/`containerd` accept our config and converge: init, join, reset, the refuse-guards, status, externally-managed join | Docker + privileged container |
 | Nightly e2e | `make e2e-nightly` | nightly + on demand | heavier multi-container scenarios: multi-control-plane stacked-etcd HA and the pre-membership failure-status path | Docker + privileged container |
 | Full-VM scenarios | KVM/libvirt | boundary (see below) | full Kairos ISO boot, A/B reboot upgrade, HA failover, kube-vip, TPM2/kcrypt | KVM/libvirt host |
 
@@ -98,10 +98,10 @@ that base once for the version you want, then run the suite:
 
 ```sh
 # 1. Build the base image (a few minutes; bundles the toolchain).
-make image KUBERNETES_VERSION=v1.34.0 VERSION=v1.34.0 IMAGE=kairos-kubeadm:v1.34.0
+make image KUBERNETES_VERSION=v1.37.0 VERSION=v1.37.0 IMAGE=kairos-kubeadm:v1.37.0
 
 # 2. Build the node image and run the suite (make e2e builds the node image for you).
-make e2e KUBERNETES_VERSION=v1.34.0
+make e2e KUBERNETES_VERSION=v1.37.0
 ```
 
 Notes:
@@ -109,7 +109,7 @@ Notes:
 - `make e2e` depends on `e2e-node-image`; if the base image is missing it prints
   the exact `make image` command to run first.
 - Each scenario creates its own container(s) and cleans them up. To run one:
-  `E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:v1.34.0 E2E_KUBERNETES_VERSION=v1.34.0
+  `E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:v1.37.0 E2E_KUBERNETES_VERSION=v1.37.0
   go test -tags e2e -count=1 -run TestWorkerJoin -v ./test/e2e/...`.
 - Each scenario pre-pulls the control-plane images before reconcile so a cold
   containerd pull does not race the reconcile budget (a runtime nuance, not a
@@ -123,7 +123,7 @@ Notes:
 ### In CI
 
 The `e2e` job in `.github/workflows/ci.yml` runs on every PR, as a matrix over the
-full supported window (1.34 / 1.35 / 1.36) in parallel. For each minor it resolves
+full supported window (1.35 / 1.36 / 1.37) in parallel. For each minor it resolves
 the latest patch, builds the base + node image, and runs the whole suite. A
 `timeout-minutes` backstop guarantees it never hangs.
 

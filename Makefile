@@ -11,17 +11,19 @@ LDFLAGS := -X github.com/kairos-io/provider-kubernetes/version.Version=$(VERSION
 # unset override behaves identically whether the image is built via `make image`
 # or a bare `docker build`. The `image` target forwards every one of these, so a
 # missing forward can never silently fall back to the Dockerfile default again.
-KUBERNETES_VERSION ?= v1.34.0
+KUBERNETES_VERSION ?= v1.37.0
 # Commit SHA the version tags resolve to; pins the static from-source kubelet
 # build. Update together with KUBERNETES_VERSION.
-KUBERNETES_COMMIT  ?= f28b4c9efbca5c5c0af716d9f2d5702667ee8a45
-CRICTL_VERSION     ?= v1.34.0
-CONTAINERD_VERSION ?= 2.1.4
+KUBERNETES_COMMIT  ?= f54c212e3a2f75d674b717a9b29052b20b60aefc
+CRICTL_VERSION     ?= v1.37.0
+CONTAINERD_VERSION ?= 2.3.5
 # Commit SHA pinning the static from-source containerd build. Update together
 # with CONTAINERD_VERSION.
-CONTAINERD_COMMIT  ?= 75cb2b7193e4e490e9fbdc236c0e811ccaba3376
-RUNC_VERSION       ?= v1.3.0
-CNI_PLUGINS_VERSION ?= v1.8.0
+CONTAINERD_COMMIT  ?= 1294c24a7da8e5a793ed378161673abe94118892
+# renovate: datasource=github-releases depName=opencontainers/runc
+RUNC_VERSION       ?= v1.5.1
+# renovate: datasource=github-releases depName=containernetworking/plugins
+CNI_PLUGINS_VERSION ?= v1.9.1
 # Kairos OS base the image is built FROM. Defaults to the pure upstream Hadron
 # (musl) OS, which kairos-init transforms into a Kairos system in the final stage
 # (mirroring the canonical Kairos image build). Override to test another base.
@@ -78,7 +80,8 @@ tidy:
 	$(GO) mod tidy
 
 ## verify-pins: fail if a digest-pinned base image drifts between Dockerfile and
-## Makefile, or is not digest-pinned at all (kairos#4203 supply-chain guard).
+## Makefile, or is not digest-pinned at all (kairos#4203 supply-chain guard), or
+## the provider builder image's Go version drifts from the go.mod `go` directive.
 verify-pins:
 	@fail=0; \
 	for var in KAIROS_BASE_IMAGE KAIROS_INIT_IMAGE; do \
@@ -91,6 +94,23 @@ verify-pins:
 	    echo "ok: $$var = $$df"; \
 	  fi; \
 	done; \
+	for kv in $$(sed -n 's/^ARG \([A-Z_]*_IMAGE\)=\([^[:space:]]*\).*/\1=\2/p' Dockerfile); do \
+	  var="$${kv%%=*}"; val="$${kv#*=}"; \
+	  if printf '%s\n' "$$val" | grep -Eq '@sha256:[a-f0-9]{64}$$'; then echo "ok: $$var digest-pinned"; \
+	  else echo "FAIL: Dockerfile ARG $$var is not digest-pinned: '$$val'"; fail=1; fi; \
+	done; \
+	for img in $$(sed -n 's/^FROM[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p' Dockerfile); do \
+	  case "$$img" in '$${'*) : ;; *) printf '%s\n' "$$img" | grep -Eq '@sha256:[a-f0-9]{64}$$' \
+	    || { echo "FAIL: Dockerfile FROM $$img is not digest-pinned"; fail=1; } ;; esac; \
+	done; \
+	if grep -Eq '^toolchain[[:space:]]' go.mod; then echo "FAIL: go.mod has a toolchain directive; the go directive is the single Go pin"; fail=1; fi; \
+	gomod="$$(sed -n 's/^go[[:space:]][[:space:]]*//p' go.mod | head -1)"; \
+	gob="$$(sed -n 's/^ARG GO_BUILDER_IMAGE=golang:\([0-9][0-9.]*\).*/\1/p' Dockerfile | head -1)"; \
+	if [ -z "$$gomod" ] || [ "$$gomod" != "$$gob" ]; then \
+	  echo "FAIL: Go toolchain drift: go.mod 'go $$gomod' != GO_BUILDER_IMAGE 'golang:$$gob'"; fail=1; \
+	else \
+	  echo "ok: go.mod go $$gomod = GO_BUILDER_IMAGE golang:$$gob"; \
+	fi; \
 	if [ "$$fail" != 0 ]; then echo "re-resolve with: docker buildx imagetools inspect <image:tag>"; exit 1; fi
 
 ## image: build the Kairos image bundling provider + kubeadm + containerd
