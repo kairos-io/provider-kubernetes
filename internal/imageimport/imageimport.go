@@ -27,7 +27,7 @@ import (
 const DefaultDir = "/opt/provider-kubernetes/images"
 
 // Runner executes `ctr` via argv (no shell). It is satisfied by
-// kubeadm.ExecRunner{Path: "ctr"}; the interface keeps Import unit-testable.
+// kubeadm.CtrRunner(); the interface keeps Import unit-testable.
 type Runner interface {
 	Run(ctx context.Context, args ...string) (kubeadm.Result, error)
 }

@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -413,12 +412,18 @@ func (e *KubeadmExecutor) restartKubelet(ctx context.Context) error {
 }
 
 // defaultKubeletRestart runs `systemctl daemon-reload` then `systemctl restart
-// kubelet` via argv (no shell). Bounded by ctx.
+// kubelet` through kubeadm.SystemctlRunner() (ADR-1-A1: absolute path, closed
+// environment, no shell). Bounded by ctx.
 func defaultKubeletRestart(ctx context.Context) error {
+	return restartKubeletVia(ctx, kubeadm.SystemctlRunner())
+}
+
+// restartKubeletVia runs `daemon-reload` then `restart kubelet` through r,
+// stopping at the first error.
+func restartKubeletVia(ctx context.Context, r kubeadm.Runner) error {
 	for _, args := range [][]string{{"daemon-reload"}, {"restart", "kubelet"}} {
-		out, err := exec.CommandContext(ctx, "systemctl", args...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("systemctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		if _, err := r.Run(ctx, args...); err != nil {
+			return fmt.Errorf("systemctl %s: %w", strings.Join(args, " "), err)
 		}
 	}
 	return nil

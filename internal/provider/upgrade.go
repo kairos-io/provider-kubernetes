@@ -5,11 +5,12 @@ import (
 	"crypto/tls"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 )
 
 // This file holds the production probes the upgrade path (ADR-12 U6) wires into
@@ -35,20 +36,21 @@ var kubernetesVersionRe = regexp.MustCompile(`kubernetesVersion:\s*(v[0-9]+\.[0-
 
 // clusterVersionViaKubectl reads the cluster's current Kubernetes version from the
 // kube-system/kubeadm-config ConfigMap (the authoritative source; it flips when
-// the first control plane runs `upgrade apply`). Best-effort.
-func clusterVersionViaKubectl(rootPath string) func(ctx context.Context) string {
+// the first control plane runs `upgrade apply`). Best-effort: it parses
+// Result.Stdout only (never Stderr, ADR-1-A1) and returns "" on any error.
+func clusterVersionViaKubectl(rootPath string, r kubeadm.Runner) func(ctx context.Context) string {
 	return func(ctx context.Context) string {
 		kc := kubeconfigFor(rootPath)
 		if kc == "" {
 			return ""
 		}
-		out, err := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kc,
+		res, err := r.Run(ctx, "--kubeconfig", kc,
 			"-n", "kube-system", "get", "configmap", "kubeadm-config",
-			"-o", "jsonpath={.data.ClusterConfiguration}").CombinedOutput()
+			"-o", "jsonpath={.data.ClusterConfiguration}")
 		if err != nil {
 			return ""
 		}
-		if m := kubernetesVersionRe.FindStringSubmatch(string(out)); len(m) == 2 {
+		if m := kubernetesVersionRe.FindStringSubmatch(res.Stdout); len(m) == 2 {
 			return m[1]
 		}
 		return ""
@@ -56,8 +58,9 @@ func clusterVersionViaKubectl(rootPath string) func(ctx context.Context) string 
 }
 
 // runningKubeletVersionViaKubectl reads this node's RUNNING kubelet version from
-// its Node object (status.nodeInfo.kubeletVersion). Best-effort.
-func runningKubeletVersionViaKubectl(rootPath string) func(ctx context.Context) string {
+// its Node object (status.nodeInfo.kubeletVersion). Best-effort: it parses
+// Result.Stdout only (never Stderr, ADR-1-A1) and returns "" on any error.
+func runningKubeletVersionViaKubectl(rootPath string, r kubeadm.Runner) func(ctx context.Context) string {
 	return func(ctx context.Context) string {
 		kc := kubeconfigFor(rootPath)
 		if kc == "" {
@@ -67,13 +70,13 @@ func runningKubeletVersionViaKubectl(rootPath string) func(ctx context.Context) 
 		if err != nil || host == "" {
 			return ""
 		}
-		out, err := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kc,
+		res, err := r.Run(ctx, "--kubeconfig", kc,
 			"get", "node", strings.ToLower(host),
-			"-o", "jsonpath={.status.nodeInfo.kubeletVersion}").CombinedOutput()
+			"-o", "jsonpath={.status.nodeInfo.kubeletVersion}")
 		if err != nil {
 			return ""
 		}
-		return strings.TrimSpace(string(out))
+		return strings.TrimSpace(res.Stdout)
 	}
 }
 

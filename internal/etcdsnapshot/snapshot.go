@@ -45,6 +45,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 )
@@ -56,7 +57,7 @@ const DefaultDir = "/usr/local/provider-kubernetes/etcd-backup"
 
 // EtcdctlPath is the path to the etcdctl binary shipped in the image (a static
 // binary extracted from the cosign-verified etcd image at build time).
-const EtcdctlPath = "/usr/bin/etcdctl"
+const EtcdctlPath = hostexec.EtcdctlPath
 
 // SnapshotTimeout bounds the etcdctl snapshot-save step. It is deliberately
 // larger than the etcdctl --command-timeout (commandTimeout) baked into
