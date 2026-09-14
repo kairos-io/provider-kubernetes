@@ -41,20 +41,27 @@ const (
 // the harness, and pollute the shadow-hit marker that proves the provider never
 // resolves via PATH. The binaries the provider executes (kubeadm, kubectl, ctr,
 // systemctl, etcdctl) come from internal/hostexec instead; these are the
-// harness-only tools (GNU coreutils, findutils, crictl on Hadron's merged /usr).
+// harness-only tools (GNU coreutils, findutils, busybox tar, crictl on Hadron's
+// merged /usr).
 const (
-	binCat      = "/usr/bin/cat"
-	binChmod    = "/usr/bin/chmod"
-	binCrictl   = "/usr/bin/crictl"
-	binEnv      = "/usr/bin/env"
-	binFind     = "/usr/bin/find"
-	binMkdir    = "/usr/bin/mkdir"
-	binReadlink = "/usr/bin/readlink"
-	binRm       = "/usr/bin/rm"
-	binStat     = "/usr/bin/stat"
-	binTee      = "/usr/bin/tee"
-	binTest     = "/usr/bin/test"
+	binCat        = "/usr/bin/cat"
+	binChmod      = "/usr/bin/chmod"
+	binCrictl     = "/usr/bin/crictl"
+	binEnv        = "/usr/bin/env"
+	binFind       = "/usr/bin/find"
+	binJournalctl = "/usr/bin/journalctl"
+	binMkdir      = "/usr/bin/mkdir"
+	binReadlink   = "/usr/bin/readlink"
+	binRm         = "/usr/bin/rm"
+	binStat       = "/usr/bin/stat"
+	binTar        = "/usr/bin/tar"
+	binTee        = "/usr/bin/tee"
+	binTest       = "/usr/bin/test"
 )
+
+// criEndpoint is containerd's CRI socket, passed to crictl explicitly for both
+// the runtime and the image service so no crictl.yaml or default can redirect it.
+const criEndpoint = "unix:///run/containerd/containerd.sock"
 
 // dockerTimeout bounds every individual docker CLI call so a wedged daemon can
 // never hang the suite (design principle 4 / #4099-1).
@@ -281,6 +288,22 @@ func (nc *nodeContainer) ExecOptsTimeout(timeout time.Duration, opts execOptions
 	cmd.Stderr = &buf
 	err = cmd.Run()
 	return buf.String(), err
+}
+
+// ExecStdoutTimeout runs argv inside the container and returns stdout and stderr
+// separately (docker exec without -t keeps the streams apart). It is for
+// commands whose stdout the harness parses (JSON, one name per line), where a
+// warning on stderr must not corrupt the parse. Bounded; argv only.
+func (nc *nodeContainer) ExecStdoutTimeout(timeout time.Duration, args ...string) (stdout, stderr string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	full := append([]string{"exec", nc.id}, args...)
+	var out, errOut bytes.Buffer
+	cmd := exec.CommandContext(ctx, "docker", full...)
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err = cmd.Run()
+	return out.String(), errOut.String(), err
 }
 
 // ExecInput runs argv inside the container feeding stdin, used to drop files
