@@ -4,12 +4,15 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
+	"github.com/kairos-io/provider-kubernetes/internal/reconcile"
+	"github.com/kairos-io/provider-kubernetes/internal/status"
 )
 
 type fakeRunner struct {
@@ -53,11 +56,15 @@ func TestRunInitPipeline(t *testing.T) {
 		ProviderOptions:  map[string]string{"cluster_root_path": t.TempDir()},
 		Options:          "clusterConfiguration:\n  networking:\n    podSubnet: 10.244.0.0/16\n",
 	}
-	if err := Run(context.Background(), cluster, Options{Runner: fr, RunDir: t.TempDir()}); err != nil {
+	opts, sink := hermeticRunOptions(t, fr)
+	if err := Run(context.Background(), cluster, opts); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !fr.called("init") {
 		t.Fatalf("expected kubeadm init to be invoked; calls=%v", fr.calls)
+	}
+	if got := sink.only(t); got.Phase != status.PhaseConverged || got.LastAction != string(reconcile.ActionRunInit) {
+		t.Fatalf("recorded phase=%q lastAction=%q, want %q after %q", got.Phase, got.LastAction, status.PhaseConverged, reconcile.ActionRunInit)
 	}
 }
 
@@ -76,17 +83,17 @@ func TestRunWorkerJoinPipeline(t *testing.T) {
 		Options: "joinConfiguration:\n  discovery:\n    bootstrapToken:\n" +
 			"      token: abcdef.0123456789abcdef\n      caCertHashes:\n      - sha256:deadbeef\n",
 	}
-	if err := Run(context.Background(), cluster, Options{
-		Runner: fr,
-		RunDir: t.TempDir(),
-		// Inject a reachable probe so Plan yields [ActionRunJoin] directly (no wait),
-		// avoiding real TCP dials to the fake endpoint in this hardware-free test.
-		CPReachableProbe: func(_ context.Context) bool { return true },
-	}); err != nil {
+	opts, sink := hermeticRunOptions(t, fr)
+	// A reachable control plane makes Plan yield [ActionRunJoin] directly (no wait).
+	opts.CPReachableProbe = func(_ context.Context) bool { return true }
+	if err := Run(context.Background(), cluster, opts); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !fr.called("join") {
 		t.Fatalf("expected kubeadm join to be invoked; calls=%v", fr.calls)
+	}
+	if got := sink.only(t); got.Phase != status.PhaseConverged || got.LastAction != string(reconcile.ActionRunJoin) {
+		t.Fatalf("recorded phase=%q lastAction=%q, want %q after %q", got.Phase, got.LastAction, status.PhaseConverged, reconcile.ActionRunJoin)
 	}
 }
 
@@ -103,8 +110,12 @@ func TestRunRejectsUnsupportedVersion(t *testing.T) {
 		ControlPlaneHost: "10.0.0.1",
 		ProviderOptions:  map[string]string{"cluster_root_path": t.TempDir()},
 	}
-	if err := Run(context.Background(), cluster, Options{Runner: fr, RunDir: t.TempDir()}); err == nil {
+	opts, sink := hermeticRunOptions(t, fr)
+	if err := Run(context.Background(), cluster, opts); err == nil {
 		t.Fatal("expected error for unsupported kubeadm version")
+	}
+	if got := sink.only(t); got.Phase != status.PhaseFailed || got.Outcome != status.OutcomeFailure {
+		t.Fatalf("recorded phase=%q outcome=%q, want %q/%q", got.Phase, got.Outcome, status.PhaseFailed, status.OutcomeFailure)
 	}
 }
 
@@ -133,15 +144,13 @@ func TestRunUpgradeApplyPipeline(t *testing.T) {
 		Options: "clusterConfiguration:\n  kubernetesVersion: v1.35.0\n",
 	}
 	restarted := false
-	err := Run(context.Background(), cluster, Options{
-		Runner:                     fr,
-		RunDir:                     t.TempDir(),
-		ClusterVersionProbe:        func(context.Context) string { return "v1.34.8" }, // cluster not yet flipped
-		RunningKubeletVersionProbe: func(context.Context) string { return "v1.35.0" },
-		APIServerReachableProbe:    func(context.Context) bool { return true },  // local API up -> no repair, straight to apply
-		EncryptionConfirmed:        func(context.Context) bool { return false }, // snapshot skipped (safe)
-		KubeletRestart:             func(context.Context) error { restarted = true; return nil },
-	})
+	opts, sink := hermeticRunOptions(t, fr)
+	opts.ClusterVersionProbe = func(context.Context) string { return "v1.34.8" } // cluster not yet flipped
+	opts.RunningKubeletVersionProbe = func(context.Context) string { return "v1.35.0" }
+	opts.APIServerReachableProbe = func(context.Context) bool { return true } // local API up -> no repair, straight to apply
+	opts.EncryptionConfirmed = func(context.Context) bool { return false }    // snapshot skipped (safe)
+	opts.KubeletRestart = func(context.Context) error { restarted = true; return nil }
+	err := Run(context.Background(), cluster, opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -157,6 +166,68 @@ func TestRunUpgradeApplyPipeline(t *testing.T) {
 	}
 	if !restarted {
 		t.Fatal("expected kubelet restart after upgrade apply")
+	}
+	if got := sink.only(t); got.Phase != status.PhaseConverged || got.LastAction != string(reconcile.ActionUpgradeApply) {
+		t.Fatalf("recorded phase=%q lastAction=%q, want %q after %q", got.Phase, got.LastAction, status.PhaseConverged, reconcile.ActionUpgradeApply)
+	}
+}
+
+// With no injected StatusSink, Run builds the default sink for the cluster root
+// and, once the node is a member, publishes the Layer-2 annotation to the kubeadm
+// node name rather than the OS hostname (ADR-4-S S3, Finding D). Both layers are
+// stubbed in memory, so the host's kubectl and status paths are never touched.
+func TestRunDefaultStatusSinkAnnotatesKubeadmNodeName(t *testing.T) {
+	root := t.TempDir()
+	adminConf := filepath.Join(root, "etc", "kubernetes", "admin.conf")
+	mustWrite(t, adminConf, "apiVersion: v1\n") // already initialized -> converged no-op
+
+	layer1 := &recordingSink{}
+	kubectl := &fakeRunner{}
+	builtFor := ""
+	stubDefaultStatusSink(t, func(rootPath string) (status.StatusSink, *status.NodeAnnotationSink) {
+		builtFor = rootPath
+		annot := status.NewNodeAnnotationSink(rootPath, "")
+		annot.Runner = kubectl
+		return status.MultiSink{layer1, annot}, annot
+	})
+
+	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if args[0] == "version" {
+			return kubeadm.Result{Stdout: "v1.35.0\n"}, nil
+		}
+		return kubeadm.Result{}, nil
+	}}
+	cluster := clusterplugin.Cluster{
+		Role:             clusterplugin.RoleInit,
+		ClusterToken:     validToken(),
+		ControlPlaneHost: "10.0.0.1",
+		ProviderOptions:  map[string]string{"cluster_root_path": root},
+		Options:          "initConfiguration:\n  nodeRegistration:\n    name: kubeadm-node-1\n",
+	}
+	opts, _ := hermeticRunOptions(t, fr)
+	opts.StatusSink = nil
+	if err := Run(context.Background(), cluster, opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if builtFor != root {
+		t.Fatalf("default status sink built for root %q, want %q", builtFor, root)
+	}
+	if got := layer1.only(t); got.Phase != status.PhaseConverged {
+		t.Fatalf("recorded phase=%q, want %q", got.Phase, status.PhaseConverged)
+	}
+	if len(kubectl.calls) != 1 {
+		t.Fatalf("kubectl calls=%v, want exactly one annotate", kubectl.calls)
+	}
+	call := kubectl.calls[0]
+	if len(call) < 3 || call[0] != "annotate" || call[1] != "node" || call[2] != "kubeadm-node-1" {
+		t.Fatalf("kubectl argv=%v, want annotate node kubeadm-node-1 ...", call)
+	}
+	if !slices.Contains(call, status.AnnotationPhase+"="+string(status.PhaseConverged)) {
+		t.Fatalf("kubectl argv=%v, want the %s annotation", call, status.PhaseConverged)
+	}
+	if i := slices.Index(call, "--kubeconfig"); i < 0 || i+1 >= len(call) || call[i+1] != adminConf {
+		t.Fatalf("kubectl argv=%v, want --kubeconfig %s", call, adminConf)
 	}
 }
 
