@@ -100,9 +100,13 @@ Removing a control plane is a TWO-part operation:
    surviving control plane:**
    ```sh
    kubectl delete node <name>
-   # on a surviving CP:
-   etcdctl member list                 # find this node's member id
-   etcdctl member remove <member-id>
+   # on a surviving CP (etcdctl is bundled at /usr/bin/etcdctl):
+   ETCD_TLS="--endpoints=https://127.0.0.1:2379 \
+     --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+     --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt \
+     --key=/etc/kubernetes/pki/etcd/healthcheck-client.key"
+   sudo /usr/bin/etcdctl $ETCD_TLS member list               # find this node's member id
+   sudo /usr/bin/etcdctl $ETCD_TLS member remove <member-id>
    ```
 
 Always keep an odd number of healthy control planes (3 or 5). Removing one of

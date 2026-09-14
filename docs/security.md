@@ -64,13 +64,29 @@ one rogue worker. The pre-registered future hardening is **TPM2 node attestation
 
 ## Secrets at rest
 
-The only at-rest secret is kubeadm's own PKI under `/etc/kubernetes/pki` on
-control-plane nodes (`0600 root:root`), persisted by Kairos's default
-`/etc/kubernetes` bind-mount to the persistent partition. For production,
-**kcrypt (TPM2) at-rest encryption of the persistent partition on control-plane
-nodes is a documented requirement**. The provider emits a one-time runtime warning
-if it cannot confirm the persistent partition is encrypted; it never hard-fails on
-missing encryption.
+The provider persists no bootstrap secrets of its own. A control-plane node still
+holds full-cluster secrets at rest, all on the persistent partition:
+
+| Artifact | Location | Notes |
+|----------|----------|-------|
+| kubeadm PKI, including the CA private keys | `/etc/kubernetes/pki` | `0600 root:root`. |
+| kubeconfigs with embedded client keys | `/etc/kubernetes/*.conf` | `admin.conf` is cluster-admin. |
+| Live etcd data (every Secret) | `/var/lib/etcd` | |
+| kubeadm's etcd data-dir copies | `/etc/kubernetes/tmp/kubeadm-backup-etcd-*` | Written by `kubeadm upgrade` on every stacked control plane, regardless of encryption, and kept until you delete them or reset. |
+| Provider pre-upgrade etcd snapshot | `/usr/local/provider-kubernetes/etcd-backup/` | Written only onto dm-crypt; kept until the next upgrade's snapshot; **not** removed by reset. |
+
+All of these are plaintext on disk unless the persistent partition is encrypted.
+For production, **kcrypt (TPM2) at-rest encryption of the persistent partition on
+control-plane nodes is a documented requirement**. The provider never hard-fails on
+missing encryption, and it does not yet emit a general runtime warning when it
+cannot confirm encryption (tracked). The one place it checks is the pre-upgrade
+etcd snapshot, which it refuses to write unless the snapshot directory is on
+dm-crypt (see [Upgrades](./upgrades.md#etcd-backups)).
+
+When you **decommission** a control plane, or **rotate credentials after an
+incident**, delete the provider snapshot directory and any
+`/etc/kubernetes/tmp/kubeadm-backup-etcd-*` copies (or wipe the disk): they keep
+Secrets and keys that you have since deleted or rotated in the live cluster.
 
 `/run` must be tmpfs (it is, on every supported Kairos image) - this is
 load-bearing for control-plane joins, because the transient config there decrypts
@@ -86,8 +102,41 @@ planes.
 
 ## Supply chain
 
-Every external binary baked into the image (kubeadm, kubelet, kubectl,
-containerd, runc, CNI plugins, crictl) is pinned and **checksum-verified** against
-the publisher's HTTPS-served checksum during the image build. The container
-sandbox image is pinned to `registry.k8s.io/pause` (not the dead `k8s.gcr.io`).
-Signature/provenance verification is a tracked future enhancement.
+- **Downloaded binaries** (kubeadm, kubectl, crictl, runc, CNI plugins) are pinned
+  and **checksum-verified** against the publisher's HTTPS-served checksums during
+  the image build.
+- **kubelet and containerd** are built fully static from source (Hadron is musl),
+  cloned at the version tag and pinned to the expected commit SHA.
+- **Control-plane images** are resolved to digests from the bundled kubeadm's own
+  image list, **cosign-verified** against the Kubernetes release signing identity
+  where upstream signs them (pause, etcd and coredns must verify or the build
+  fails), and pulled by that digest. `images.lock` in the image records each
+  digest and whether it verified. The sandbox image is the version-matched
+  `registry.k8s.io/pause`.
+- **`etcdctl` and `etcdutl`** are not downloaded separately: they are extracted
+  from that verified etcd image, so they come from an attested digest and match
+  the etcd version kubeadm deploys. CI checks that the shipped `/usr/bin` binaries
+  are byte-identical to the ones inside the bundled etcd image.
+- Base images and workflow actions are digest/SHA-pinned, and released images and
+  binaries carry SLSA build-provenance and SBOM attestations (see
+  [Testing](./testing.md#release-artifact-provenance)).
+
+To check the etcd tools on an image yourself, read the etcd entry (digest,
+`verified`) from the lockfile, load that tarball, and compare the binaries:
+
+```sh
+img=<your image>
+docker run --rm --entrypoint cat "$img" /opt/provider-kubernetes/images/images.lock
+tar="$(docker run --rm --entrypoint cat "$img" /opt/provider-kubernetes/images/images.lock \
+  | jq -r '.images[] | select(.ref | test("/etcd:")) | .tarball')"
+etcd_ref="$(docker run --rm --entrypoint cat "$img" "/opt/provider-kubernetes/images/$tar" \
+  | docker load | sed -n 's/^Loaded image: //p')"   # registry.k8s.io/etcd:i-was-a-digest
+# docker create only materializes the filesystems; neither image is run.
+e="$(docker create --pull never "$etcd_ref" x)"; n="$(docker create --pull never "$img" x)"
+docker cp "$e:/usr/local/bin/etcdctl" - | tar -xO | sha256sum
+docker cp "$n:/usr/bin/etcdctl" - | tar -xO | sha256sum
+docker rm "$e" "$n"; docker image rm "$etcd_ref"
+```
+
+CI runs this comparison (plus `etcdutl`, file mode/owner, and the version) for every
+supported minor.

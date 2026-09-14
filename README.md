@@ -42,7 +42,8 @@ starting point, notably:
   (control plane via `upgrade apply`, followers/workers via `upgrade node`),
   refusing downgrades / skip-level / out-of-window. It auto-repairs the kubelet
   config when an image swap leaves the new kubelet unable to start, and takes a
-  best-effort etcd snapshot (only onto encrypted storage). See
+  best-effort etcd snapshot (only onto encrypted storage). Images bundle
+  version-matched `etcdctl`/`etcdutl` for your own backups. See
   [`docs/upgrades.md`](./docs/upgrades.md).
 - **CNI is the operator's choice.** The provider installs no CNI by design (no
   vendor lock-in). Two worked examples ship in `samples/` —
