@@ -10,6 +10,8 @@ import (
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 	provideryaml "gopkg.in/yaml.v3"
 	k8syaml "sigs.k8s.io/yaml"
+
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 )
 
 // reconcileTimeout bounds a single reconcile exec. It sits just above the
@@ -29,6 +31,10 @@ const imagePullTimeout = 5 * time.Minute
 //
 // If any of these change in internal/provider or internal/status, this harness
 // must change too -- that coupling is intentional (we test the real contract).
+//
+// The binary paths are the exception: the harness imports internal/hostexec
+// rather than copying them, because the E-B7 image checks must cover exactly the
+// set of binaries the provider executes (ADR-1-A1), not a copy that can drift.
 const (
 	providerBinaryPath = "/system/providers/agent-provider-kubernetes"
 	clusterStatePath   = "/run/provider-kubernetes/cluster.json"
@@ -55,8 +61,18 @@ func serializeCluster(t *testing.T, c clusterplugin.Cluster) string {
 // Returns the combined reconcile output and the exec error (nil on exit 0).
 func writeClusterAndReconcile(t *testing.T, nc *nodeContainer, c clusterplugin.Cluster) (string, error) {
 	t.Helper()
+	return writeClusterAndReconcileOpts(t, nc, c, execOptions{})
+}
+
+// writeClusterAndReconcileOpts is writeClusterAndReconcile with extra docker exec
+// flags on the reconcile exec only: KEY=VALUE variables (-e) and a working
+// directory (-w). E-B7 uses it to run reconcile with a hostile environment the
+// provider must not pass on to its children, from the working directory
+// production runs it in (ADR-1-A1).
+func writeClusterAndReconcileOpts(t *testing.T, nc *nodeContainer, c clusterplugin.Cluster, opts execOptions) (string, error) {
+	t.Helper()
 	nc.WriteFile(t, clusterStatePath, serializeCluster(t, c), "0600")
-	return nc.ExecTimeout(reconcileTimeout, providerBinaryPath, "reconcile", "--cluster-file="+clusterStatePath)
+	return nc.ExecOptsTimeout(reconcileTimeout, opts, providerBinaryPath, "reconcile", "--cluster-file="+clusterStatePath)
 }
 
 // prepullControlPlaneImages warms the kubeadm control-plane images before
@@ -67,7 +83,7 @@ func writeClusterAndReconcile(t *testing.T, nc *nodeContainer, c clusterplugin.C
 func prepullControlPlaneImages(t *testing.T, nc *nodeContainer, k8sVersion string) {
 	t.Helper()
 	out, err := nc.ExecTimeout(imagePullTimeout,
-		"kubeadm", "config", "images", "pull",
+		hostexec.KubeadmPath, "config", "images", "pull",
 		"--kubernetes-version", k8sVersion,
 		"--cri-socket", "unix:///run/containerd/containerd.sock")
 	if err != nil {
@@ -106,10 +122,11 @@ func readStatus(t *testing.T, nc *nodeContainer) statusDoc {
 }
 
 // kubectl runs kubectl inside the container against the admin kubeconfig kubeadm
-// init wrote, returning trimmed stdout. argv only.
+// init wrote, returning trimmed stdout. argv only, by absolute path (never via
+// PATH, where an E-B7 shadow shim may be planted).
 func kubectl(t *testing.T, nc *nodeContainer, args ...string) string {
 	t.Helper()
-	full := append([]string{"kubectl", "--kubeconfig", adminConf}, args...)
+	full := append([]string{hostexec.KubectlPath, "--kubeconfig", adminConf}, args...)
 	return strings.TrimSpace(nc.Exec(full...))
 }
 

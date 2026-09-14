@@ -20,6 +20,8 @@ import (
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 	k8syaml "sigs.k8s.io/yaml"
+
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 )
 
 // resetTimeout bounds the `agent-provider-kubernetes reset` exec. It sits above
@@ -70,13 +72,13 @@ func initAndConverge(t *testing.T, name string) (nc *nodeContainer, nodeName str
 
 	// Wait for the apiserver to be reachable.
 	nc.waitFor(t, "apiserver /healthz ok", 90*time.Second, func() bool {
-		o, e := nc.execErr("kubectl", "--kubeconfig", adminConf,
+		o, e := nc.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf,
 			"get", "--raw", "/healthz")
 		return e == nil && strings.TrimSpace(o) == "ok"
 	})
 	// Wait for node registration.
 	nc.waitFor(t, "node registered", 90*time.Second, func() bool {
-		o, e := nc.execErr("kubectl", "--kubeconfig", adminConf,
+		o, e := nc.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf,
 			"get", "nodes", "-o", "jsonpath={.items[*].metadata.name}")
 		if e != nil {
 			return false
@@ -137,17 +139,17 @@ func TestResetCleansArtifacts(t *testing.T) {
 	// 1. /etc/kubernetes is gone: this directory is not a mount point, so
 	//    authoritativeArtifacts removes it cleanly. Its absence proves kubeadm reset
 	//    ran and the PKI + admin.conf + manifests are gone.
-	if _, statErr := nc.execErr("test", "-e", "/etc/kubernetes"); statErr == nil {
+	if _, statErr := nc.execErr(binTest, "-e", "/etc/kubernetes"); statErr == nil {
 		t.Error("/etc/kubernetes still present after reset (want: absent); kubeadm reset may not have run")
 	}
 
 	// 2. The etcd member data within the volume is gone.
-	if _, statErr := nc.execErr("test", "-e", "/var/lib/etcd/member"); statErr == nil {
+	if _, statErr := nc.execErr(binTest, "-e", "/var/lib/etcd/member"); statErr == nil {
 		t.Error("/var/lib/etcd/member still present after reset (want: absent)")
 	}
 
 	// 3. The kubelet join marker within the volume is gone.
-	if _, statErr := nc.execErr("test", "-e", "/var/lib/kubelet/kubeadm-flags.env"); statErr == nil {
+	if _, statErr := nc.execErr(binTest, "-e", "/var/lib/kubelet/kubeadm-flags.env"); statErr == nil {
 		t.Error("/var/lib/kubelet/kubeadm-flags.env still present after reset (want: absent)")
 	}
 
@@ -217,7 +219,7 @@ func TestInitClobberRefusal(t *testing.T) {
 
 	// 3. The original CP apiserver is still reachable (cluster untouched).
 	cpNC.waitFor(t, "CP apiserver still reachable after refused re-init", 30*time.Second, func() bool {
-		o, e := cpNC.execErr("kubectl", "--kubeconfig", adminConf,
+		o, e := cpNC.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf,
 			"get", "--raw", "/healthz")
 		return e == nil && strings.TrimSpace(o) == "ok"
 	})
@@ -462,7 +464,7 @@ func TestWorkerJoin(t *testing.T) {
 	// Bounded wait: the worker may still be completing node registration.
 	var nodeCount int
 	cpNC.waitFor(t, "2 nodes registered on CP", 90*time.Second, func() bool {
-		o, e := cpNC.execErr("kubectl", "--kubeconfig", adminConf,
+		o, e := cpNC.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf,
 			"get", "nodes", "-o", "jsonpath={.items[*].metadata.name}")
 		if e != nil {
 			return false
