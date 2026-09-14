@@ -5,12 +5,15 @@ package e2e
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
+
+	"github.com/kairos-io/provider-kubernetes/internal/etcdsnapshot"
 )
 
 // kubernetesVersion is the version the bundled kubeadm provides (the e2e node
@@ -150,4 +153,48 @@ func TestSingleNodeInitConverges(t *testing.T) {
 	if got := annotations["outcome"]; got != "success" {
 		t.Errorf("annotation outcome = %q, want success", got)
 	}
+
+	// 6. F-ETCDCTL (ADR-12-A1) proof: the image's shipped /usr/bin/etcdctl, the
+	// provider's EXACT production argv/env (etcdsnapshot.SaveCommand -- the same
+	// builder the default save path uses), and kubeadm's real etcd PKI can
+	// together take a real snapshot of a real, running etcd, with an env -i
+	// (empty) environment exactly as production runs it. The fail-closed
+	// encryption gate and persistence to COS_PERSISTENT are VM-only (see
+	// docs/upgrades.md "etcd backups"); the plaintext write here is acceptable
+	// ONLY because /tmp is the container's throwaway tmpfs holding disposable
+	// single-node PKI. Nothing that bypasses the gate may be added to non-test
+	// code -- this proves only the save mechanics.
+	const snapshotDest = "/tmp/e2e-etcd-snapshot.db"
+	argv, env := etcdsnapshot.SaveCommand(etcdsnapshot.EtcdctlPath, "/", snapshotDest)
+	saveArgv := append(append([]string{"env", "-i"}, env...), argv...)
+	if out, err := nc.ExecTimeout(3*time.Minute, saveArgv...); err != nil {
+		t.Fatalf("etcd snapshot save failed: %v\n--- output ---\n%s", err, out)
+	}
+
+	if mode := nc.FileMode(t, snapshotDest); mode != "600" {
+		t.Errorf("etcd snapshot file mode = %q, want 600", mode)
+	}
+
+	// Only the status JSON is ever logged/parsed here -- never the snapshot
+	// contents (which include cluster Secrets and PKI key material).
+	statusOut := nc.Exec("/usr/bin/etcdutl", "snapshot", "status", snapshotDest, "-w", "json")
+	t.Logf("etcdutl snapshot status: %s", statusOut)
+	var status struct {
+		Hash      uint32 `json:"hash"`
+		Revision  int64  `json:"revision"`
+		TotalKey  int64  `json:"totalKey"`
+		TotalSize int64  `json:"totalSize"`
+		Version   string `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(statusOut), &status); err != nil {
+		t.Fatalf("parse etcdutl snapshot status json: %v\nraw: %s", err, statusOut)
+	}
+	if status.Revision <= 0 {
+		t.Errorf("snapshot revision = %d, want > 0", status.Revision)
+	}
+	if status.TotalKey <= 0 {
+		t.Errorf("snapshot totalKey = %d, want > 0", status.TotalKey)
+	}
+
+	nc.Exec("rm", "-f", snapshotDest)
 }

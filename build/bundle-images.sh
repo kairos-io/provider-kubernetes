@@ -31,17 +31,41 @@
 # released artifact attests exactly what it baked and at what trust level
 # (feeds the CycloneDX SBOM attestation, ADR-15).
 #
+# etcdctl + etcdutl (ADR-12-A1): after the floor passes and images.lock is written,
+# the static etcdctl/etcdutl are EXTRACTED from the single etcd image tarball
+# bundled above (signature-verified: etcd is on the floor) into TOOLS_DIR. No new
+# download origin, no new pin: the tools are byte-for-byte the ones inside the
+# verified etcd image, so they are version-matched to the etcd kubeadm deploys.
+# The extraction is offline (crane export reads the on-disk tarball from stdin).
+#
 # Requires: kubeadm, crane, cosign on PATH (installed + pinned in the Dockerfile).
 set -eu
 
 : "${KUBERNETES_VERSION:?KUBERNETES_VERSION is required}"
+# REQUIRED, never defaulted: crane resolves a multi-arch index to linux/amd64 unless
+# told otherwise, so a silent default would bundle amd64 images (and amd64 etcd
+# tools) into an arm64 image. elf_machine is the ELF e_machine the extracted etcd
+# tools must carry for this architecture.
+: "${TARGETARCH:?TARGETARCH is required (amd64 or arm64)}"
+case "${TARGETARCH}" in
+  amd64) elf_machine=62 ;;
+  arm64) elf_machine=183 ;;
+  *) echo "FATAL: unsupported TARGETARCH '${TARGETARCH}' (amd64 or arm64)" >&2; exit 1 ;;
+esac
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-registry.k8s.io}"
 # Kubernetes release images are cosign keyless-signed by the krel promoter identity
 # (kubernetes.io/docs/tasks/administer-cluster/verify-signed-artifacts).
 COSIGN_IDENTITY="${COSIGN_IDENTITY:-krel-trust@k8s-releng-prod.iam.gserviceaccount.com}"
 COSIGN_ISSUER="${COSIGN_ISSUER:-https://accounts.google.com}"
 OUT_DIR="${OUT_DIR:-/images}"
+TOOLS_DIR="${TOOLS_DIR:-/tools}"
 MIN_IMAGES="${MIN_IMAGES:-5}"
+
+# The tools must never land in the embedded image directory (it is imported into
+# containerd at boot and attested as images.lock's directory).
+case "${TOOLS_DIR%/}/" in
+  "${OUT_DIR%/}/"*) echo "FATAL: TOOLS_DIR '${TOOLS_DIR}' must not be OUT_DIR '${OUT_DIR}' or under it" >&2; exit 1 ;;
+esac
 
 mkdir -p "${OUT_DIR}"
 
@@ -58,6 +82,123 @@ pause_ok=0
 etcd_ok=0
 coredns_ok=0
 kube_any_ok=0
+etcd_count=0
+etcd_ref=""
+etcd_digest=""
+etcd_tar=""
+etcd_tar_sha=""
+etcd_verified=false
+
+# extract_etcd_tools <ref> <digest> <tarball> <tarball-sha256>
+# Install etcdctl + etcdutl into TOOLS_DIR from the bundled etcd image tarball.
+# Every deviation from the expected shape is FATAL: the tarball must be unchanged
+# since its pull, each member must appear exactly once as a regular file, and each
+# installed binary must be a root-owned 0755 (no setuid/setgid) ELF for
+# TARGETARCH that EXECUTES here (musl-runnable) and reports the etcd image tag's
+# version (3.7.0-0 -> "etcdctl version: 3.7.0").
+extract_etcd_tools() {
+  xe_ref="$1"
+  xe_digest="$2"
+  xe_tar="$3"
+  xe_tar_sha="$4"
+
+  xe_tag="${xe_ref##*:}"
+  if ! printf '%s\n' "${xe_tag}" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+'; then
+    echo "FATAL: etcd image tag '${xe_tag}' (${xe_ref}) is not <major>.<minor>.<patch>-<N>" >&2
+    exit 1
+  fi
+  xe_want="${xe_tag%-*}"
+
+  # The tarball must be byte-identical to what crane pull wrote for the verified
+  # digest (no rewrite between the pull and here).
+  xe_got_sha="$(sha256sum "${xe_tar}" | cut -d' ' -f1)"
+  if [ "${xe_got_sha}" != "${xe_tar_sha}" ]; then
+    echo "FATAL: ${xe_tar} changed since pull (sha256 ${xe_got_sha} != ${xe_tar_sha})" >&2
+    exit 1
+  fi
+
+  xe_scratch="$(mktemp -d)"
+  trap 'rm -rf "${xe_scratch}"' EXIT
+  # Flatten the image filesystem offline (the image is read from stdin, not a registry).
+  crane export - "${xe_scratch}/fs.tar" < "${xe_tar}"
+  tar -tf "${xe_scratch}/fs.tar" > "${xe_scratch}/names"
+  tar -tvf "${xe_scratch}/fs.tar" > "${xe_scratch}/listing"
+  mkdir -p "${TOOLS_DIR}"
+
+  for xe_tool in etcdctl etcdutl; do
+    xe_member="usr/local/bin/${xe_tool}"
+
+    # Exactly once, counting every spelling that extracts to the same path
+    # ("./usr/...", "/usr/..."), and present under the exact canonical name.
+    xe_n="$(sed -E 's#^(\./|/)+##' "${xe_scratch}/names" | grep -cxF "${xe_member}" || true)"
+    xe_exact="$(grep -cxF "${xe_member}" "${xe_scratch}/names" || true)"
+    if [ "${xe_n}" != 1 ] || [ "${xe_exact}" != 1 ]; then
+      echo "FATAL: ${xe_member} must appear exactly once in ${xe_ref}@${xe_digest} (found ${xe_n}, canonical ${xe_exact})" >&2
+      exit 1
+    fi
+
+    # Regular file per the listing. busybox tar -tv prints
+    # "<mode> <owner> <size> <date> <time> <name>[ -> <target>]" and shows a
+    # hardlink with a '-' mode plus " -> <target>", so require the name field to be
+    # EXACTLY the member (no link target) and the mode type to be '-'.
+    xe_types="$(awk -v m="${xe_member}" '{
+      name = $0
+      sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ /, "", name)
+      if (name == m) printf "%s", substr($1, 1, 1)
+    }' "${xe_scratch}/listing")"
+    if [ "${xe_types}" != "-" ]; then
+      echo "FATAL: ${xe_member} in ${xe_ref}@${xe_digest} is not a single regular file (listing types '${xe_types}'; symlink/hardlink rejected)" >&2
+      grep -F "${xe_member}" "${xe_scratch}/listing" >&2 || true
+      exit 1
+    fi
+
+    # Extract ONLY that member into a fresh, empty directory, then re-check the type
+    # on disk (a lone hardlink member fails to extract; a symlink would be caught).
+    xe_x="${xe_scratch}/x-${xe_tool}"
+    mkdir "${xe_x}"
+    tar -xf "${xe_scratch}/fs.tar" -C "${xe_x}" "${xe_member}"
+    xe_src="${xe_x}/${xe_member}"
+    if [ ! -f "${xe_src}" ] || [ -L "${xe_src}" ] || [ "$(stat -c %h "${xe_src}")" != 1 ]; then
+      echo "FATAL: extracted ${xe_member} is not a regular, singly-linked file" >&2
+      exit 1
+    fi
+
+    xe_dst="${TOOLS_DIR}/${xe_tool}"
+    install -m 0755 -o root -g root "${xe_src}" "${xe_dst}"
+    xe_mode="$(stat -c '%F|%a|%u|%g' "${xe_dst}")"
+    if [ "${xe_mode}" != "regular file|755|0|0" ] || [ -u "${xe_dst}" ] || [ -g "${xe_dst}" ]; then
+      echo "FATAL: ${xe_dst} must be a root:root 0755 regular file without setuid/setgid (got ${xe_mode})" >&2
+      exit 1
+    fi
+
+    xe_magic="$(head -c 4 "${xe_dst}" | od -An -tx1 | tr -d ' \n')"
+    xe_machine="$(od -An -tu2 -j18 -N2 "${xe_dst}" | tr -d ' \n')"
+    if [ "${xe_magic}" != 7f454c46 ] || [ "${xe_machine}" != "${elf_machine}" ]; then
+      echo "FATAL: ${xe_dst} is not an ELF binary for ${TARGETARCH} (magic ${xe_magic}, e_machine ${xe_machine}, want ${elf_machine})" >&2
+      exit 1
+    fi
+
+    # Execute it here, on alpine/musl like Hadron: a glibc-linked binary cannot run,
+    # so success proves it is musl-runnable (upstream etcd tools are static Go).
+    # Empty environment, as the provider runs it.
+    if ! xe_out="$(env -i "${xe_dst}" version 2>&1)"; then
+      echo "FATAL: ${xe_dst} does not execute in the musl build stage:" >&2
+      printf '%s\n' "${xe_out}" >&2
+      exit 1
+    fi
+    xe_line="$(printf '%s\n' "${xe_out}" | head -n 1)"
+    if [ "${xe_line}" != "${xe_tool} version: ${xe_want}" ]; then
+      echo "FATAL: ${xe_dst} reports '${xe_line}', want '${xe_tool} version: ${xe_want}' (etcd image ${xe_ref})" >&2
+      exit 1
+    fi
+
+    xe_sha="$(sha256sum "${xe_dst}" | cut -d' ' -f1)"
+    echo "etcd-tools: ${xe_dst} ${xe_line} sha256=${xe_sha} from ${xe_ref}@${xe_digest} (${xe_member})"
+  done
+
+  rm -rf "${xe_scratch}"
+  trap - EXIT
+}
 
 while IFS= read -r ref; do
   [ -n "${ref}" ] || continue
@@ -107,10 +248,25 @@ while IFS= read -r ref; do
       [ "${verified}" = true ] && kube_any_ok=1 ;;
   esac
 
-  # 3. pull the SAME digest we just resolved+checked.
+  # 3. pull the SAME digest we just resolved+checked. The digest is the INDEX digest
+  #    (what cosign verified); --platform selects the TARGETARCH manifest from that
+  #    content-addressed index instead of crane's implicit linux/amd64.
   f="${OUT_DIR}/$(echo "${ref}" | tr '/:' '__').tar"
-  crane pull "${ref}@${digest}" "${f}"
+  crane pull --platform "linux/${TARGETARCH}" "${ref}@${digest}" "${f}"
   tarball="$(basename "${f}")"
+
+  # Record the etcd entry for the etcdctl/etcdutl extraction below, binding the
+  # tarball bytes as pulled.
+  case "${ref}" in
+    */etcd:*)
+      etcd_count=$((etcd_count + 1))
+      etcd_ref="${ref}"
+      etcd_digest="${digest}"
+      etcd_tar="${f}"
+      etcd_tar_sha="$(sha256sum "${f}" | cut -d' ' -f1)"
+      etcd_verified="${verified}"
+      ;;
+  esac
 
   entry="$(printf '    {"ref": "%s", "digest": "%s", "tarball": "%s", "verified": %s, "verifyReason": "%s"}' \
     "${ref}" "${digest}" "${tarball}" "${verified}" "${reason}")"
@@ -150,3 +306,14 @@ lock="${OUT_DIR}/images.lock"
 
 echo "wrote ${lock}: ${n} images, ${verified_count} signature-verified"
 cat "${lock}"
+
+# --- etcdctl / etcdutl from the verified etcd image (ADR-12-A1) ---
+if [ "${etcd_count}" -ne 1 ]; then
+  echo "FATAL: expected exactly one */etcd:* image in the bundle, got ${etcd_count}" >&2
+  exit 1
+fi
+if [ "${etcd_verified}" != true ]; then
+  echo "FATAL: etcd image ${etcd_ref}@${etcd_digest} is not signature-verified; refusing to extract etcdctl/etcdutl" >&2
+  exit 1
+fi
+extract_etcd_tools "${etcd_ref}" "${etcd_digest}" "${etcd_tar}" "${etcd_tar_sha}"

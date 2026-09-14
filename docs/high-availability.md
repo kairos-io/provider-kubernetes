@@ -59,9 +59,13 @@ Removing a control plane is a two-part operation:
 
    ```sh
    kubectl delete node <name>
-   # on a surviving control plane:
-   etcdctl member list
-   etcdctl member remove <member-id>
+   # on a surviving control plane (etcdctl is bundled at /usr/bin/etcdctl):
+   ETCD_TLS="--endpoints=https://127.0.0.1:2379 \
+     --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+     --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt \
+     --key=/etc/kubernetes/pki/etcd/healthcheck-client.key"
+   sudo /usr/bin/etcdctl $ETCD_TLS member list
+   sudo /usr/bin/etcdctl $ETCD_TLS member remove <member-id>
    ```
 
 ## What the HA path covers

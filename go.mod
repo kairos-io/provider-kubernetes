@@ -8,6 +8,7 @@ require (
 	github.com/mudler/yip v1.16.3
 	github.com/sirupsen/logrus v1.9.4-0.20230606125235-dd1b4c2e81af
 	golang.org/x/mod v0.41.0
+	golang.org/x/sys v0.48.0
 	gopkg.in/yaml.v3 v3.0.1
 	sigs.k8s.io/yaml v1.6.0
 )
@@ -22,6 +23,5 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/twpayne/go-vfs/v4 v4.3.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )

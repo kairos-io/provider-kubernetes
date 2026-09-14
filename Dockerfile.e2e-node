@@ -3,7 +3,9 @@
 #
 # It FROM-derives a built kairos-kubeadm image so it REUSES the
 # checksum-verified toolchain (kubeadm / kubelet / kubectl / containerd / runc /
-# CNI) already baked there -- nothing is re-downloaded here. We only add the
+# CNI) already baked there -- nothing is re-downloaded here. That includes the
+# static etcdctl / etcdutl at /usr/bin, extracted from the cosign-verified etcd
+# image by the base build (ADR-12-A1), which the e2e suite execs. We only add the
 # tweaks a real kubeadm+kubelet+containerd need to run inside a privileged
 # container on cgroup v2 with the systemd cgroup driver, mirroring the
 # upstream-blessed kind node-image pattern.

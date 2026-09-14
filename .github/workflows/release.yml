@@ -123,6 +123,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           MINOR: ${{ matrix.minor }}
           LATEST_MINOR: ${{ needs.discover.outputs.latest_minor }}
+          K8S: ${{ steps.ver.outputs.k8s }}
         run: |
           set -euo pipefail
           # Image repo is lowercased ghcr.io/<owner>/<repo> (ghcr requires lowercase).
@@ -140,6 +141,24 @@ jobs:
             v${MINOR}.*) echo "verified kubeadm ${got}" ;;
             *) echo "kubeadm mismatch: want v${MINOR}.x got ${got}" >&2; exit 1 ;;
           esac
+          # etcdctl/etcdutl (extracted from the verified etcd image, ADR-12-A1) must
+          # match the etcd tag the bundled kubeadm pins, minus -N (never hardcoded).
+          etcd_ref="$(docker run --rm --entrypoint /usr/bin/kubeadm "${minortag}" \
+            config images list --kubernetes-version "${K8S}" \
+            --image-repository registry.k8s.io | grep '/etcd:')" \
+            || { echo "could not resolve the etcd image from the bundled kubeadm ${K8S}" >&2; exit 1; }
+          [ "$(printf '%s\n' "${etcd_ref}" | wc -l)" -eq 1 ] \
+            || { echo "expected exactly one etcd image, got: ${etcd_ref}" >&2; exit 1; }
+          etcd_tag="${etcd_ref##*:}"
+          [[ "${etcd_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] \
+            || { echo "unexpected etcd image tag '${etcd_tag}'" >&2; exit 1; }
+          for tool in etcdctl etcdutl; do
+            out="$(docker run --rm --entrypoint "/usr/bin/${tool}" "${minortag}" version)"
+            first="${out%%$'\n'*}"
+            [ "${first}" = "${tool} version: ${etcd_tag%-*}" ] \
+              || { echo "${tool} mismatch: want '${tool} version: ${etcd_tag%-*}' (${etcd_ref}) got '${first}'" >&2; exit 1; }
+            echo "verified ${first} (${etcd_ref})"
+          done
           docker push "${minortag}"
           # Capture the immutable digest of what we just pushed. Attestation MUST
           # target the digest, never a tag (ADR-15). RepoDigests is populated after

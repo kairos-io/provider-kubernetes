@@ -27,6 +27,9 @@ handling:
   runs on musl.
 - **kubeadm, kubectl, crictl, runc** are already static and run on musl unchanged,
   so they stay the checksum-verified official downloads.
+- **etcdctl, etcdutl** are the static upstream binaries extracted from the
+  signature-verified etcd control-plane image bundled for the minor (the build
+  fails if they do not run on musl or do not match that etcd version).
 
 This is all automatic - there are no build flags to set. `make image` produces a
 Hadron image.

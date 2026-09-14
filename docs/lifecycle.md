@@ -61,5 +61,5 @@ cluster on the next reconcile (control plane via `kubeadm upgrade apply`, follow
 and workers via `kubeadm upgrade node`, one minor at a time). A newer image without
 a pin bump does not auto-upgrade, and downgrade / skip-level / out-of-window
 targets are refused. See [Upgrades](./upgrades.md) for the full operator runbook
-(single-node and HA), the automatic kubelet-config repair, etcd snapshots, and
+(single-node and HA), the automatic kubelet-config repair, etcd backups, and
 rollback.

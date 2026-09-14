@@ -13,8 +13,11 @@
   failure (with kubeadm output, secret-sanitized).
 - **Serialized input:** `/run/provider-kubernetes/cluster.json` (tmpfs, `0600`) -
   the `Cluster` the reconcile pass consumed this boot.
-- **kubeadm artifacts:** `/etc/kubernetes/` (confs, manifests, pki),
-  `/var/lib/etcd`, `/var/lib/kubelet`.
+- **kubeadm artifacts:** `/etc/kubernetes/` (confs, manifests, pki; upgrade
+  backups under `/etc/kubernetes/tmp/`), `/var/lib/etcd`, `/var/lib/kubelet`.
+- **Pre-upgrade etcd snapshot (encrypted control planes only):**
+  `/usr/local/provider-kubernetes/etcd-backup/` - see
+  [Upgrades](./upgrades.md#etcd-backups).
 - **Kubelet / containerd:** `journalctl -u kubelet`, `journalctl -u containerd`,
   `crictl ps -a`.
 
@@ -65,15 +68,42 @@ image tag for the minor you want, or adjust the pin. See
 - **Reconcile logs `refuse-upgrade`.** The pin is a downgrade, skip-level
   (e.g. 1.35 -> 1.37), or out-of-window. Upgrade one minor at a time within the
   window.
-- **Snapshot skipped warning.** The provider refuses to write a plaintext etcd
-  snapshot when it can't confirm the persistent partition is encrypted - take a
-  manual etcd backup before upgrading. See [Upgrades](./upgrades.md).
+
+### The pre-upgrade etcd snapshot was not taken
+
+Before `kubeadm upgrade apply` the reconcile log has exactly one
+`etcd-snapshot outcome=<outcome>` line. Anything other than `taken` or
+`skipped-already-taken` means the provider wrote no snapshot; the upgrade still
+continues. Common causes:
+
+- `skipped-encryption-unconfirmed` - expected on a default install. The provider
+  only writes a snapshot onto ext4/xfs directly on dm-crypt (an encrypted
+  `COS_PERSISTENT`) and never writes a plaintext full-cluster dump.
+- `skipped-etcdctl-missing` - the image predates the bundled `/usr/bin/etcdctl`.
+- `skipped-insufficient-space` - the persistent partition has less free space than
+  twice the etcd database plus 1 GiB.
+- `failed` - the line carries the sanitized reason (for example etcd unhealthy or
+  the 2 minute bound exceeded).
+
+In every case take a manual, off-node backup with the bundled `etcdctl`/`etcdutl`
+before upgrading; see [Upgrades](./upgrades.md#etcd-backups) for the commands.
+
+### Disk usage grows under `/etc/kubernetes/tmp`
+
+kubeadm copies the etcd data directory to
+`/etc/kubernetes/tmp/kubeadm-backup-etcd-<timestamp>` on every stacked control
+plane on every upgrade and keeps it (it is kubeadm's rollback artifact). The copies
+hold every Secret, are plaintext unless the persistent partition is encrypted, and
+share a device with etcd. Once an upgrade is verified, delete the older copies; see
+[Upgrades](./upgrades.md#etcd-backups).
 
 ### A reset left a stale etcd member (HA)
 
 If a control plane was reset while the cluster was unreachable, its etcd member is
-orphaned. Deregister it from a surviving control plane (`kubectl delete node`,
-`etcdctl member remove`). See
+orphaned. Deregister it from a surviving control plane with `kubectl delete node`
+and the bundled `/usr/bin/etcdctl` (`member list`, then `member remove <id>`,
+passing the etcd client certificate flags shown in
+[Upgrades](./upgrades.md#etcd-backups)). See
 [High availability](./high-availability.md#removing-a-control-plane).
 
 ### HA: endpoint advisory at `role: init`
