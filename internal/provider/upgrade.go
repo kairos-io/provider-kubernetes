@@ -98,36 +98,3 @@ func localAPIHealthyProbe() func(ctx context.Context) bool {
 		return resp.StatusCode == http.StatusOK
 	}
 }
-
-// encryptionConfirmedDefault reports whether dir's backing block device is part of
-// an encrypted (LUKS/crypt) stack, by walking the device dependency tree. It is
-// conservative: any error or an absent crypt layer yields false, so the etcd
-// snapshot is refused rather than writing plaintext (ADR-12 U5 security). A false
-// negative is safe (snapshot skipped); a false positive would be dangerous but
-// requires the resolved source device to genuinely carry a dm-crypt node.
-//
-// Precondition (documented, like RunDir-must-be-tmpfs): the snapshot dir must be a
-// DIRECT mount. Under an overlay/bind mount, `findmnt --target` may resolve to a
-// backing device that differs from where bytes actually land, so the check is only
-// trustworthy for a plain mount of the persistent partition.
-func encryptionConfirmedDefault(dir string) func(ctx context.Context) bool {
-	return func(ctx context.Context) bool {
-		src, err := exec.CommandContext(ctx, "findmnt", "-no", "SOURCE", "--target", dir).CombinedOutput()
-		dev := strings.TrimSpace(string(src))
-		if err != nil || dev == "" {
-			return false
-		}
-		// -s walks down the dependency tree to the physical devices; any "crypt"
-		// node means the data at rest is encrypted.
-		out, err := exec.CommandContext(ctx, "lsblk", "-rno", "TYPE", "-s", dev).CombinedOutput()
-		if err != nil {
-			return false
-		}
-		for _, line := range strings.Fields(string(out)) {
-			if line == "crypt" {
-				return true
-			}
-		}
-		return false
-	}
-}

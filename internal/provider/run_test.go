@@ -147,8 +147,8 @@ func TestRunUpgradeApplyPipeline(t *testing.T) {
 	opts, sink := hermeticRunOptions(t, fr)
 	opts.ClusterVersionProbe = func(context.Context) string { return "v1.34.8" } // cluster not yet flipped
 	opts.RunningKubeletVersionProbe = func(context.Context) string { return "v1.35.0" }
-	opts.APIServerReachableProbe = func(context.Context) bool { return true } // local API up -> no repair, straight to apply
-	opts.EncryptionConfirmed = func(context.Context) bool { return false }    // snapshot skipped (safe)
+	opts.APIServerReachableProbe = func(context.Context) bool { return true }      // local API up -> no repair, straight to apply
+	opts.EncryptionConfirmed = func(context.Context, string) bool { return false } // snapshot skipped (safe)
 	opts.KubeletRestart = func(context.Context) error { restarted = true; return nil }
 	err := Run(context.Background(), cluster, opts)
 	if err != nil {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/kairos-io/provider-kubernetes/internal/etcdsnapshot"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
@@ -63,8 +64,10 @@ type KubeadmExecutor struct {
 	// 127.0.0.1:6443. Injectable for tests.
 	LocalAPIReachable func(ctx context.Context) bool
 	// SnapshotEtcd, when set, is invoked best-effort before `upgrade apply` on a
-	// control plane (ADR-12 U5). nil skips it. It must never block (bounded by ctx).
-	SnapshotEtcd func(ctx context.Context) error
+	// control plane (ADR-12 U5, revised by ADR-12-A1). nil skips it. It must never
+	// block (bounded by ctx) and never returns an error: every outcome (including
+	// refusal/failure) is a Result the caller logs and then proceeds past.
+	SnapshotEtcd func(ctx context.Context) etcdsnapshot.Result
 }
 
 // Execute runs a single planned action. The reconcile.Reconciler bounds ctx.
@@ -284,15 +287,14 @@ func (e *KubeadmExecutor) runUpgradeApply(ctx context.Context) error {
 			return e.runUpgradeNode(ctx)
 		}
 	}
-	// U5: best-effort etcd snapshot before the destructive apply (bounded; never
-	// blocks the upgrade -- failures are logged below). On a bounded retry of apply
-	// this runs again; that is harmless (the snapshot is single-retained and the
-	// pre-apply re-check above degrades a retry to upgrade-node once the cluster has
-	// actually flipped).
+	// U5/ADR-12-A1: best-effort etcd snapshot before the destructive apply (bounded;
+	// never blocks the upgrade). etcdsnapshot.Run is idempotent once per
+	// (cluster, target): a bounded retry of apply (e.g. after a lost-race
+	// re-check that still lands here) observes the same target and does not
+	// re-take or prune the already-verified pre-upgrade snapshot for it. Apply
+	// proceeds regardless of the outcome (skip/refuse/fail all fall through).
 	if e.SnapshotEtcd != nil {
-		if err := e.SnapshotEtcd(ctx); err != nil {
-			logrus.Warnf("provider-kubernetes: pre-upgrade etcd snapshot did not complete: %v (continuing)", err)
-		}
+		logSnapshotOutcome(e.SnapshotEtcd(ctx))
 	}
 	if _, err := e.Runner.Run(ctx, "upgrade", "apply", e.TargetVersion, "--yes", "--certificate-renewal=true"); err != nil {
 		return fmt.Errorf("kubeadm upgrade apply %s: %w", e.TargetVersion, err)
@@ -420,6 +422,28 @@ func defaultKubeletRestart(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// logSnapshotOutcome emits exactly one structured log line for a SnapshotEtcd
+// result, always containing the literal "etcd-snapshot outcome=" substring so it
+// is easy to grep for. taken/skipped-already-taken (a snapshot exists and covers
+// this target) log at Info; every other outcome (a refusal, a skip, or a
+// failure) logs at Warn so an operator notices without the upgrade being
+// blocked.
+func logSnapshotOutcome(res etcdsnapshot.Result) {
+	msg := fmt.Sprintf("provider-kubernetes: etcd-snapshot outcome=%s", res.Outcome)
+	if res.Path != "" {
+		msg += fmt.Sprintf(" path=%s", res.Path)
+	}
+	if res.Detail != "" {
+		msg += fmt.Sprintf(" detail=%s", res.Detail)
+	}
+	switch res.Outcome {
+	case etcdsnapshot.OutcomeTaken, etcdsnapshot.OutcomeAlreadyTaken:
+		logrus.Info(msg)
+	default:
+		logrus.Warn(msg)
+	}
 }
 
 // sameMinor reports whether two versions share a major.minor (e.g. "v1.34.8" and

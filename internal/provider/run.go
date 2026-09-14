@@ -45,8 +45,10 @@ type Options struct {
 	ClusterVersionProbe func(ctx context.Context) string
 	// RunningKubeletVersionProbe reads this node's running kubelet version.
 	RunningKubeletVersionProbe func(ctx context.Context) string
-	// EncryptionConfirmed reports whether the etcd-snapshot dir is encrypted.
-	EncryptionConfirmed func(ctx context.Context) bool
+	// EncryptionConfirmed reports whether the given etcd-snapshot dir is confirmed
+	// encrypted at rest. nil -> etcdsnapshot.EncryptedAtRest (the fail-closed
+	// sysfs dm-crypt gate).
+	EncryptionConfirmed func(ctx context.Context, dir string) bool
 	// KubeletRestart restarts the kubelet after an upgrade; nil -> systemctl.
 	KubeletRestart func(ctx context.Context) error
 	// APIServerReachableProbe reports whether the LOCAL apiserver answers /healthz
@@ -230,14 +232,16 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		KubeletRestart:      opts.KubeletRestart,       // nil -> systemctl (production)
 		LocalAPIReachable:   prober.APIServerReachable, // post-repair local-API wait (nil when no target)
 	}
-	// Best-effort pre-apply etcd snapshot on a control plane only (ADR-12 U5).
+	// Best-effort pre-apply etcd snapshot on a control plane only (ADR-12 U5,
+	// revised by ADR-12-A1). etcdsnapshot.Run defaults EncryptionConfirmed to its
+	// own fail-closed sysfs gate when opts.EncryptionConfirmed is nil.
 	if target != "" && (role == actualstate.RoleInit || role == actualstate.RoleControlPlane) {
-		encConfirmed := opts.EncryptionConfirmed
-		if encConfirmed == nil {
-			encConfirmed = encryptionConfirmedDefault(etcdsnapshot.DefaultDir)
-		}
-		exec.SnapshotEtcd = func(c context.Context) error {
-			return etcdsnapshot.Run(c, etcdsnapshot.Options{RootPath: pctx.RootPath, EncryptionConfirmed: encConfirmed})
+		exec.SnapshotEtcd = func(c context.Context) etcdsnapshot.Result {
+			return etcdsnapshot.Run(c, etcdsnapshot.Options{
+				RootPath:            pctx.RootPath,
+				TargetMinor:         kubeadm.Minor(target),
+				EncryptionConfirmed: opts.EncryptionConfirmed,
+			})
 		}
 	}
 

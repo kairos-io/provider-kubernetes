@@ -51,9 +51,9 @@ func (r *recordingSink) only(t *testing.T) status.Status {
 // hermeticRunOptions returns Run options that keep a test off the host: the
 // given kubeadm runner, a temp RunDir, an in-memory status sink, and an
 // unreachable control plane (no TCP dial to the cluster endpoint). The upgrade
-// hooks, whose nil defaults exec kubectl/findmnt/lsblk/systemctl or probe the
-// local apiserver, fail the test if consulted. Tests override the fields their
-// path needs.
+// hooks, whose nil defaults exec kubectl/systemctl, inspect the host's snapshot
+// dir and block devices, or probe the local apiserver, fail the test if
+// consulted. Tests override the fields their path needs.
 func hermeticRunOptions(t *testing.T, runner kubeadm.Runner) (Options, *recordingSink) {
 	t.Helper()
 	sink := &recordingSink{}
@@ -64,9 +64,11 @@ func hermeticRunOptions(t *testing.T, runner kubeadm.Runner) (Options, *recordin
 		CPReachableProbe:           func(context.Context) bool { return false },
 		ClusterVersionProbe:        failIfCalled[string](t, "ClusterVersionProbe"),
 		RunningKubeletVersionProbe: failIfCalled[string](t, "RunningKubeletVersionProbe"),
-		EncryptionConfirmed:        failIfCalled[bool](t, "EncryptionConfirmed"),
-		KubeletRestart:             failIfCalled[error](t, "KubeletRestart"),
-		APIServerReachableProbe:    failIfCalled[bool](t, "APIServerReachableProbe"),
+		EncryptionConfirmed: func(ctx context.Context, _ string) bool {
+			return failIfCalled[bool](t, "EncryptionConfirmed")(ctx)
+		},
+		KubeletRestart:          failIfCalled[error](t, "KubeletRestart"),
+		APIServerReachableProbe: failIfCalled[bool](t, "APIServerReachableProbe"),
 	}, sink
 }
 
