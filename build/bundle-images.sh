@@ -118,8 +118,9 @@ etcd_verified=false
 #       [{"Config":"<config>","RepoTags":["<expected>"],"Layers":["<layer>",...]}]
 #       with no other keys, whitespace or trailing bytes, and set(Layers) equals the
 #       set of layer members (a layer may repeat inside Layers).
-# Leaves <work>/<label>.names (member order), <label>.x/ (extracted members) and
-# <label>.blobs ("name size sha256" per non-manifest member, in member order).
+# Leaves <work>/<label>.names (member order), <label>.x/ (extracted members),
+# <label>.blobs ("name size sha256" per non-manifest member, in member order) and
+# <label>.layers.text (the exact Layers list text, order and repeats included).
 validate_image_tar() {
   vt_tar="$1"
   vt_expect="$2"
@@ -239,14 +240,17 @@ validate_image_tar() {
     echo "${vt_fail} manifest.json Layers is not a plain list of <hex>.tar.gz names" >&2
     exit 1
   fi
-  if [ "${vt_msize}" -ne $((${#vt_pre} + ${#vt_mid} + ${#vt_suf})) ]; then
-    echo "${vt_fail} manifest.json has ${vt_msize} bytes, want $((${#vt_pre} + ${#vt_mid} + ${#vt_suf})) (trailing or hidden bytes)" >&2
+  # Byte count via wc -c (busybox ${#var} counts characters, not bytes).
+  vt_want="$(printf '%s' "${vt_pre}${vt_mid}${vt_suf}" | wc -c | tr -d ' ')"
+  if [ "${vt_msize}" != "${vt_want}" ]; then
+    echo "${vt_fail} manifest.json has ${vt_msize} bytes, want ${vt_want} (trailing or hidden bytes)" >&2
     exit 1
   fi
   if [ "$(grep -o '"RepoTags":\[' "${vt_mfile}" | wc -l)" != 1 ]; then
     echo "${vt_fail} \"RepoTags\":[ must occur exactly once in manifest.json" >&2
     exit 1
   fi
+  printf '%s' "${vt_mid}" > "${vt_work}/${vt_label}.layers.text"
   printf '%s\n' "${vt_mid}" | tr ',' '\n' | tr -d '"' | sort -u > "${vt_work}/${vt_label}.layers.manifest"
   grep -Ex '[0-9a-f]{64}\.tar\.gz' "${vt_names}" | sort -u > "${vt_work}/${vt_label}.layers.members"
   if ! cmp -s "${vt_work}/${vt_label}.layers.manifest" "${vt_work}/${vt_label}.layers.members"; then
@@ -298,13 +302,18 @@ bundle_image() {
     "${bi_work}/raw.x/manifest.json"
   tar -cf "${bi_work}/final.tar" -C "${bi_work}/raw.x" -T "${bi_work}/raw.names"
 
-  # Re-read the NEW tarball: same validator with the exact ref, and member for member
-  # (name, size, blob sha256) identical to the raw pull.
+  # Re-read the NEW tarball: same validator with the exact ref, member for member
+  # (name, size, blob sha256) identical to the raw pull, and the same Layers list
+  # (order and repeats: the layer stack, not just its set).
   bi_checked_sha="$(sha256sum "${bi_work}/final.tar" | cut -d' ' -f1)"
   validate_image_tar "${bi_work}/final.tar" "${bi_ref}" "${bi_work}" final
   if ! cmp -s "${bi_work}/raw.blobs" "${bi_work}/final.blobs"; then
     echo "FATAL: rewritten ${bi_ref} tarball members differ from the raw pull:" >&2
     diff "${bi_work}/raw.blobs" "${bi_work}/final.blobs" >&2 || true
+    exit 1
+  fi
+  if ! cmp -s "${bi_work}/raw.layers.text" "${bi_work}/final.layers.text"; then
+    echo "FATAL: rewritten ${bi_ref} manifest.json Layers differ from the raw pull (order or repeats)" >&2
     exit 1
   fi
 
@@ -430,11 +439,12 @@ extract_etcd_tools() {
   trap - EXIT
 }
 
+# 0. Allowlist EVERY ref before any registry call (crane digest, cosign verify):
+#    under IMAGE_REPOSITORY, a plain host[:port]/path:tag (no digest, no uppercase
+#    path, no JSON metacharacters). One bad ref anywhere in the list stops the build
+#    before anything is fetched.
 while IFS= read -r ref; do
   [ -n "${ref}" ] || continue
-
-  # 0. allowlist the ref BEFORE any registry call: under IMAGE_REPOSITORY, a plain
-  #    host[:port]/path:tag (no digest, no uppercase path, no JSON metacharacters).
   case "${ref}" in
     "${IMAGE_REPOSITORY}/"*) : ;;
     *) echo "FATAL: ref '${ref}' is not under IMAGE_REPOSITORY '${IMAGE_REPOSITORY}/'" >&2; exit 1 ;;
@@ -444,6 +454,10 @@ while IFS= read -r ref; do
     echo "FATAL: ref '${ref}' is not an allowed <host>[:port]/<path>:<tag> reference" >&2
     exit 1
   fi
+done < /tmp/imglist
+
+while IFS= read -r ref; do
+  [ -n "${ref}" ] || continue
 
   # 1. resolve tag -> digest once; everything after is content-addressed.
   digest="$(crane digest "${ref}")"
