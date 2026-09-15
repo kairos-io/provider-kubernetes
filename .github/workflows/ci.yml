@@ -161,6 +161,17 @@ jobs:
           esac
           echo "OK: image bundles the k8s ${{ matrix.minor }} toolchain"
 
+      - name: Verify bundled image tarballs are named with their exact refs (F-IMPORTREF)
+        env:
+          IMG: kairos-kubeadm:ci-${{ matrix.minor }}
+          K8S: ${{ steps.ver.outputs.k8s }}
+        run: |
+          set -euo pipefail
+          # Every bundled control-plane tarball must import under its EXACT ref, or an
+          # air-gap first boot cannot find kubeadm's images / the sandbox image. The
+          # checks live in one script that the release gate runs too (see its header).
+          bash scripts/verify-bundle-refs.sh "$IMG" "$K8S"
+
       - name: Verify bundled etcdctl/etcdutl are the verified etcd image's (ADR-12-A1)
         env:
           IMG: kairos-kubeadm:ci-${{ matrix.minor }}
@@ -228,12 +239,24 @@ jobs:
             || { echo "unexpected etcd tarball name '${lock_tar}'" >&2; exit 1; }
           docker run --rm --entrypoint cat "$IMG" \
             "/opt/provider-kubernetes/images/${lock_tar}" > "$work/etcd.tar"
-          # crane pull by digest writes ONE RepoTag (registry.k8s.io/etcd:i-was-a-digest)
-          # that docker load applies. Bind it BEFORE the load so the trap always
-          # removes the loaded image; a tag (unlike an image ID) resolves the same
-          # on the classic and the containerd image store.
-          loaded="$(tar -xOf "$work/etcd.tar" manifest.json | jq -r '.[0].RepoTags | if length == 1 then .[0] else "" end')"
-          [ -n "$loaded" ] || { echo "etcd tarball must carry exactly one RepoTag" >&2; exit 1; }
+          # The build names every bundled tarball's image with its exact ref
+          # (F-IMPORTREF), so docker load creates the image "${lock_ref}" and the trap
+          # removes that name afterwards. Refuse to go on if the name already exists
+          # locally: this step must never delete an image it did not create. The
+          # RepoTags bytes must be exactly ["<lock_ref>"] (the whole manifest.json is
+          # asserted byte-for-byte by the tarball-naming step). A tag (unlike an image
+          # ID) resolves the same on the classic and the containerd image store.
+          if docker image inspect "$lock_ref" >/dev/null 2>&1; then
+            echo "an image named ${lock_ref} already exists locally; refusing to load over it (the cleanup would delete it)" >&2
+            exit 1
+          fi
+          manifest="$(tar -xOf "$work/etcd.tar" manifest.json)"
+          if [ "$(grep -o '"RepoTags":\[' <<<"$manifest" | wc -l)" -ne 1 ] \
+            || [[ "$manifest" != *"\"RepoTags\":[\"${lock_ref}\"]"* ]]; then
+            echo "etcd tarball RepoTags must be exactly [\"${lock_ref}\"]" >&2
+            exit 1
+          fi
+          loaded="$lock_ref"
           load_out="$(docker load -i "$work/etcd.tar")"
           printf '%s\n' "$load_out"
           grep -qxF "Loaded image: ${loaded}" <<<"$load_out" \

@@ -69,6 +69,38 @@ provider (containerd and the kubelet may still pick up tools there, so avoid put
 Kubernetes binaries in that directory). See
 [Security model](./security.md#exec-hygiene).
 
+### kubeadm pulls control-plane images even though the image bundles them
+
+The image bundles the control-plane images for its Kubernetes version and imports
+them into containerd at boot, so `kubeadm init`/`join` should not need a registry.
+Check that containerd has an image under the exact reference kubeadm looks for
+(this is the same lookup kubeadm does):
+
+```sh
+sudo /usr/bin/crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
+  --image-endpoint unix:///run/containerd/containerd.sock inspecti registry.k8s.io/pause:<tag>
+sudo /usr/bin/kubeadm config images list --kubernetes-version <version>
+```
+
+`crictl inspecti` also succeeds if the image was pulled from the registry. To see
+that containerd holds the bundled image, compare its image ID with the `Config`
+digest in the matching tarball's manifest; they must be equal:
+
+```sh
+sudo /usr/bin/crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
+  --image-endpoint unix:///run/containerd/containerd.sock inspecti -o json registry.k8s.io/pause:<tag> | grep -m1 '"id"'
+sudo /usr/bin/tar -xOf /opt/provider-kubernetes/images/registry.k8s.io_pause_<tag>.tar manifest.json
+```
+
+- The bundle covers the default `imageRepository` (`registry.k8s.io`) only. With
+  a custom `imageRepository`, kubeadm looks for other references and pulls.
+- **v0.3.0 images** imported every bundled image under a placeholder name
+  (`registry.k8s.io/<image>:i-was-a-digest`), so kubeadm could not find them: nodes
+  without registry access failed to bootstrap, and connected nodes pulled the
+  images by tag. Use a fixed image. Leftover `:i-was-a-digest` names are harmless
+  and can be removed with `sudo /usr/bin/ctr -n k8s.io images rm <name>`; an
+  air-gapped node that failed to bootstrap should be reinstalled from a fixed image.
+
 ### Upgrade didn't run, or was refused
 
 - **Nothing happened after booting a newer image.** An upgrade runs only when you

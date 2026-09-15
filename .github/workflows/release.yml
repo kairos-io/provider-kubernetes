@@ -159,6 +159,9 @@ jobs:
               || { echo "${tool} mismatch: want '${tool} version: ${etcd_tag%-*}' (${etcd_ref}) got '${first}'" >&2; exit 1; }
             echo "verified ${first} (${etcd_ref})"
           done
+          # Every bundled control-plane tarball must import under its EXACT ref
+          # (F-IMPORTREF); the same checks CI runs, before anything is published.
+          bash scripts/verify-bundle-refs.sh "${minortag}" "${K8S}"
           docker push "${minortag}"
           # Capture the immutable digest of what we just pushed. Attestation MUST
           # target the digest, never a tag (ADR-15). RepoDigests is populated after
