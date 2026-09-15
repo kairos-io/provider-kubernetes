@@ -165,6 +165,9 @@ jobs:
           # `import-images --verify-only` reports outcome=verified (ADR-16-A2). The
           # same script CI runs, before anything is published.
           bash scripts/verify-bundle-refs.sh "${minortag}" "${K8S}"
+          # Every file the image installs is root-owned without group/other write
+          # (the same script CI runs).
+          bash scripts/verify-image-files.sh "${minortag}"
           docker push "${minortag}"
           # Capture the immutable digest of what we just pushed. Attestation MUST
           # target the digest, never a tag (ADR-15). RepoDigests is populated after
