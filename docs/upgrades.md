@@ -207,6 +207,14 @@ on a kubeadm/Kairos control plane that means:
 
 ## Rollback
 
+**Bundled images after upgrading from an older release.** Images that bundle the
+control-plane images under `/system/provider-kubernetes/images` no longer read the
+old copy under `/opt/provider-kubernetes`, which Kairos keeps on the persistent
+partition. Once you no longer need to roll back, you can remove it with
+`sudo rm -rf /opt/provider-kubernetes`; booting an older image puts it back and that
+image imports from it again. Do not list `/system/provider-kubernetes` in
+`kairos-agent upgrade` excluded paths: the bundle must come from the image you boot.
+
 kubeadm upgrades (especially etcd) are forward-only; there is no automatic
 rollback. To recover, restore an etcd snapshot (see above) and boot the previous
 image. A node wedged mid-upgrade can be recovered with the [reset](./lifecycle.md)

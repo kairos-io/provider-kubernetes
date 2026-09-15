@@ -38,6 +38,13 @@ The provider executes `kubeadm`, `kubectl`, `ctr`, `systemctl` and `etcdctl` onl
 by their `/usr/bin` paths (see [Security model](./security.md#exec-hygiene)), so an
 image derived from this one must keep them there.
 
+The pre-bundled control-plane images live in `/system/provider-kubernetes/images`
+(with `images.lock`), beside the provider binary in `/system/providers`. `/system`
+is part of the read-only OS image and is not a persistent or overlaid path on
+Kairos. A derived image must keep the bundle there, owned by root and not writable
+by group or others, and must not bind-mount anything over it: the import refuses
+tarballs that are not on the same filesystem as the provider binary.
+
 ## Supply-chain pinning
 
 The static builds clone the upstream **version tag** and then verify it resolves

@@ -88,9 +88,56 @@ digest in the matching tarball's manifest; they must be equal:
 
 ```sh
 sudo /usr/bin/crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
-  --image-endpoint unix:///run/containerd/containerd.sock inspecti -o json registry.k8s.io/pause:<tag> | grep -m1 '"id"'
-sudo /usr/bin/tar -xOf /opt/provider-kubernetes/images/registry.k8s.io_pause_<tag>.tar manifest.json
+  --image-endpoint unix:///run/containerd/containerd.sock \
+  inspecti -o go-template --template '{{.status.id}}' registry.k8s.io/pause:<tag>
+sudo /usr/bin/tar -xOf /system/provider-kubernetes/images/registry.k8s.io_pause_<tag>.tar manifest.json
 ```
+
+If the images are missing, check the boot import first (next entry).
+
+### import-images refused an image
+
+At every boot the provider imports the bundled images listed in
+`/system/provider-kubernetes/images/images.lock`, and only those. Each run ends with
+one summary line:
+
+```sh
+sudo journalctl -u provider-kubernetes-image-import --no-pager | grep 'image-import:'
+sudo grep 'image-import:' /var/log/provider-kubernetes-image-import.log | tail -n 20
+sudo /system/providers/agent-provider-kubernetes import-images --verify-only
+```
+
+```text
+image-import: summary outcome=success entries=7 imported=7 refused=0 failed=0 unlisted=0 readonly=true dir=/system/provider-kubernetes/images
+```
+
+`outcome` is `success`, `partial`, `refused`, `failed` or `not-bundled` (the image
+bundles nothing); `--verify-only` runs every check without importing and reports
+`verified` or `refused`. A refused image has its own line,
+`image-import: refused <tarball> ref=<ref> reason=<reason> ...`. A problem with the
+bundle as a whole (a directory, the provider binary used as the reference, or
+`images.lock` itself) is logged once as `image-import: bundle refused reason=<reason>
+...`, and nothing is imported:
+
+| Reason | Meaning |
+|--------|---------|
+| `dir-unsafe`, `anchor-unsafe` | A directory on the path, or the provider binary used as the reference, is not a root-owned directory/file without group or other write. Nothing is imported. |
+| `lock-missing`, `lock-invalid` | `images.lock` is missing or not exactly what the build writes. Nothing is imported. |
+| `missing`, `symlink`, `not-regular`, `owner`, `mode`, `size` | The tarball (or, on a `bundle refused` line, `images.lock`) is absent, a symlink, not a regular file, not owned by root, writable by group or others, or outside the size limits. |
+| `device` | The file is not on the same filesystem as the provider binary, for example because something is bind-mounted over the bundle directory (including a `CUSTOM_BIND_MOUNTS` entry). |
+| `tar-structure`, `manifest`, `config-digest` | The tarball is not the expected image archive, names a different reference, or its image config does not match its name. |
+| `ctr-failed`, `deadline` | containerd rejected the import, or the 5 minute bound ran out. |
+
+Files in the bundle directory that are not in `images.lock` are never opened; they
+are reported as `unlisted`. The import never blocks boot. A refused image is not
+imported: on a node without registry access kubeadm then fails to find it, and on a
+node with registry access kubeadm pulls it from the registry by tag instead. Nothing
+on a supported image should be refused; treat a refusal as a sign that the booted
+OS image or its mounts were changed.
+
+Nodes upgraded from an image that bundled under `/opt` still have a copy in
+`/opt/provider-kubernetes` (see [Upgrades](./upgrades.md#rollback)); it is no longer
+read.
 
 - The bundle covers the default `imageRepository` (`registry.k8s.io`) only. With
   a custom `imageRepository`, kubeadm looks for other references and pulls.
