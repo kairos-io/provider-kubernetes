@@ -77,6 +77,43 @@ case "${TOOLS_DIR%/}/" in
   "${OUT_DIR%/}/"*) echo "FATAL: TOOLS_DIR '${TOOLS_DIR}' must not be OUT_DIR '${OUT_DIR}' or under it" >&2; exit 1 ;;
 esac
 
+# lock_string_ok <value>: succeeds only for a non-empty value made of printable ASCII
+# (0x20-0x7e) other than '"' and '\'. images.lock is written with printf below, so
+# this is what keeps each top-level value a plain JSON string, and it is the rule the
+# boot importer applies when it parses the lock (ADR-16-A2 decision 4). Bytes are
+# checked one by one with od (-v: no '*' line folding), so a newline, a control byte
+# or a non-ASCII byte anywhere in the value is caught, independent of the locale.
+lock_string_ok() {
+  [ -n "$1" ] || return 1
+  for ls_byte in $(printf '%s' "$1" | od -An -v -tu1); do
+    if [ "${ls_byte}" -lt 32 ] || [ "${ls_byte}" -gt 126 ] || [ "${ls_byte}" -eq 34 ] || [ "${ls_byte}" -eq 92 ]; then
+      return 1
+    fi
+  done
+}
+
+# require_lock_string <name> <value>: FATAL unless lock_string_ok. The value is not
+# echoed: it may hold control bytes.
+require_lock_string() {
+  if ! lock_string_ok "$2"; then
+    printf '%s\n' "FATAL: $1 must be non-empty printable ASCII without '\"' or '\\' (it is written into images.lock)" >&2
+    exit 1
+  fi
+}
+
+# The top-level images.lock values are validated here, before any tool or registry
+# call, so a bad value fails the BUILD instead of making every boot refuse the
+# bundle (the boot importer applies the same rules and refuses a lock that breaks
+# them).
+require_lock_string KUBERNETES_VERSION "${KUBERNETES_VERSION}"
+require_lock_string IMAGE_REPOSITORY "${IMAGE_REPOSITORY}"
+require_lock_string COSIGN_IDENTITY "${COSIGN_IDENTITY}"
+require_lock_string COSIGN_ISSUER "${COSIGN_ISSUER}"
+if ! printf '%s\n' "${KUBERNETES_VERSION}" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+'; then
+  echo "FATAL: KUBERNETES_VERSION '${KUBERNETES_VERSION}' is not v<major>.<minor>.<patch>" >&2
+  exit 1
+fi
+
 # Every ref must be fully qualified with a registry host: a bare "name/path" would be
 # resolved against Docker Hub by crane but named differently by containerd.
 case "${IMAGE_REPOSITORY%%/*}" in
@@ -286,8 +323,15 @@ bundle_image() {
   validate_image_tar "${bi_work}/raw.tar" "${bi_placeholder}" "${bi_work}" raw
 
   # Exact literal replacement (quoted patterns; the raw validation proved the old
-  # string occurs exactly once), then re-tar the SAME members in the raw order. The
-  # new manifest.json takes the config member's mtime so the output is reproducible.
+  # string occurs exactly once), then re-tar the SAME members in the raw order.
+  # touch -r gives the new manifest.json the config member's mtime so its header does
+  # not carry the build time. That pins ONLY that mtime: busybox tar also records
+  # each member's mode and owner as they are on disk in this stage (which depends on
+  # the user and umask the extraction ran with) in its own header layout, so the
+  # final tarball bytes are stable only for the same build environment (this
+  # stage's pinned alpine/busybox, run as root), not reproducible in general.
+  # Nothing relies on more: the lock records the registry digest, and the etcd tool
+  # extraction and the logged final= hash bind to the bytes produced in this run.
   bi_old="\"RepoTags\":[\"${bi_placeholder}\"]"
   bi_new="\"RepoTags\":[\"${bi_ref}\"]"
   bi_m="$(cat "${bi_work}/raw.x/manifest.json")"
@@ -460,11 +504,14 @@ while IFS= read -r ref; do
   [ -n "${ref}" ] || continue
 
   # 1. resolve tag -> digest once; everything after is content-addressed.
+  # Exactly sha256:<64 lowercase hex> on one line: it is written into images.lock,
+  # whose digest rule the boot importer enforces.
   digest="$(crane digest "${ref}")"
-  case "${digest}" in
-    sha256:*) : ;;
-    *) echo "FATAL: bad digest for ${ref}: '${digest}'" >&2; exit 1 ;;
-  esac
+  if [ "$(printf '%s\n' "${digest}" | wc -l)" != 1 ] \
+    || ! printf '%s\n' "${digest}" | grep -Eqx 'sha256:[0-9a-f]{64}'; then
+    echo "FATAL: bad digest for ${ref}: '${digest}'" >&2
+    exit 1
+  fi
 
   # 2. verify the DIGEST (not the tag) against the Kubernetes release identity.
   set +e
@@ -550,6 +597,14 @@ if [ "${kube_any_ok}" -ne 1 ]; then
   exit 1
 fi
 
+# The images.lock BYTE LAYOUT below is a RUNTIME contract (ADR-16-A2 decision 4):
+# at every boot internal/imageimport parses the lock strictly, re-renders it with
+# its one Go renderer and refuses the whole bundle (reason lock-invalid) unless the
+# re-rendered bytes EQUAL the file: key names and order, the spacing, one image per
+# line, LF line ends and the single trailing newline. Do not change a byte of this
+# layout, a key or a value rule without changing that renderer and its golden locks
+# (internal/imageimport/testdata/images.lock.<version>) in the same change. The /v1
+# release attestation predicate is these bytes too.
 lock="${OUT_DIR}/images.lock"
 {
   printf '{\n'

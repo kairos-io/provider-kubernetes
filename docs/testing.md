@@ -113,9 +113,13 @@ Notes:
   go test -tags e2e -count=1 -run TestWorkerJoin -v ./test/e2e/...`.
 - Each scenario pre-pulls the control-plane images before reconcile so a cold
   containerd pull does not race the reconcile budget (a runtime nuance, not a
-  production change). One test deliberately does not: it imports the bundled
+  production change). Two tests deliberately do not. One imports the bundled
   image tarballs and checks that containerd lists every image under the exact
-  reference kubeadm looks up (the same CRI query), which a pre-pull would hide.
+  reference kubeadm looks up (the same CRI query), which a pre-pull would hide. The
+  other checks that the import reads only `images.lock` in the image-only bundle
+  directory: a planted lock and tarball under `/opt` and an extra unlisted tarball
+  are ignored, and tampered tarballs (wrong owner or mode, symlink, FIFO, wrong
+  image name, bind mounts over the bundle) are refused with the expected reason.
 - A converged node shows `NotReady` because the provider installs no CNI by
   design; the scenarios assert on convergence + registration, not `Ready`.
 - Watch disk: the base + node images are ~3 GB each, and anonymous volumes

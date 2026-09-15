@@ -64,8 +64,8 @@ gh attestation verify \
   --predicate-type https://kairos.io/attestations/bundled-control-plane-images/v1
 ```
 
-The predicate is the image's `/opt/provider-kubernetes/images/images.lock`
-(`{ref, digest, verified, verifyReason}` per image). See
+The predicate is the image's `/system/provider-kubernetes/images/images.lock`
+(`kubernetesVersion`, `imageRepository`, `verifiedBy`, and `{ref, digest, tarball, verified, verifyReason}` per image). See
 [`docs/testing.md`](./docs/testing.md) for the full supply-chain picture.
 
 ## Releasing (maintainers)

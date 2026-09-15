@@ -2,14 +2,18 @@ package kubeadm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,6 +33,7 @@ const (
 	helperSpawnGrandchild         = "__spawn_grandchild__"
 	helperSpawnGrandchildThenHang = "__spawn_grandchild_then_hang__"
 	helperGrandchildSleep         = "__grandchild_sleep__"
+	helperStdinSHA256             = "__stdin_sha256__"
 )
 
 func TestMain(m *testing.M) {
@@ -46,6 +51,8 @@ func TestMain(m *testing.M) {
 			helperSpawnGrandchildMain(os.Args[2], true)
 		case helperGrandchildSleep:
 			helperGrandchildSleepMain()
+		case helperStdinSHA256:
+			helperStdinSHA256Main()
 		}
 	}
 	os.Exit(m.Run())
@@ -70,6 +77,19 @@ func helperMarkerMain(markerFile string) {
 func helperFailMain() {
 	fmt.Fprintln(os.Stderr, "boom")
 	os.Exit(1)
+}
+
+// helperStdinSHA256Main reads all of fd 0 (its stdin) and prints the hex
+// sha256 of exactly what it read -- proving RunStdin wired the real file
+// descriptor (not a copy, not a truncated/altered stream) as the child's fd 0.
+func helperStdinSHA256Main() {
+	h := sha256.New()
+	if _, err := io.Copy(h, os.Stdin); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Print(hex.EncodeToString(h.Sum(nil)))
+	os.Exit(0)
 }
 
 // helperGrandchildSleepMain is the long-lived grandchild that inherits the
@@ -329,4 +349,144 @@ func TestRunWaitDelayCtxDeadlineWithGrandchild(t *testing.T) {
 	if elapsed > ctxTimeout+waitDelay+5*time.Second {
 		t.Fatalf("Run took %s, want within ctx(%s)+WaitDelay(%s)+margin", elapsed, ctxTimeout, waitDelay)
 	}
+}
+
+// TestRunStdinPassesExactFileContentAsFD0 covers ADR-16-A2 O-7: the child
+// observes fd 0 as EXACTLY the wired *os.File's content (RunStdin assigns it
+// directly to cmd.Stdin, no io.Reader relay).
+func TestRunStdinPassesExactFileContentAsFD0(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "payload.bin")
+	data := []byte("ADR-16-A2 RunStdin payload\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256(data)
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open payload: %v", err)
+	}
+	defer f.Close()
+
+	r := newExecRunner(hostexec.Command{Path: testBinary(t), Env: []string{}})
+	res, err := r.RunStdin(context.Background(), f, helperStdinSHA256)
+	if err != nil {
+		t.Fatalf("RunStdin: %v", err)
+	}
+	if got := res.Stdout; got != hex.EncodeToString(want[:]) {
+		t.Fatalf("child sha256 = %q, want %q", got, hex.EncodeToString(want[:]))
+	}
+}
+
+// TestRunStdinRefusesNilNonRegularAndWriteMode is ADR-16-A2 O-7: RunStdin
+// must refuse -- WITHOUT exec'ing anything -- a nil file, a non-regular file
+// (a directory, a FIFO), and a file opened for writing (O_RDWR).
+func TestRunStdinRefusesNilNonRegularAndWriteMode(t *testing.T) {
+	r := newExecRunner(hostexec.Command{Path: testBinary(t), Env: []string{}})
+
+	assertRefusedNoExec := func(t *testing.T, name string, f *os.File) {
+		t.Helper()
+		marker := filepath.Join(t.TempDir(), "MARKER")
+		if _, err := r.RunStdin(context.Background(), f, helperMarker, marker); err == nil {
+			t.Errorf("%s: expected RunStdin to refuse, got nil error", name)
+		}
+		if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+			t.Errorf("%s: marker file exists -- helperMarker was executed despite the refusal", name)
+		}
+	}
+
+	t.Run("nil", func(t *testing.T) {
+		assertRefusedNoExec(t, "nil", nil)
+	})
+
+	t.Run("directory", func(t *testing.T) {
+		dir, err := os.Open(t.TempDir())
+		if err != nil {
+			t.Fatalf("open dir: %v", err)
+		}
+		defer dir.Close()
+		assertRefusedNoExec(t, "directory", dir)
+	})
+
+	t.Run("FIFO", func(t *testing.T) {
+		fifoPath := filepath.Join(t.TempDir(), "fifo")
+		if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+			t.Fatalf("mkfifo: %v", err)
+		}
+		// O_NONBLOCK so opening for read does not itself block waiting for a
+		// writer (there is none) -- this test must not hang either.
+		fd, err := syscall.Open(fifoPath, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			t.Fatalf("open fifo: %v", err)
+		}
+		fifo := os.NewFile(uintptr(fd), fifoPath)
+		defer fifo.Close()
+		assertRefusedNoExec(t, "FIFO", fifo)
+	})
+
+	t.Run("O_RDWR", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rw.bin")
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rw, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatalf("open O_RDWR: %v", err)
+		}
+		defer rw.Close()
+		assertRefusedNoExec(t, "O_RDWR", rw)
+	})
+}
+
+// TestRunStdinClosedEnvironmentAndPathRefusal is RunStdin's counterpart to
+// TestRunClosedEnvironmentAgainstHostileProvider: with the calling process
+// made hostile, the child observes EXACTLY the configured Env, and a
+// relative path is refused before anything is exec'd.
+func TestRunStdinClosedEnvironmentAndPathRefusal(t *testing.T) {
+	hostileEnviron(t)
+	bin := testBinary(t)
+
+	payload := filepath.Join(t.TempDir(), "payload")
+	if err := os.WriteFile(payload, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("exact configured env, nothing inherited", func(t *testing.T) {
+		f, err := os.Open(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		knownEnv := []string{"FOO=bar", "PATH=" + hostexec.ChildPATH}
+		r := newExecRunner(hostexec.Command{Path: bin, Env: knownEnv})
+		out := filepath.Join(t.TempDir(), "environ.out")
+		if _, err := r.RunStdin(context.Background(), f, helperDumpEnviron, out); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		data, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatalf("read helper output: %v", err)
+		}
+		got := strings.Split(string(data), "\n")
+		if !slices.Equal(got, knownEnv) {
+			t.Fatalf("child observed env %v, want exactly %v", got, knownEnv)
+		}
+	})
+
+	t.Run("relative path refused without exec", func(t *testing.T) {
+		f, err := os.Open(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		r := newExecRunner(hostexec.Command{Path: "kubeadm", Env: []string{}})
+		marker := filepath.Join(t.TempDir(), "MARKER")
+		if _, err := r.RunStdin(context.Background(), f, helperMarker, marker); err == nil {
+			t.Error("expected RunStdin to refuse a relative path")
+		}
+		if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+			t.Error("marker file exists -- the hostile PATH kubeadm was executed")
+		}
+	})
 }

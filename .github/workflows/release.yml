@@ -159,8 +159,11 @@ jobs:
               || { echo "${tool} mismatch: want '${tool} version: ${etcd_tag%-*}' (${etcd_ref}) got '${first}'" >&2; exit 1; }
             echo "verified ${first} (${etcd_ref})"
           done
-          # Every bundled control-plane tarball must import under its EXACT ref
-          # (F-IMPORTREF); the same checks CI runs, before anything is published.
+          # The bundle ships only in /system/provider-kubernetes/images, root-owned and
+          # within half of every importer bound; every bundled control-plane tarball
+          # imports under its EXACT ref (F-IMPORTREF); and the image's own
+          # `import-images --verify-only` reports outcome=verified (ADR-16-A2). The
+          # same script CI runs, before anything is published.
           bash scripts/verify-bundle-refs.sh "${minortag}" "${K8S}"
           docker push "${minortag}"
           # Capture the immutable digest of what we just pushed. Attestation MUST
@@ -223,7 +226,7 @@ jobs:
           set -euo pipefail
           docker run --rm --entrypoint cat \
             "${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}" \
-            /opt/provider-kubernetes/images/images.lock > images.lock
+            /system/provider-kubernetes/images/images.lock > images.lock
           test -s images.lock
 
       - name: Attest bundled control-plane images

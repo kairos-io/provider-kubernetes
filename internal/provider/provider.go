@@ -13,11 +13,16 @@ import (
 	yip "github.com/mudler/yip/pkg/schema"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
+
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 )
 
 // ProviderBinaryPath is where the Kairos image installs the provider binary
 // (Kairos discovery convention: agent-provider-* under /system/providers/).
-const ProviderBinaryPath = "/system/providers/agent-provider-kubernetes"
+// It is an alias of hostexec.ProviderBinaryPath (ADR-16-A2): hostexec is the
+// single source of truth for this path, since it also anchors the bundle
+// walk's device check.
+const ProviderBinaryPath = hostexec.ProviderBinaryPath
 
 // reconcileStageKey is the yip stage we emit into. We pick network.after so
 // the bounded reconcile runs once the network is up (kubeadm join needs CP

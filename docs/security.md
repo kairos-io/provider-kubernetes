@@ -174,7 +174,21 @@ What this does **not** cover:
   tag, so the build replaces that one name after the verified pull. It checks that
   the image config and layers are byte-for-byte unchanged, and CI and the
   end-to-end tests check that containerd lists each image under its exact
-  reference. This does not protect tarballs changed on the node after installation.
+  reference.
+  The bundle lives in `/system/provider-kubernetes/images`, part of the read-only
+  OS image and not under the persistent `/opt`. At every boot the provider imports
+  only the images listed in `images.lock`. It first checks that the directories,
+  the lock file and each tarball are owned by root, not writable by group or
+  others, not symlinks, and on the same filesystem as the provider binary, and that
+  each tarball names exactly its lock reference. Image layers are not re-hashed at
+  boot: containerd checks layer contents against the image configuration when it
+  unpacks them. The bundle is trusted exactly as much as the provider binary beside
+  it. Anyone who can change the booted OS image, or who boots with a writable root,
+  can change both. On nodes with registry access, an image that fails these checks
+  is pulled from the registry by tag instead.
+  Images already in containerd's persistent store are not re-verified; a layer that
+  is already unpacked is reused as is. A node booted from an older image restores
+  and imports the old `/opt` copy.
 - **`etcdctl` and `etcdutl`** are not downloaded separately: they are extracted
   from that verified etcd image, so they come from an attested digest and match
   the etcd version kubeadm deploys. CI checks that the shipped `/usr/bin` binaries
@@ -190,7 +204,7 @@ overwrite your own `registry.k8s.io/etcd:<tag>`). All three hashes must match:
 
 ```sh
 img=<your image>
-dir=/opt/provider-kubernetes/images
+dir=/system/provider-kubernetes/images
 work="$(mktemp -d)"
 docker run --rm --entrypoint cat "$img" "$dir/images.lock" > "$work/images.lock"
 sel='.images[] | select(.ref | test("/etcd:"))'

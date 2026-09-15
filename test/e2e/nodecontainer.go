@@ -46,17 +46,24 @@ const (
 const (
 	binCat        = "/usr/bin/cat"
 	binChmod      = "/usr/bin/chmod"
+	binChown      = "/usr/bin/chown"
+	binCp         = "/usr/bin/cp"
 	binCrictl     = "/usr/bin/crictl"
 	binEnv        = "/usr/bin/env"
 	binFind       = "/usr/bin/find"
 	binJournalctl = "/usr/bin/journalctl"
+	binLn         = "/usr/bin/ln"
 	binMkdir      = "/usr/bin/mkdir"
+	binMkfifo     = "/usr/bin/mkfifo"
+	binMount      = "/usr/bin/mount"
 	binReadlink   = "/usr/bin/readlink"
 	binRm         = "/usr/bin/rm"
+	binSha256sum  = "/usr/bin/sha256sum"
 	binStat       = "/usr/bin/stat"
 	binTar        = "/usr/bin/tar"
 	binTee        = "/usr/bin/tee"
 	binTest       = "/usr/bin/test"
+	binUmount     = "/usr/bin/umount"
 )
 
 // criEndpoint is containerd's CRI socket, passed to crictl explicitly for both
@@ -333,15 +340,20 @@ func (nc *nodeContainer) ExecInput(stdin string, args ...string) (string, error)
 // WriteFile writes content to path inside the container with mode (octal string,
 // e.g. "0600"). It uses `tee` over stdin (no shell, no interpolation of
 // content) then chmod, mirroring how the yip File stage materializes the
-// serialized Cluster at 0600.
+// serialized Cluster at 0600. Failures stop t (not nc.t), so it is safe in a
+// subtest.
 func (nc *nodeContainer) WriteFile(t *testing.T, path, content, mode string) {
 	t.Helper()
 	dir := path[:strings.LastIndex(path, "/")]
-	nc.Exec(binMkdir, "-p", dir)
+	if out, err := nc.execErr(binMkdir, "-p", dir); err != nil {
+		t.Fatalf("mkdir -p %s: %v\n%s", dir, err, out)
+	}
 	if out, err := nc.ExecInput(content, binTee, path); err != nil {
 		t.Fatalf("write %s: %v\n%s", path, err, out)
 	}
-	nc.Exec(binChmod, mode, path)
+	if out, err := nc.execErr(binChmod, mode, path); err != nil {
+		t.Fatalf("chmod %s %s: %v\n%s", mode, path, err, out)
+	}
 }
 
 // ReadFile reads a file from inside the container.

@@ -258,10 +258,19 @@ RUN set -eux; \
 # set from the bundled kubeadm (same source as the pause pin, so refs never drift),
 # cosign-VERIFY each against the Kubernetes release identity, and fetch each as a
 # ctr-importable tarball with crane (daemonless). The tarballs + a digest lockfile
-# are embedded read-only in the final image and imported into containerd at boot,
-# so a first boot converges with NO registry access (air-gap). Because the images
-# land in the immutable OS with no later admission check, signature verification is
-# done here at BUILD time (P5). CNI is intentionally NOT bundled (operator choice).
+# (images.lock) are embedded in the read-only OS image at
+# /system/provider-kubernetes/images and imported into containerd at boot, so a
+# first boot converges with NO registry access (air-gap). Because the images land
+# in the immutable OS with no later admission check, signature verification is done
+# here at BUILD time (P5). CNI is intentionally NOT bundled (operator choice).
+#
+# The boot import is lock-driven and validating (ADR-16-A2): it imports only the
+# images.lock entries, and refuses any directory, lock or tarball that is not
+# root-owned, is group/other-writable, is not a regular file or sits on another
+# filesystem than the provider binary. The bundle's owner and mode are therefore
+# set HERE (root:root, directory 0755, files 0644): COPY keeps each file's owner and
+# mode from this stage, and fixing them in the final stage would store every
+# tarball a second time in a new layer.
 #
 # The same run then extracts the static etcdctl + etcdutl from the bundled etcd
 # image tarball into /tools (never /images), offline, after the signature floor
@@ -307,11 +316,24 @@ RUN set -eux; \
     install -m0755 "${asset}" /usr/bin/cosign; \
     rm -f "${asset}" cosign_checksums.txt
 # Resolve -> verify -> pull each control-plane image, write the digest lockfile,
-# then extract etcdctl/etcdutl from the verified etcd image into /tools.
+# then extract etcdctl/etcdutl from the verified etcd image into /tools. In the same
+# RUN (one layer), normalize the bundle to root:root, directory 0755, files 0644,
+# and fail the build unless /images holds exactly that: flat, regular files only.
 COPY build/bundle-images.sh /usr/local/bin/bundle-images.sh
-RUN KUBERNETES_VERSION="${KUBERNETES_VERSION}" TARGETARCH="${TARGETARCH}" \
+RUN set -eu; \
+    KUBERNETES_VERSION="${KUBERNETES_VERSION}" TARGETARCH="${TARGETARCH}" \
       OUT_DIR=/images TOOLS_DIR=/tools \
-      sh /usr/local/bin/bundle-images.sh
+      sh /usr/local/bin/bundle-images.sh; \
+    bad="$(find /images -mindepth 1 ! -type f)"; \
+    if [ -n "${bad}" ]; then echo "FATAL: /images must hold only regular files; found: ${bad}" >&2; exit 1; fi; \
+    chown -R 0:0 /images; \
+    chmod 0755 /images; \
+    find /images -mindepth 1 -maxdepth 1 -type f -exec chmod 0644 {} +; \
+    got="$(stat -c '%F|%u|%g|%a' /images)"; \
+    if [ "${got}" != "directory|0|0|755" ]; then echo "FATAL: /images is ${got}, want directory|0|0|755" >&2; exit 1; fi; \
+    bad="$(find /images -mindepth 1 ! \( -type f -user 0 -group 0 -perm 0644 \))"; \
+    if [ -n "${bad}" ]; then echo "FATAL: /images entries not root:root 0644 regular files: ${bad}" >&2; exit 1; fi; \
+    echo "bundle layout: /images root:root 0755, $(find /images -mindepth 1 -type f | wc -l) root:root 0644 files"
 
 # ----------------------------------------------------------------------------
 # Final stage: a Kairos image with everything wired up.
@@ -355,11 +377,20 @@ COPY sysctl/k8s.conf                        /etc/sysctl.d/k8s.conf
 COPY modules-load/k8s.conf                  /etc/modules-load.d/k8s.conf
 COPY systemd/provider-kubernetes-image-import.service /etc/systemd/system/provider-kubernetes-image-import.service
 
-# --- Pre-bundled control-plane images (ADR-16) ------------------------------
-# Embed the control-plane image tarballs (fetched by the image-bundler stage)
-# read-only in the OS image; the import oneshot loads them into containerd at boot
-# so a first boot converges with no registry access (air-gap).
-COPY --from=image-bundler /images /opt/provider-kubernetes/images
+# --- Pre-bundled control-plane images (ADR-16, ADR-16-A2) -------------------
+# Embed the control-plane image tarballs and images.lock (fetched, verified and
+# named by the image-bundler stage) in /system/provider-kubernetes/images: part of
+# the read-only OS image, on the same filesystem as the provider binary above, in
+# no systemd-sysext hierarchy, and NOT under /opt (persistent on Kairos, so a copy
+# there could be changed on the node and would outlive an image upgrade). The
+# import oneshot runs `agent-provider-kubernetes import-images`, which imports only
+# the images.lock entries after checking owner, mode, file type, filesystem and
+# tarball structure, so a first boot converges with no registry access (air-gap).
+# No chmod/chown here: the image-bundler stage already set root:root 0755/0644, and
+# COPY creates /system/provider-kubernetes and the images directory as root 0755
+# (verified on BuildKit v0.13.2 and v0.32.2). scripts/verify-bundle-refs.sh asserts
+# the owner and mode of the whole path on the shipped image.
+COPY --from=image-bundler /images /system/provider-kubernetes/images
 
 # Pin containerd's pod-sandbox (pause) image to the EXACT version the bundled
 # kubeadm expects for this Kubernetes minor, instead of a hardcoded tag. kubeadm
