@@ -161,15 +161,20 @@ jobs:
           esac
           echo "OK: image bundles the k8s ${{ matrix.minor }} toolchain"
 
-      - name: Verify bundled image tarballs are named with their exact refs (F-IMPORTREF)
+      - name: Verify the image-only bundle, its exact refs and import-images --verify-only (F-IMPORTREF, ADR-16-A2)
         env:
           IMG: kairos-kubeadm:ci-${{ matrix.minor }}
           K8S: ${{ steps.ver.outputs.k8s }}
         run: |
           set -euo pipefail
-          # Every bundled control-plane tarball must import under its EXACT ref, or an
-          # air-gap first boot cannot find kubeadm's images / the sandbox image. The
-          # checks live in one script that the release gate runs too (see its header).
+          # The bundle must ship only in /system/provider-kubernetes/images (nothing
+          # under the persistent /opt), root-owned along the whole path and within half
+          # of every boot importer bound; every bundled control-plane tarball must
+          # import under its EXACT ref, or an air-gap first boot cannot find kubeadm's
+          # images / the sandbox image; and the image's own `import-images
+          # --verify-only` must report outcome=verified for every images.lock entry.
+          # The checks live in one script that the release gate runs too (see its
+          # header), so both gates run the same checks.
           bash scripts/verify-bundle-refs.sh "$IMG" "$K8S"
 
       - name: Verify bundled etcdctl/etcdutl are the verified etcd image's (ADR-12-A1)
@@ -224,7 +229,7 @@ jobs:
 
           # (c) select the single etcd entry from the image's own images.lock.
           docker run --rm --entrypoint cat "$IMG" \
-            /opt/provider-kubernetes/images/images.lock > "$work/images.lock"
+            /system/provider-kubernetes/images/images.lock > "$work/images.lock"
           sel='.images[] | select(.ref | test("/etcd:"))'
           n="$(jq "[${sel}] | length" "$work/images.lock")"
           [ "$n" -eq 1 ] || { echo "images.lock has ${n} etcd entries, want 1" >&2; exit 1; }
@@ -238,7 +243,7 @@ jobs:
           [[ "$lock_tar" =~ ^[A-Za-z0-9._-]+\.tar$ ]] \
             || { echo "unexpected etcd tarball name '${lock_tar}'" >&2; exit 1; }
           docker run --rm --entrypoint cat "$IMG" \
-            "/opt/provider-kubernetes/images/${lock_tar}" > "$work/etcd.tar"
+            "/system/provider-kubernetes/images/${lock_tar}" > "$work/etcd.tar"
           # The build names every bundled tarball's image with its exact ref
           # (F-IMPORTREF), so docker load creates the image "${lock_ref}" and the trap
           # removes that name afterwards. Refuse to go on if the name already exists

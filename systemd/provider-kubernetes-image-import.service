@@ -1,23 +1,30 @@
 # Imports the control-plane container images that the provider-kubernetes image
-# pre-bundles (ADR-16) into containerd's k8s.io namespace, BEFORE kubelet /
-# kubeadm init need them, so a first boot converges with no registry access
-# (air-gap). Idempotent: re-importing already-present images is harmless, so it is
-# safe to run on every boot. Ordered after containerd (needed for `ctr import`)
-# and before kubelet (which kubeadm init brings up once the images are local).
+# pre-bundles in /system/provider-kubernetes/images (ADR-16, ADR-16-A2) into
+# containerd's k8s.io namespace, BEFORE kubelet / kubeadm init need them, so a
+# first boot converges with no registry access (air-gap). Idempotent: re-importing
+# already-present images is harmless, so it is safe to run on every boot. Ordered
+# after containerd (needed for `ctr import`) and before kubelet (which kubeadm init
+# brings up once the images are local).
+#
+# There is deliberately no ConditionPathExists: the binary is the single decision
+# point. `import-images` (no arguments) imports only the images.lock entries after
+# checking the bundle, exits 0 when every entry imported or when nothing is bundled
+# (/system/provider-kubernetes absent), and exits 1 when anything was refused or
+# failed, which leaves this unit failed and visible. It ends with one
+# "image-import: summary outcome=..." line in the journal. The unit is not
+# RequiredBy kubelet: a refused image is pulled by tag on nodes with registry access.
 [Unit]
 Description=provider-kubernetes: import pre-bundled control-plane images into containerd
 Documentation=https://github.com/kairos-io/provider-kubernetes
 Requires=containerd.service
 After=containerd.service
 Before=kubelet.service
-# Skip cleanly if nothing was bundled (the subcommand no-ops on an empty dir).
-ConditionPathExists=/opt/provider-kubernetes/images
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 # Bounded so a stuck import can never block boot indefinitely (#4099-1); the
-# subcommand itself also caps its work.
+# subcommand itself also caps its work (5 minute deadline).
 TimeoutStartSec=360
 ExecStart=/system/providers/agent-provider-kubernetes import-images
 
