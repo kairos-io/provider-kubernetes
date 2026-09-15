@@ -77,8 +77,19 @@ Check that containerd has an image under the exact reference kubeadm looks for
 (this is the same lookup kubeadm does):
 
 ```sh
-sudo /usr/bin/crictl inspecti registry.k8s.io/pause:<tag>
+sudo /usr/bin/crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
+  --image-endpoint unix:///run/containerd/containerd.sock inspecti registry.k8s.io/pause:<tag>
 sudo /usr/bin/kubeadm config images list --kubernetes-version <version>
+```
+
+`crictl inspecti` also succeeds if the image was pulled from the registry. To see
+that containerd holds the bundled image, compare its image ID with the `Config`
+digest in the matching tarball's manifest; they must be equal:
+
+```sh
+sudo /usr/bin/crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
+  --image-endpoint unix:///run/containerd/containerd.sock inspecti -o json registry.k8s.io/pause:<tag> | grep -m1 '"id"'
+sudo /usr/bin/tar -xOf /opt/provider-kubernetes/images/registry.k8s.io_pause_<tag>.tar manifest.json
 ```
 
 - The bundle covers the default `imageRepository` (`registry.k8s.io`) only. With

@@ -183,25 +183,39 @@ What this does **not** cover:
   binaries carry SLSA build-provenance and SBOM attestations (see
   [Testing](./testing.md#release-artifact-provenance)).
 
-To check the etcd tools on an image yourself, read the etcd entry (digest,
-`verified`) from the lockfile, then compare the binary inside that tarball with the
-shipped one. This uses [crane](https://github.com/google/go-containerregistry) to
-read the tarball offline, so nothing is loaded into your local image store (a
-`docker load` would create or overwrite your own `registry.k8s.io/etcd:<tag>`):
+To check the etcd tools on an image yourself, compare three copies of `etcdctl`
+with [crane](https://github.com/google/go-containerregistry), which reads images
+without loading them into your local image store (a `docker load` would create or
+overwrite your own `registry.k8s.io/etcd:<tag>`). All three hashes must match:
 
 ```sh
 img=<your image>
 dir=/opt/provider-kubernetes/images
-docker run --rm --entrypoint cat "$img" "$dir/images.lock"
-tar="$(docker run --rm --entrypoint cat "$img" "$dir/images.lock" \
-  | jq -r '.images[] | select(.ref | test("/etcd:")) | .tarball')"
-docker run --rm --entrypoint cat "$img" "$dir/$tar" > etcd.tar
-crane export - - < etcd.tar | tar -xO usr/local/bin/etcdctl | sha256sum
-# docker create only materializes the image filesystem; nothing is run.
+work="$(mktemp -d)"
+docker run --rm --entrypoint cat "$img" "$dir/images.lock" > "$work/images.lock"
+sel='.images[] | select(.ref | test("/etcd:"))'
+ref="$(jq -r "$sel | .ref" "$work/images.lock")"
+digest="$(jq -r "$sel | .digest" "$work/images.lock")"
+tarball="$(jq -r "$sel | .tarball" "$work/images.lock")"
+
+# 1. The shipped binary (docker create only materializes the filesystem; nothing runs).
 n="$(docker create --pull never "$img" x)"
-docker cp "$n:/usr/bin/etcdctl" - | tar -xO | sha256sum
-docker rm "$n"; rm etcd.tar
+docker cp "$n:/usr/bin/etcdctl" - | tar -xOf - | sha256sum
+docker rm "$n" >/dev/null
+
+# 2. The binary inside the bundled etcd tarball (offline). Matching 1 proves the
+#    image is internally consistent, not that it matches the attested digest.
+docker run --rm --entrypoint cat "$img" "$dir/$tarball" > "$work/etcd.tar"
+crane export - - < "$work/etcd.tar" | tar -xOf - usr/local/bin/etcdctl | sha256sum
+
+# 3. The binary in the upstream etcd image at the digest images.lock records (needs
+#    registry access). Matching 1 ties the shipped binary to that digest.
+crane export --platform linux/amd64 "${ref}@${digest}" - | tar -xOf - usr/local/bin/etcdctl | sha256sum
+
+rm -rf "$work"
 ```
 
-CI runs this comparison (plus `etcdutl`, file mode/owner, and the version) for every
+Use `--platform linux/arm64` for an arm64 image.
+
+CI runs comparisons 1 and 2 (plus `etcdutl`, file mode/owner, and the version) for every
 supported minor.
