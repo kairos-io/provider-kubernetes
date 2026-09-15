@@ -263,28 +263,43 @@ func runReset(args []string) int {
 	return 0
 }
 
-// runImportImages imports the pre-bundled control-plane image tarballs into
-// containerd's k8s.io namespace (ADR-16), so kubeadm init finds them locally and
-// a first boot converges with no registry access. Invoked at boot by the
+// parseImportImagesArgs validates import-images' argv per ADR-16-A2 decisions
+// 2 and 10: no arguments, or exactly "--verify-only". It is a pure function so
+// the CLI's usage contract is unit-testable without running Import. Any other
+// argv (including the removed "--dir" flag) is a usage error.
+func parseImportImagesArgs(args []string) (verifyOnly bool, err error) {
+	switch len(args) {
+	case 0:
+		return false, nil
+	case 1:
+		if args[0] == "--verify-only" {
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("usage: agent-provider-kubernetes import-images [--verify-only]")
+}
+
+// runImportImages imports the pre-bundled control-plane image tarballs listed
+// in images.lock into containerd's k8s.io namespace (ADR-16, revised by
+// ADR-16-A2), so kubeadm init finds them locally and a first boot converges
+// with no registry access. Invoked at boot by the
 // provider-kubernetes-image-import.service oneshot, ordered before kubelet.
 func runImportImages(args []string) int {
-	fs := flag.NewFlagSet("import-images", flag.ContinueOnError)
-	dir := fs.String("dir", imageimport.DefaultDir, "directory of *.tar control-plane images to import")
-	if err := fs.Parse(args); err != nil {
+	verifyOnly, err := parseImportImagesArgs(args)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		printUsage(os.Stderr)
 		return 2
 	}
 	// Bounded so the boot path can never hang (#4099-1); importing local tarballs
 	// is fast, this is generous headroom for many/large images on slow disks.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	logrus.Infof("provider-kubernetes import-images %s: importing from %s", version.Version, *dir)
-	if err := imageimport.Import(ctx, *dir, kubeadm.CtrRunner()); err != nil {
-		logrus.Errorf("import-images: %v", err)
-		return 1
-	}
-	logrus.Info("provider-kubernetes import-images: done")
-	return 0
+	logrus.Infof("provider-kubernetes import-images %s: verifyOnly=%t", version.Version, verifyOnly)
+	// Import's summary line carries the outcome and must stay the last line this
+	// command logs (CI, the release gate and the e2e tests read it as such).
+	res := imageimport.Import(ctx, kubeadm.CtrRunner(), verifyOnly)
+	return imageimport.ExitCode(res.Outcome)
 }
 
 func printUsage(w *os.File) {
@@ -295,6 +310,8 @@ Usage:
   agent-provider-kubernetes reconcile [...] run one bounded reconcile pass for a serialized Cluster
   agent-provider-kubernetes reset [...]     run a bounded cluster reset from a serialized Cluster
   agent-provider-kubernetes mint-join [...] mint join material on a CP and print a join cloud-config
+  agent-provider-kubernetes import-images [--verify-only]
+                                           import (or verify) the bundled control-plane image tarballs
   agent-provider-kubernetes version         print the build version
 
 mint-join flags:

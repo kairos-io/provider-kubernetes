@@ -82,3 +82,41 @@ func TestPluginFactoryRespondsToProviderInfoEvent(t *testing.T) {
 		t.Error("providerInfoPayload.Provider must not be empty")
 	}
 }
+
+// TestParseImportImagesArgs is ADR-16-A2 O-2: import-images takes no
+// arguments, or exactly "--verify-only"; anything else (including the
+// removed "--dir" flag) is a usage error.
+func TestParseImportImagesArgs(t *testing.T) {
+	cases := []struct {
+		name           string
+		args           []string
+		wantVerifyOnly bool
+		wantErr        bool
+	}{
+		{"no args", nil, false, false},
+		{"empty slice", []string{}, false, false},
+		{"--verify-only", []string{"--verify-only"}, true, false},
+		{"--dir removed", []string{"--dir", "/opt/provider-kubernetes/images"}, false, true},
+		{"unknown flag", []string{"--bogus"}, false, true},
+		{"extra positional after --verify-only", []string{"--verify-only", "extra"}, false, true},
+		{"bare positional", []string{"images"}, false, true},
+		{"verify-only misspelled", []string{"-verify-only"}, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseImportImagesArgs(c.args)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("parseImportImagesArgs(%v) = (%v, nil), want an error", c.args, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseImportImagesArgs(%v) unexpected error: %v", c.args, err)
+			}
+			if got != c.wantVerifyOnly {
+				t.Fatalf("parseImportImagesArgs(%v) verifyOnly = %v, want %v", c.args, got, c.wantVerifyOnly)
+			}
+		})
+	}
+}

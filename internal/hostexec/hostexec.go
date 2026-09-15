@@ -35,6 +35,25 @@ const (
 	// $HOME/.kube/cache, which is relative to the working directory when HOME is
 	// unset (as it is for the kairos-agent service).
 	KubectlCacheDir = "/run/provider-kubernetes/kubectl-cache"
+
+	// BundleDir is where the image build embeds the pre-verified kubeadm
+	// control-plane image tarballs and their images.lock (ADR-16-A2 /
+	// F-OPTBIND). It is read-only OS-image content: not under /opt (a
+	// PERSISTENT_STATE_PATHS entry backed by the persistent COS_PERSISTENT
+	// mount) and not under /usr or /usr/local (sysext hierarchies a
+	// persistent extension could shadow across an upgrade, and where
+	// overlayfs st_dev is not a reliable device anchor). It shares /system
+	// with ProviderBinaryPath, which the no-follow bundle walk uses as its
+	// device anchor.
+	BundleDir = "/system/provider-kubernetes/images"
+
+	// ProviderBinaryPath is where the Kairos image installs the provider
+	// binary (Kairos discovery convention: agent-provider-* under
+	// /system/providers/). It also anchors BundleDir's no-follow walk
+	// (ADR-16-A2 decision 3): a same-filesystem bind over BundleDir can only
+	// expose content already in the image, and a foreign-filesystem bind is
+	// refused by the device check.
+	ProviderBinaryPath = "/system/providers/agent-provider-kubernetes"
 )
 
 // proxyVars are the proxy variables Go's HTTP client honors, in the fixed order

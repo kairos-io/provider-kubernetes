@@ -108,6 +108,64 @@ func TestCtrAndSystemctlEnvAreEmptyNonNil(t *testing.T) {
 	}
 }
 
+// kairosInitRWPaths mirrors kairos-init v0.14.6
+// pkg/bundled/cloudconfigs/00_rootfs.yaml RW_PATHS: an ephemeral, ram-backed
+// overlay recreated fresh at every boot. Content placed there does not
+// survive the read-only OS image's own attestation.
+var kairosInitRWPaths = []string{"/var", "/etc", "/srv"}
+
+// kairosInitPersistentStatePaths mirrors kairos-init v0.14.6
+// pkg/bundled/cloudconfigs/00_rootfs.yaml PERSISTENT_STATE_PATHS (see
+// PROJECT_CONTEXT.md ADR-16-A2 "Grounding" / the F-OPTBIND investigation):
+// content there is bind-mounted from the persistent COS_PERSISTENT partition
+// and survives an image upgrade, so it is not read-only OS-image content and
+// not a safe anchor/bundle location.
+var kairosInitPersistentStatePaths = []string{
+	"/etc/cni", "/etc/init.d", "/etc/iscsi", "/etc/k0s", "/etc/kubernetes",
+	"/etc/modprobe.d", "/etc/pwx", "/etc/rancher", "/etc/runlevels", "/etc/ssh",
+	"/etc/ssl/certs", "/etc/sysconfig", "/etc/systemd", "/etc/zfs", "/home",
+	"/opt", "/root", "/usr/libexec", "/var/cores", "/var/lib/ca-certificates",
+	"/var/lib/cni", "/var/lib/containerd", "/var/lib/calico", "/var/lib/dbus",
+	"/var/lib/etcd", "/var/lib/extensions", "/var/lib/confexts", "/var/lib/k0s",
+	"/var/lib/kubelet", "/var/lib/longhorn", "/var/lib/osd", "/var/lib/rancher",
+	"/var/lib/rook", "/var/lib/tailscale", "/var/lib/wicked", "/var/lib/kairos",
+	"/var/log",
+}
+
+// TestBundleDirAndProviderBinaryPathAvoidPersistentAndEphemeralLocations is
+// ADR-16-A2 O-1: BundleDir and ProviderBinaryPath must fall under NEITHER a
+// sysext hierarchy / tmpfs-adjacent location (/usr, /usr/local, /oem, /run,
+// /tmp) NOR a kairos-init RW_PATHS or PERSISTENT_STATE_PATHS entry -- either
+// property would make the bundle something other than fixed, read-only
+// OS-image content sharing the provider binary's own device.
+func TestBundleDirAndProviderBinaryPathAvoidPersistentAndEphemeralLocations(t *testing.T) {
+	disallowed := []string{"/usr", "/usr/local", "/oem", "/run", "/tmp"}
+	disallowed = append(disallowed, kairosInitRWPaths...)
+	disallowed = append(disallowed, kairosInitPersistentStatePaths...)
+
+	for _, p := range []string{BundleDir, ProviderBinaryPath} {
+		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
+			t.Errorf("%q must be an absolute, clean path", p)
+		}
+		for _, d := range disallowed {
+			if p == d || strings.HasPrefix(p, d+"/") {
+				t.Errorf("%q must not be under %q", p, d)
+			}
+		}
+	}
+}
+
+// TestBundleDirAndProviderBinaryPathShareSystemHierarchy locks in ADR-16-A2
+// decision 1: both live under /system, so the bundle walk's device anchor
+// (derived from ProviderBinaryPath) is meaningful for BundleDir.
+func TestBundleDirAndProviderBinaryPathShareSystemHierarchy(t *testing.T) {
+	for _, p := range []string{BundleDir, ProviderBinaryPath} {
+		if !strings.HasPrefix(p, "/system/") {
+			t.Errorf("%q must be under /system", p)
+		}
+	}
+}
+
 func TestNilLookupPassesNoProxy(t *testing.T) {
 	if got := Kubeadm(nil).Env; !slices.Equal(got, []string{"PATH=" + ChildPATH}) {
 		t.Errorf("kubeadm env with nil lookup = %q", got)
