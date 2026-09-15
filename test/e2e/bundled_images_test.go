@@ -67,23 +67,6 @@ func TestBundledImagesImportUnderExactRefs(t *testing.T) {
 	}
 	t.Logf("IR-9 (a): %s: %v", imageImportUnit, props)
 
-	// (a) Then one explicit import through the same subcommand: it must succeed
-	// and import one tarball per lock entry, so the bundle holds exactly what the
-	// lock records.
-	importOut, err := nc.ExecTimeout(importImagesTimeout, providerBinaryPath, "import-images")
-	if err != nil {
-		t.Fatalf("IR-9 (a): import-images failed: %v\n%s", err, trimForLog(importOut))
-	}
-	imported, importDir, err := importedTarballCount(importOut)
-	if err != nil {
-		t.Fatalf("IR-9 (a): import-images output: %v\n%s", err, trimForLog(importOut))
-	}
-	if imported != len(lock.Images) || importDir != bundledImagesDir {
-		t.Fatalf("IR-9 (a): import-images imported %d tarball(s) from %s, want %d (one per images.lock entry) from %s",
-			imported, importDir, len(lock.Images), bundledImagesDir)
-	}
-	t.Logf("IR-9 (a): import-images exited 0 and imported %d tarball(s) from %s", imported, importDir)
-
 	// (b) The bundle must hold exactly the images the bundled kubeadm requires:
 	// a missing one is pulled at init (no air gap), an extra one is unaccounted
 	// for.
@@ -102,7 +85,9 @@ func TestBundledImagesImportUnderExactRefs(t *testing.T) {
 		t.Logf("IR-9 (b): images.lock == kubeadm config images list (%d refs)", len(required))
 	}
 
-	// Every image name in containerd's k8s.io namespace, for (c) and (d).
+	// Every image name in containerd's k8s.io namespace, for (c) and (d). Taken
+	// before the explicit import below, so (c)-(e) judge what the boot-time import
+	// alone produced.
 	ctrOut, ctrStderr, err := nc.ExecStdoutTimeout(dockerTimeout, hostexec.CtrPath, "-n", "k8s.io", "images", "ls", "-q")
 	if err != nil {
 		t.Fatalf("IR-9: ctr -n k8s.io images ls -q: %v\n%s", err, ctrStderr)
@@ -149,6 +134,23 @@ func TestBundledImagesImportUnderExactRefs(t *testing.T) {
 	default:
 		t.Logf("IR-9 (e): containerd sandbox_image %s is bundled and present under its exact ref", sandbox)
 	}
+
+	// (a) Finally, one explicit import through the same subcommand: it must succeed
+	// and import one tarball per lock entry, so the bundle holds exactly what the
+	// lock records.
+	importOut, err := nc.ExecTimeout(importImagesTimeout, providerBinaryPath, "import-images")
+	if err != nil {
+		t.Fatalf("IR-9 (a): import-images failed: %v\n%s", err, trimForLog(importOut))
+	}
+	imported, importDir, err := importedTarballCount(importOut)
+	if err != nil {
+		t.Fatalf("IR-9 (a): import-images output: %v\n%s", err, trimForLog(importOut))
+	}
+	if imported != len(lock.Images) || importDir != bundledImagesDir {
+		t.Fatalf("IR-9 (a): import-images imported %d tarball(s) from %s, want %d (one per images.lock entry) from %s",
+			imported, importDir, len(lock.Images), bundledImagesDir)
+	}
+	t.Logf("IR-9 (a): import-images exited 0 and imported %d tarball(s) from %s", imported, importDir)
 }
 
 // waitImportUnitSettled polls the boot-time import unit, bounded by

@@ -67,6 +67,11 @@ const criEndpoint = "unix:///run/containerd/containerd.sock"
 // never hang the suite (design principle 4 / #4099-1).
 const dockerTimeout = 90 * time.Second
 
+// execWaitDelay bounds how long a docker CLI call may keep running once its
+// context has ended or the docker process has exited while a stray child still
+// holds its output pipes, so the harness fails fast instead of hanging.
+const execWaitDelay = 10 * time.Second
+
 // nodeContainer is a running privileged systemd node container.
 type nodeContainer struct {
 	t    *testing.T
@@ -93,6 +98,7 @@ func dockerErr(args ...string) (string, error) {
 	defer cancel()
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.WaitDelay = execWaitDelay
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	err := cmd.Run()
@@ -284,6 +290,7 @@ func (nc *nodeContainer) ExecOptsTimeout(timeout time.Duration, opts execOptions
 	full = append(full, args...)
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", full...)
+	cmd.WaitDelay = execWaitDelay
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	err = cmd.Run()
@@ -300,6 +307,7 @@ func (nc *nodeContainer) ExecStdoutTimeout(timeout time.Duration, args ...string
 	full := append([]string{"exec", nc.id}, args...)
 	var out, errOut bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", full...)
+	cmd.WaitDelay = execWaitDelay
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
 	err = cmd.Run()
@@ -314,6 +322,7 @@ func (nc *nodeContainer) ExecInput(stdin string, args ...string) (string, error)
 	full := append([]string{"exec", "-i", nc.id}, args...)
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", full...)
+	cmd.WaitDelay = execWaitDelay
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
