@@ -269,56 +269,6 @@ func TestMalformedKubercIsNotYAML(t *testing.T) {
 	}
 }
 
-func TestImportedTarballCount(t *testing.T) {
-	const dir = "/opt/provider-kubernetes/images"
-	good := []struct {
-		name string
-		out  string
-		want int
-	}{
-		{
-			name: "logrus text without a TTY",
-			out: `time="2026-09-14T10:00:00Z" level=info msg="provider-kubernetes import-images dev: importing from /opt/provider-kubernetes/images"` + "\n" +
-				`time="2026-09-14T10:00:01Z" level=info msg="image-import: imported registry.k8s.io_etcd_3.6.5-0.tar"` + "\n" +
-				`time="2026-09-14T10:00:02Z" level=info msg="image-import: imported 7 tarball(s) from /opt/provider-kubernetes/images"` + "\n" +
-				`time="2026-09-14T10:00:02Z" level=info msg="provider-kubernetes import-images: done"` + "\n",
-			want: 7,
-		},
-		{
-			name: "logrus text with a TTY",
-			out:  "INFO[0002] image-import: imported 12 tarball(s) from /opt/provider-kubernetes/images\n",
-			want: 12,
-		},
-	}
-	for _, tc := range good {
-		n, gotDir, err := importedTarballCount(tc.out)
-		if err != nil {
-			t.Errorf("%s: unexpected error %v", tc.name, err)
-			continue
-		}
-		if n != tc.want || gotDir != dir {
-			t.Errorf("%s: got (%d, %q), want (%d, %q)", tc.name, n, gotDir, tc.want, dir)
-		}
-	}
-
-	bad := map[string]string{
-		"no summary (nothing bundled)": `level=info msg="image-import: no tarballs under /opt/provider-kubernetes/images; nothing to import"`,
-		"only per-tarball lines":       `level=info msg="image-import: imported registry.k8s.io_pause_3.10.2.tar"`,
-		"import failed":                `level=error msg="import-images: one or more image imports failed: import a.tar: exit status 97"`,
-		"summary repeated": "msg=\"image-import: imported 1 tarball(s) from /a\"\n" +
-			"msg=\"image-import: imported 1 tarball(s) from /a\"\n",
-	}
-	for name, out := range bad {
-		if n, d, err := importedTarballCount(out); err == nil {
-			t.Errorf("%s: got (%d, %q), want an error", name, n, d)
-		}
-	}
-
-	if n, _, err := importedTarballCount(`msg="image-import: imported 0 tarball(s) from /x"`); err != nil || n != 0 {
-		t.Errorf("a zero count must parse as 0 (the caller rejects it): got %d, %v", n, err)
-	}
-}
-
 func TestExitCode(t *testing.T) {
 	if got := exitCode(nil); got != 0 {
 		t.Errorf("exitCode(nil) = %d, want 0", got)

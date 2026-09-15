@@ -6,7 +6,8 @@ package e2e
 // (see bundled_images.go for why exact references matter). It runs in its own
 // node container, apart from the E-B7 shims in TestSingleNodeInitConverges, and
 // deliberately never pre-pulls: every image it finds in containerd must have
-// come from the bundled tarballs.
+// come from the bundled tarballs. It also holds the container-side helpers the
+// ADR-16-A2 tests share.
 
 import (
 	"fmt"
@@ -22,6 +23,9 @@ const (
 	// TimeoutStartSec (360s) plus margin, so a stuck unit fails the test instead
 	// of hanging it.
 	importUnitTimeout = 7 * time.Minute
+	// importJournalTimeout bounds the wait for the boot run's summary line to
+	// reach the journal after the unit has settled.
+	importJournalTimeout = time.Minute
 	// tarballReadTimeout bounds streaming manifest.json out of one image tarball.
 	tarballReadTimeout = 2 * time.Minute
 	// bundleImageRepository is the repository the image bundles from, and the one
@@ -39,25 +43,14 @@ func TestBundledImagesImportUnderExactRefs(t *testing.T) {
 	// The lock is the bundle's own record of what it holds; reading it cannot
 	// race the import. It must describe the Kubernetes version under test, or
 	// every later comparison is against the wrong image.
-	rawLock, lockStderr, err := nc.ExecStdoutTimeout(dockerTimeout, binCat, imagesLockPath)
-	if err != nil {
-		t.Fatalf("IR-9: read %s: %v\n%s", imagesLockPath, err, lockStderr)
-	}
-	lock, err := parseImagesLock(rawLock)
-	if err != nil {
-		t.Fatalf("IR-9: %v\n%s", err, trimForLog(rawLock))
-	}
-	if lock.KubernetesVersion != k8sVer || lock.ImageRepository != bundleImageRepository {
-		t.Fatalf("IR-9: images.lock is for %s from %s, want %s from %s (wrong node image?)",
-			lock.KubernetesVersion, lock.ImageRepository, k8sVer, bundleImageRepository)
-	}
+	lock := readBundleLock(t, nc, "IR-9")
 	t.Logf("IR-9: images.lock lists %d images for %s: %v", len(lock.Images), lock.KubernetesVersion, lock.refs())
 
 	// (a) The node image leaves the import unit enabled, so it runs at container
 	// boot. Wait for it to settle and require a real, successful run before
-	// looking at containerd: otherwise the checks race the unit, or pass on a
-	// unit that was skipped (a failed ConditionPathExists also reports
-	// Result=success).
+	// looking at containerd: otherwise the checks race the unit. Exit status 0 is
+	// not enough (outcome=not-bundled also exits 0), so the boot run's own summary
+	// must show every lock entry imported.
 	props := waitImportUnitSettled(t, nc)
 	if v := importUnitViolations(props); len(v) > 0 {
 		// Best effort: the unit's own journal usually says why.
@@ -65,7 +58,11 @@ func TestBundledImagesImportUnderExactRefs(t *testing.T) {
 		t.Fatalf("IR-9 (a): %s did not complete successfully: %s (properties %v)\n--- journal ---\n%s",
 			imageImportUnit, strings.Join(v, "; "), props, trimForLog(journal))
 	}
-	t.Logf("IR-9 (a): %s: %v", imageImportUnit, props)
+	boot := waitImportJournalSummary(t, nc, "IR-9 (a)")
+	if v := importRunViolations(importOutput{Summary: boot}, lock, wantImport{Outcome: "success", SummaryOnly: true}); len(v) > 0 {
+		t.Fatalf("IR-9 (a): the boot-time import did not import every images.lock entry: %s (summary %s)", strings.Join(v, "; "), boot)
+	}
+	t.Logf("IR-9 (a): %s: %v; boot summary %s", imageImportUnit, props, boot)
 
 	// (b) The bundle must hold exactly the images the bundled kubeadm requires:
 	// a missing one is pulled at init (no air gap), an extra one is unaccounted
@@ -88,14 +85,7 @@ func TestBundledImagesImportUnderExactRefs(t *testing.T) {
 	// Every image name in containerd's k8s.io namespace, for (c) and (d). Taken
 	// before the explicit import below, so (c)-(e) judge what the boot-time import
 	// alone produced.
-	ctrOut, ctrStderr, err := nc.ExecStdoutTimeout(dockerTimeout, hostexec.CtrPath, "-n", "k8s.io", "images", "ls", "-q")
-	if err != nil {
-		t.Fatalf("IR-9: ctr -n k8s.io images ls -q: %v\n%s", err, ctrStderr)
-	}
-	ctrNames, err := parseImageRefList(ctrOut)
-	if err != nil {
-		t.Fatalf("IR-9: ctr -n k8s.io images ls -q: %v\n%s", err, trimForLog(ctrOut))
-	}
+	ctrNames := ctrImageNames(t, nc, "IR-9")
 
 	// (c) Each bundled image resolves by its exact ref, and it is the bundled
 	// image, not merely something with that name.
@@ -135,22 +125,107 @@ func TestBundledImagesImportUnderExactRefs(t *testing.T) {
 		t.Logf("IR-9 (e): containerd sandbox_image %s is bundled and present under its exact ref", sandbox)
 	}
 
-	// (a) Finally, one explicit import through the same subcommand: it must succeed
-	// and import one tarball per lock entry, so the bundle holds exactly what the
-	// lock records.
-	importOut, err := nc.ExecTimeout(importImagesTimeout, providerBinaryPath, "import-images")
+	// (a) Finally, one explicit import through the same subcommand: it must exit 0
+	// and import exactly the images.lock entries, one line each.
+	run := runImportImages(t, nc, "IR-9 (a) import-images", importImagesTimeout, execOptions{})
+	if v := importRunViolations(run.importOutput, lock, wantImport{Outcome: "success"}); run.Code != 0 || len(v) > 0 {
+		t.Fatalf("IR-9 (a): import-images exited %d, want 0; %s\n%s", run.Code, strings.Join(v, "; "), trimForLog(run.Out))
+	}
+	t.Logf("IR-9 (a): import-images exited 0: %s", run.Summary)
+
+	// ...and `import-images --verify-only` runs every check without importing and
+	// must accept every entry (the same check CI runs on the image).
+	verify := runImportImages(t, nc, "IR-9 import-images --verify-only", importImagesTimeout, execOptions{}, "--verify-only")
+	if v := importRunViolations(verify.importOutput, lock, wantImport{Outcome: "verified", VerifyOnly: true}); verify.Code != 0 || len(v) > 0 {
+		t.Fatalf("IR-9: import-images --verify-only exited %d, want 0; %s\n%s", verify.Code, strings.Join(v, "; "), trimForLog(verify.Out))
+	}
+	t.Logf("IR-9: import-images --verify-only exited 0: %s", verify.Summary)
+}
+
+// readBundleLock reads and parses the node image's images.lock and requires it to
+// describe the Kubernetes version and repository under test.
+func readBundleLock(t *testing.T, nc *nodeContainer, label string) imagesLock {
+	t.Helper()
+	raw, stderr, err := nc.ExecStdoutTimeout(dockerTimeout, binCat, imagesLockPath)
 	if err != nil {
-		t.Fatalf("IR-9 (a): import-images failed: %v\n%s", err, trimForLog(importOut))
+		t.Fatalf("%s: read %s: %v\n%s", label, imagesLockPath, err, stderr)
 	}
-	imported, importDir, err := importedTarballCount(importOut)
+	lock, err := parseImagesLock(raw)
 	if err != nil {
-		t.Fatalf("IR-9 (a): import-images output: %v\n%s", err, trimForLog(importOut))
+		t.Fatalf("%s: %v\n%s", label, err, trimForLog(raw))
 	}
-	if imported != len(lock.Images) || importDir != bundledImagesDir {
-		t.Fatalf("IR-9 (a): import-images imported %d tarball(s) from %s, want %d (one per images.lock entry) from %s",
-			imported, importDir, len(lock.Images), bundledImagesDir)
+	if k8sVer := kubernetesVersion(); lock.KubernetesVersion != k8sVer || lock.ImageRepository != bundleImageRepository {
+		t.Fatalf("%s: images.lock is for %s from %s, want %s from %s (wrong node image?)",
+			label, lock.KubernetesVersion, lock.ImageRepository, k8sVer, bundleImageRepository)
 	}
-	t.Logf("IR-9 (a): import-images exited 0 and imported %d tarball(s) from %s", imported, importDir)
+	return lock
+}
+
+// importRun is one parsed `import-images` exec.
+type importRun struct {
+	importOutput
+	Out     string
+	Code    int
+	Elapsed time.Duration
+}
+
+// runImportImages runs the provider's `import-images [args...]` once, bounded by
+// timeout, and parses its output (parseImportOutput). It stops the test if the
+// exec did not finish within the bound (the importer must never hang) or the
+// output is not the documented shape; the exit code and counts are for the
+// caller to judge.
+func runImportImages(t *testing.T, nc *nodeContainer, label string, timeout time.Duration, opts execOptions, args ...string) importRun {
+	t.Helper()
+	start := time.Now()
+	out, err := nc.ExecOptsTimeout(timeout, opts, append([]string{providerBinaryPath, "import-images"}, args...)...)
+	run := importRun{Out: out, Code: exitCode(err), Elapsed: time.Since(start)}
+	if run.Code < 0 || run.Elapsed >= timeout {
+		t.Fatalf("%s: did not finish within %s (exit %d, %v); the importer must never hang\n%s", label, timeout, run.Code, err, trimForLog(out))
+	}
+	if run.importOutput, err = parseImportOutput(out); err != nil {
+		t.Fatalf("%s (exit %d): %v\n%s", label, run.Code, err, trimForLog(out))
+	}
+	return run
+}
+
+// waitImportJournalSummary returns the summary of the boot-time import unit's run
+// from the journal, polling (bounded) until the unit's last line has arrived.
+// Only lines logged by the unit's own process are read (_SYSTEMD_UNIT=), so
+// systemd's "Finished ..." message cannot be taken for the last line.
+func waitImportJournalSummary(t *testing.T, nc *nodeContainer, label string) importSummary {
+	t.Helper()
+	deadline := time.Now().Add(importJournalTimeout)
+	var lastErr error
+	var lastOut string
+	for {
+		out, stderr, err := nc.ExecStdoutTimeout(dockerTimeout, binJournalctl, "--no-pager", "-o", "cat", "_SYSTEMD_UNIT="+imageImportUnit)
+		if err != nil {
+			lastErr = fmt.Errorf("journalctl: %w: %s", err, strings.TrimSpace(stderr))
+		} else if s, perr := parseImportSummary(out); perr != nil {
+			lastErr, lastOut = perr, out
+		} else {
+			return s
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: no import-images summary from %s in the journal within %s: %v\n%s",
+				label, imageImportUnit, importJournalTimeout, lastErr, trimForLog(lastOut))
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// ctrImageNames returns every image name in containerd's k8s.io namespace.
+func ctrImageNames(t *testing.T, nc *nodeContainer, label string) []string {
+	t.Helper()
+	out, stderr, err := nc.ExecStdoutTimeout(dockerTimeout, hostexec.CtrPath, "-n", "k8s.io", "images", "ls", "-q")
+	if err != nil {
+		t.Fatalf("%s: ctr -n k8s.io images ls -q: %v\n%s", label, err, stderr)
+	}
+	names, err := parseImageRefList(out)
+	if err != nil {
+		t.Fatalf("%s: ctr -n k8s.io images ls -q: %v\n%s", label, err, trimForLog(out))
+	}
+	return names
 }
 
 // waitImportUnitSettled polls the boot-time import unit, bounded by
@@ -174,7 +249,7 @@ func waitImportUnitSettled(t *testing.T, nc *nodeContainer) map[string]string {
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("IR-9 (a): %s did not settle within %s; last properties %v, last error %v",
+			t.Fatalf("%s did not settle within %s; last properties %v, last error %v",
 				imageImportUnit, importUnitTimeout, last, lastErr)
 		}
 		time.Sleep(2 * time.Second)
@@ -195,7 +270,7 @@ func checkImportedImage(t *testing.T, nc *nodeContainer, img imagesLockItem, ctr
 
 	// parseImagesLock allows only a plain *.tar file name, so this stays inside
 	// the bundle directory.
-	tarPath := bundledImagesDir + "/" + img.Tarball
+	tarPath := hostexec.BundleDir + "/" + img.Tarball
 	manifest, tarStderr, err := nc.ExecStdoutTimeout(tarballReadTimeout, binTar, "-xOf", tarPath, "manifest.json")
 	var configID string
 	var tarTags []string

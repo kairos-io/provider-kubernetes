@@ -234,27 +234,17 @@ func TestSingleNodeInitConverges(t *testing.T) {
 	//    CONTAINERD_ADDRESS pointing at a socket that does not exist. It succeeds
 	//    only if the provider runs /usr/bin/ctr by absolute path with an empty
 	//    environment (ADR-1-A1): a PATH lookup hits the shim, an inherited address
-	//    cannot reach containerd. The base image bundles the tarballs; re-importing
-	//    images the boot-time oneshot already imported is idempotent.
-	importOut, err := nc.ExecEnvTimeout(importImagesTimeout,
-		[]string{"CONTAINERD_ADDRESS=" + hostileContainerdAddress},
-		providerBinaryPath, "import-images")
-	if err != nil {
-		t.Fatalf("import-images under a hostile CONTAINERD_ADDRESS failed: %v\n--- output ---\n%s", err, importOut)
-	}
-	t.Logf("import-images output:\n%s", importOut)
-	imported, importDir, err := importedTarballCount(importOut)
-	if err != nil {
-		t.Fatalf("import-images output: %v\n--- output ---\n%s", err, importOut)
-	}
-	if importDir != bundledImagesDir {
-		t.Errorf("import-images imported from %q, want %q", importDir, bundledImagesDir)
-	}
-	if imported <= 0 {
-		t.Errorf("import-images imported %d tarball(s), want > 0: the air-gap import did nothing", imported)
-	}
-	if bundled := countBundledTarballs(t, nc); imported != bundled {
-		t.Errorf("import-images imported %d tarball(s), but %s holds %d", imported, bundledImagesDir, bundled)
+	//    cannot reach containerd. The expected count is the images.lock entry count
+	//    (the importer imports exactly those, never a *.tar glob), and the summary
+	//    must say outcome=success; re-importing images the boot-time oneshot already
+	//    imported is idempotent.
+	lock := readBundleLock(t, nc, "E-B7 (d)")
+	importRun := runImportImages(t, nc, "E-B7 (d) import-images under a hostile CONTAINERD_ADDRESS", importImagesTimeout,
+		execOptions{Env: []string{"CONTAINERD_ADDRESS=" + hostileContainerdAddress}})
+	t.Logf("import-images output:\n%s", importRun.Out)
+	if v := importRunViolations(importRun.importOutput, lock, wantImport{Outcome: "success"}); importRun.Code != 0 || len(v) > 0 {
+		t.Errorf("E-B7 (d): import-images under CONTAINERD_ADDRESS=%s exited %d, want 0 with all %d images.lock entries imported: %s",
+			hostileContainerdAddress, importRun.Code, len(lock.Images), strings.Join(v, "; "))
 	}
 	ctrHits := 0
 	for _, hit := range parseShadowHits(readShadowHits(t, nc)) {
@@ -263,8 +253,8 @@ func TestSingleNodeInitConverges(t *testing.T) {
 			t.Errorf("E-B7: ctr was run by name through PATH (ADR-1-A1): %s", hit.Line)
 		}
 	}
-	t.Logf("E-B7 (d): import-images exited 0 under CONTAINERD_ADDRESS=%s; imported %d tarball(s) from %s; ctr shim hits: %d",
-		hostileContainerdAddress, imported, importDir, ctrHits)
+	t.Logf("E-B7 (d): import-images exited %d under CONTAINERD_ADDRESS=%s: %s; images.lock entries: %d; ctr shim hits: %d",
+		importRun.Code, hostileContainerdAddress, importRun.Summary, len(lock.Images), ctrHits)
 
 	// 8. E-B7 (b): across reconcile, the assertions, and the import, nothing ran a
 	//    shadowed tool by name. A hit names the tool, its argv, and its parent

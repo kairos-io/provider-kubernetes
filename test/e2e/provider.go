@@ -24,7 +24,6 @@ const imagePullTimeout = 5 * time.Minute
 
 // These mirror the production contract constants exactly (kept as local copies so
 // the e2e package depends only on the public binary, not on internal/*):
-//   - providerBinaryPath: where the Kairos image installs the binary.
 //   - clusterStatePath:   the 0600 tmpfs path Provider() serializes the Cluster
 //     to and `reconcile --cluster-file` reads by default.
 //   - statusRunPath:      the 0640 tmpfs status doc every reconcile writes.
@@ -32,11 +31,16 @@ const imagePullTimeout = 5 * time.Minute
 // If any of these change in internal/provider or internal/status, this harness
 // must change too -- that coupling is intentional (we test the real contract).
 //
-// The binary paths are the exception: the harness imports internal/hostexec
-// rather than copying them, because the E-B7 image checks must cover exactly the
-// set of binaries the provider executes (ADR-1-A1), not a copy that can drift.
+// The paths the provider itself resolves are the exception: the harness imports
+// internal/hostexec rather than copying them, because the E-B7 image checks must
+// cover exactly the set of binaries the provider executes (ADR-1-A1), and the
+// ADR-16-A2 checks exactly the bundle directory and provider binary the importer
+// uses, not copies that can drift:
+//   - providerBinaryPath: hostexec.ProviderBinaryPath, where the Kairos image
+//     installs the binary (also the importer's filesystem anchor).
+//   - the bundle directory: hostexec.BundleDir, used directly.
 const (
-	providerBinaryPath = "/system/providers/agent-provider-kubernetes"
+	providerBinaryPath = hostexec.ProviderBinaryPath
 	clusterStatePath   = "/run/provider-kubernetes/cluster.json"
 	statusRunPath      = "/run/provider-kubernetes/status.yaml"
 	adminConf          = "/etc/kubernetes/admin.conf"

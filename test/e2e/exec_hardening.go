@@ -18,7 +18,8 @@ package e2e
 //	(c2) hostile kuberc at kubectl's default location: with no HOME and working
 //	    directory /, a valid kuberc at /.kube/kuberc must not change what the
 //	    provider's kubectl does (KUBECTL_KUBERC=false, KUBERC=off).
-//	(d) hostile CONTAINERD_ADDRESS on import-images: it must not reach ctr.
+//	(d) hostile CONTAINERD_ADDRESS on import-images: it must not reach ctr, and
+//	    every images.lock entry must still import (summary outcome=success).
 //
 // systemd's own PATH lookups for units (containerd shim, kubelet helpers) are
 // F-UNITPATH and deliberately out of scope: nothing here shadows or asserts them.
@@ -623,9 +624,6 @@ func plantDefaultLocationKuberc(t *testing.T, nc *nodeContainer) {
 // --- (d) import-images under a hostile CONTAINERD_ADDRESS ------------------
 
 const (
-	// bundledImagesDir mirrors imageimport.DefaultDir, where the base image
-	// bundles the control-plane image tarballs (ADR-16).
-	bundledImagesDir = "/opt/provider-kubernetes/images"
 	// importImagesTimeout sits above the subcommand's own 5m context bound, so
 	// the exec never masks the provider's budget.
 	importImagesTimeout = 6 * time.Minute
@@ -634,39 +632,6 @@ const (
 	hostileContainerdAddress = "/run/nonexistent.sock"
 )
 
-// importedSummaryRE matches the one line imageimport.Import logs after every
-// tarball imported: "image-import: imported N tarball(s) from DIR". DIR stops at
-// whitespace or a quote, because logrus's non-TTY text format wraps the message
-// in msg="...". The per-tarball lines ("imported <name>.tar") do not match.
-var importedSummaryRE = regexp.MustCompile(`image-import: imported ([0-9]+) tarball\(s\) from ([^\s"]+)`)
-
-// importedTarballCount parses the import-images summary line. It requires exactly
-// one, so a missing or repeated summary fails instead of being guessed at.
-func importedTarballCount(out string) (count int, dir string, err error) {
-	m := importedSummaryRE.FindAllStringSubmatch(out, -1)
-	if len(m) != 1 {
-		return 0, "", fmt.Errorf("want exactly one %q summary line, found %d", "image-import: imported N tarball(s) from DIR", len(m))
-	}
-	count, err = strconv.Atoi(m[0][1])
-	if err != nil {
-		return 0, "", fmt.Errorf("tarball count %q: %w", m[0][1], err)
-	}
-	return count, m[0][2], nil
-}
-
-// countBundledTarballs counts the *.tar entries imageimport.Import globs in
-// bundledImagesDir (find gets the pattern as an argument, not via a shell).
-func countBundledTarballs(t *testing.T, nc *nodeContainer) int {
-	t.Helper()
-	out, err := nc.execErr(binFind, bundledImagesDir, "-mindepth", "1", "-maxdepth", "1", "-name", "*.tar")
-	if err != nil {
-		t.Fatalf("list bundled image tarballs in %s: %v\n%s", bundledImagesDir, err, out)
-	}
-	n := 0
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) != "" {
-			n++
-		}
-	}
-	return n
-}
+// The import-images output is parsed with parseImportSummary (bundled_images.go),
+// and the expected count is the number of images.lock entries: the importer
+// imports exactly the lock's entries from hostexec.BundleDir, never a *.tar glob.
