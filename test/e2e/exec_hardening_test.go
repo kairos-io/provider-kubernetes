@@ -233,10 +233,13 @@ func TestShadowShimScript(t *testing.T) {
 			t.Errorf("shim text mentions %q; the tool name must come from $0 only", tool)
 		}
 	}
-	for _, forbidden := range []string{"containerd-shim-runc-v2", "runc", "mount", "cp"} {
-		for _, tool := range shadowedTools {
-			if tool == forbidden {
-				t.Errorf("%q must not be shadowed (F-UNITPATH is out of scope)", forbidden)
+	// The daemon-side names belong to the ADR-19 U1 phase (u1ShadowedTools), which
+	// plants them in more directories and reads a different marker. A name in both
+	// sets would have the two phases fight over the same /usr/local/bin path.
+	for _, tool := range shadowedTools {
+		for _, u1 := range u1ShadowedTools {
+			if tool == u1 {
+				t.Errorf("%q is shadowed by both E-B7 and ADR-19 U1; each name belongs to exactly one phase", tool)
 			}
 		}
 	}

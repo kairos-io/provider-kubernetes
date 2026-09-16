@@ -21,8 +21,11 @@ package e2e
 //	(d) hostile CONTAINERD_ADDRESS on import-images: it must not reach ctr, and
 //	    every images.lock entry must still import (summary outcome=success).
 //
-// systemd's own PATH lookups for units (containerd shim, kubelet helpers) are
-// F-UNITPATH and deliberately out of scope: nothing here shadows or asserts them.
+// systemd's own PATH lookups for the units (the containerd shim, the kubelet's
+// helpers, and the persistent /opt directories containerd executes from) are
+// ADR-19 U1 and live in daemon_exec_path.go, which runs after this phase on the
+// same node container. Unit FILE placement and the stale persistent copies under
+// /etc/systemd are still open (ADR-19 U2), as is the CNI plugin directory (U3).
 
 import (
 	"bytes"
@@ -308,8 +311,10 @@ const (
 )
 
 // shadowedTools are the tools the provider runs, or kubeadm runs on its behalf.
-// Binaries that systemd or containerd run for units (containerd-shim-runc-v2,
-// runc, mount, cp) are deliberately not shadowed: F-UNITPATH, out of scope.
+// Binaries that systemd, containerd or the kubelet run for the units
+// (containerd-shim-runc-v2, runc, mount, ...) belong to the ADR-19 U1 phase and
+// are shadowed there, by u1ShadowedTools in daemon_exec_path.go, which plants them
+// in more directories than this phase needs.
 var shadowedTools = []string{"kubeadm", "kubectl", "kubelet", "systemctl", "ctr"}
 
 // shadowShimScript is the fixed content of every shim. It records its own name

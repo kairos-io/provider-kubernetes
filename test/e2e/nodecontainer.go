@@ -60,6 +60,7 @@ const (
 	binRm         = "/usr/bin/rm"
 	binSha256sum  = "/usr/bin/sha256sum"
 	binStat       = "/usr/bin/stat"
+	binSystemdRun = "/usr/bin/systemd-run"
 	binTar        = "/usr/bin/tar"
 	binTee        = "/usr/bin/tee"
 	binTest       = "/usr/bin/test"
@@ -345,6 +346,10 @@ func (nc *nodeContainer) ExecInput(stdin string, args ...string) (string, error)
 func (nc *nodeContainer) WriteFile(t *testing.T, path, content, mode string) {
 	t.Helper()
 	dir := path[:strings.LastIndex(path, "/")]
+	if dir == "" {
+		// A file directly at the root ("/name"): the parent is "/", not "".
+		dir = "/"
+	}
 	if out, err := nc.execErr(binMkdir, "-p", dir); err != nil {
 		t.Fatalf("mkdir -p %s: %v\n%s", dir, err, out)
 	}
