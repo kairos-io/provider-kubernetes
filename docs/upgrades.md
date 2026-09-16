@@ -210,10 +210,32 @@ on a kubeadm/Kairos control plane that means:
 **Bundled images after upgrading from an older release.** Images that bundle the
 control-plane images under `/system/provider-kubernetes/images` no longer read the
 old copy under `/opt/provider-kubernetes`, which Kairos keeps on the persistent
-partition. Once you no longer need to roll back, you can remove it with
-`sudo rm -rf /opt/provider-kubernetes`; booting an older image puts it back and that
-image imports from it again. Do not list `/system/provider-kubernetes` in
-`kairos-agent upgrade` excluded paths: the bundle must come from the image you boot.
+partition. Once you no longer need to roll back, you can remove it - but **check
+first** which import unit the node actually runs:
+
+```sh
+sudo systemctl cat provider-kubernetes-image-import.service | grep ConditionPathExists
+```
+
+That must print **nothing**. Kairos keeps `/etc/systemd` on the persistent partition
+and refreshes it from the image with `rsync --update`, so a node can still be running
+the v0.3.0 unit, which has
+`ConditionPathExists=/opt/provider-kubernetes/images`. On such a node, removing the
+directory makes the import **silently skip on every boot** (the unit reports
+`condition failed`, not an error), so the images bundled in the image you boot are
+never imported: connected nodes fall back to pulling by tag, and an air-gapped node
+fails to converge. If the line is present, leave the directory in place until the
+node runs a unit without it.
+
+With no `ConditionPathExists` line, remove it:
+
+```sh
+sudo rm -rf /opt/provider-kubernetes
+```
+
+Booting an older image puts it back and that image imports from it again. Do not
+list `/system/provider-kubernetes` in `kairos-agent upgrade` excluded paths: the
+bundle must come from the image you boot.
 
 kubeadm upgrades (especially etcd) are forward-only; there is no automatic
 rollback. To recover, restore an etcd snapshot (see above) and boot the previous
