@@ -161,6 +161,16 @@ jobs:
           esac
           echo "OK: image bundles the k8s ${{ matrix.minor }} toolchain"
 
+      - name: Verify owner and mode of the files the image installs
+        env:
+          IMG: kairos-kubeadm:ci-${{ matrix.minor }}
+        run: |
+          set -euo pipefail
+          # tar run as root keeps an archive's owner and COPY --from keeps it, so a
+          # foreign owner (the crictl release tarball stores uid 1001) could reach the
+          # image with no build step failing. The release gate runs the same script.
+          bash scripts/verify-image-files.sh "$IMG"
+
       - name: Verify the image-only bundle, its exact refs and import-images --verify-only (F-IMPORTREF, ADR-16-A2)
         env:
           IMG: kairos-kubeadm:ci-${{ matrix.minor }}

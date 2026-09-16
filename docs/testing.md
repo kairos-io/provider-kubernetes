@@ -181,7 +181,10 @@ is the one CI built. The two halves of the supply chain:
 
 - **Build-time (inputs):** the `Dockerfile` checksum-verifies every binary it
   downloads (kubeadm/kubelet/kubectl/containerd/runc/CNI) against the publisher's
-  HTTPS-served `.sha256`.
+  HTTPS-served `.sha256`, and installs every binary and configuration file
+  root-owned without group or other write. CI and the release workflow (before
+  `docker push`) check the owner and mode of those files in the built image with
+  `scripts/verify-image-files.sh`.
 - **Publish-time (outputs):** the `Release` workflow attaches, to every published
   image (by digest) and to the release binary, a **keyless SLSA build-provenance
   attestation** and a **CycloneDX SBOM attestation**, signed via the workflow's OIDC

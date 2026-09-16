@@ -128,10 +128,12 @@ RUN set -eux; \
       curl -fsSL -o "${bin}.sha256" "${base}/${bin}.sha256"; \
       echo "$(cat ${bin}.sha256)  ${bin}" | sha256sum -c -; \
       rm "${bin}.sha256"; \
-      chmod +x "${bin}"; \
+      chmod 0755 "${bin}"; \
     done
 
-# crictl: published with a SHA256SUMS file alongside the release tarballs.
+# crictl: published with a SHA256SUMS file alongside the release tarballs. tar run
+# as root keeps the owner stored in the archive (the cri-tools tarball stores crictl
+# as uid 1001), and COPY --from keeps the owner it finds, so set it explicitly.
 RUN set -eux; \
     base="https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}"; \
     file="crictl-${CRICTL_VERSION}-linux-${TARGETARCH}.tar.gz"; \
@@ -140,7 +142,14 @@ RUN set -eux; \
     echo "$(cat ${file}.sha256)  ${file}" | sha256sum -c -; \
     tar -xzf "${file}"; \
     rm "${file}" "${file}.sha256"; \
-    chmod +x crictl
+    chown 0:0 crictl; \
+    chmod 0755 crictl
+
+# Every binary this stage hands to the final image must be a root:root 0755 regular
+# file; scripts/verify-image-files.sh checks the same on the shipped image.
+RUN set -eu; \
+    bad="$(find kubeadm kubectl crictl ! \( -type f -user 0 -group 0 -perm 0755 \))"; \
+    if [ -n "${bad}" ]; then echo "FATAL: not root:root 0755 regular files: ${bad}" >&2; exit 1; fi
 
 # ----------------------------------------------------------------------------
 # Stage: download and verify the runtime stack we DON'T build from source
@@ -164,9 +173,11 @@ RUN set -eux; \
     grep "  runc.${TARGETARCH}$" runc.sha256sum | sha256sum -c -; \
     rm runc.sha256sum; \
     mv "runc.${TARGETARCH}" runc; \
-    chmod +x runc
+    chmod 0755 runc
 
-# CNI plugins: each release tarball has a matching <file>.sha256 sibling.
+# CNI plugins: each release tarball has a matching <file>.sha256 sibling. The
+# tarball stores root-owned entries today; chown anyway, since tar run as root
+# keeps whatever owner the archive stores.
 RUN set -eux; \
     base="https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}"; \
     file="cni-plugins-linux-${TARGETARCH}-${CNI_PLUGINS_VERSION}.tgz"; \
@@ -174,7 +185,20 @@ RUN set -eux; \
     curl -fsSL -o "${file}.sha256" "${base}/${file}.sha256"; \
     echo "$(awk '{print $1}' ${file}.sha256)  ${file}" | sha256sum -c -; \
     mkdir -p cni && tar -xzf "${file}" -C cni; \
-    rm "${file}" "${file}.sha256"
+    rm "${file}" "${file}.sha256"; \
+    chown -R 0:0 cni
+
+# Every file this stage hands to the final image must be root:root without group or
+# other write or setuid/setgid/sticky: runc and the cni directory 0755, the plugins
+# regular files; scripts/verify-image-files.sh checks the same on the shipped image.
+RUN set -eu; \
+    bad_runc="$(find runc ! \( -type f -user 0 -group 0 -perm 0755 \))"; \
+    bad_cni="$(find cni -mindepth 1 ! -name LICENSE ! -name README.md ! \( -type f -user 0 -group 0 -perm 0755 \))"; \
+    bad_cni_doc="$(find cni -mindepth 1 \( -name LICENSE -o -name README.md \) ! \( -type f -user 0 -group 0 -perm 0644 \))"; \
+    got="$(stat -c '%F|%u|%g|%a' cni)"; \
+    if [ -n "${bad_runc}${bad_cni}${bad_cni_doc}" ] || [ "${got}" != "directory|0|0|755" ]; then \
+      echo "FATAL: want root:root regular files, plugins 0755 and LICENSE/README.md 0644; runc: '${bad_runc}' plugins: '${bad_cni}' docs: '${bad_cni_doc}' cni: ${got}" >&2; exit 1; \
+    fi
 
 # ----------------------------------------------------------------------------
 # Stage: build kubelet fully static from source.
@@ -369,13 +393,15 @@ COPY --from=runtime-binaries /bin/cni/            /opt/cni/bin/
 COPY --from=provider-builder /out/agent-provider-kubernetes /system/providers/agent-provider-kubernetes
 
 # --- Static configuration ---------------------------------------------------
-COPY containerd/config.toml                 /etc/containerd/config.toml
-COPY systemd/containerd.service             /etc/systemd/system/containerd.service
-COPY systemd/kubelet.service                /etc/systemd/system/kubelet.service
-COPY systemd/kubelet.service.d/10-kubeadm.conf /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-COPY sysctl/k8s.conf                        /etc/sysctl.d/k8s.conf
-COPY modules-load/k8s.conf                  /etc/modules-load.d/k8s.conf
-COPY systemd/provider-kubernetes-image-import.service /etc/systemd/system/provider-kubernetes-image-import.service
+# COPY from the build context keeps each file's mode from the checkout, which
+# depends on the umask it was made with (0664 under umask 002), so set 0644.
+COPY --chmod=0644 containerd/config.toml                 /etc/containerd/config.toml
+COPY --chmod=0644 systemd/containerd.service             /etc/systemd/system/containerd.service
+COPY --chmod=0644 systemd/kubelet.service                /etc/systemd/system/kubelet.service
+COPY --chmod=0644 systemd/kubelet.service.d/10-kubeadm.conf /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+COPY --chmod=0644 sysctl/k8s.conf                        /etc/sysctl.d/k8s.conf
+COPY --chmod=0644 modules-load/k8s.conf                  /etc/modules-load.d/k8s.conf
+COPY --chmod=0644 systemd/provider-kubernetes-image-import.service /etc/systemd/system/provider-kubernetes-image-import.service
 
 # --- Pre-bundled control-plane images (ADR-16, ADR-16-A2) -------------------
 # Embed the control-plane image tarballs and images.lock (fetched, verified and
