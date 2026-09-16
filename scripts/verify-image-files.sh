@@ -141,6 +141,9 @@ readonly RESOLVABLE_NAMES=(
   ip                        # CNI reference plugins (tap, and go-iptables' helpers)
   mount                     # kubelet mount-utils, every projected-token volume
   umount
+  systemd-run               # kubelet mount-utils, systemd-run scope for mounts
+  losetup                   # kubelet block volumes
+  blkid                     # kubelet filesystem probing
 )
 # Names whose target the BASE IMAGE ships setuid root, which util-linux does for
 # mount and umount so that unprivileged users can mount fstab entries. The setuid

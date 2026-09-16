@@ -104,7 +104,12 @@ var u1ShadowDirs = []string{"/usr/local/sbin", "/usr/local/bin", optContainerdBi
 //     exercises the kubelet drop-in here;
 //   - iptables, ip6tables, iptables-save, iptables-restore: the kubelet's startup
 //     rules and its periodic canary, also live;
-//   - losetup, blkid: the kubelet's block-volume and filesystem helpers.
+//   - losetup, blkid: the kubelet's block-volume and filesystem helpers;
+//   - ip: reached by CNI reference plugins, which inherit containerd's environment.
+//
+// scripts/verify-image-files.sh names the same set, split into the names the image
+// must provide and the ones closed at the source; TestShadowedToolsMatchTheImageGate
+// keeps the two lists from drifting.
 var u1ShadowedTools = []string{
 	"containerd-shim-runc-v2",
 	"runc",
@@ -120,6 +125,7 @@ var u1ShadowedTools = []string{
 	"iptables-restore",
 	"losetup",
 	"blkid",
+	"ip",
 }
 
 const (

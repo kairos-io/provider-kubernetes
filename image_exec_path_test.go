@@ -23,9 +23,13 @@ package main
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -284,6 +288,159 @@ func TestContainerdExecPathsAreImageOnly(t *testing.T) {
 			t.Errorf("%q is under /opt, which Kairos keeps on the persistent partition", p)
 		case p == "/usr/local" || strings.HasPrefix(p, "/usr/local/"):
 			t.Errorf("%q is under the persistent /usr/local", p)
+		}
+	}
+}
+
+// bashArrayNames returns the elements of a `readonly <name>=( ... )` array in a
+// shell script, with trailing '#' comments and surrounding quotes stripped. It is
+// deliberately literal: the arrays it reads are hand-maintained lists of plain
+// names, so anything that needs shell evaluation (a variable, a substitution) is
+// an error rather than something to interpret.
+func bashArrayNames(script, name string) ([]string, error) {
+	open := "readonly " + name + "=("
+	i := strings.Index(script, open)
+	if i < 0 {
+		return nil, fmt.Errorf("no %s array", name)
+	}
+	body := script[i+len(open):]
+	var (
+		out     []string
+		cur     strings.Builder
+		quote   byte
+		started bool
+	)
+	flush := func() {
+		if started {
+			out = append(out, cur.String())
+			cur.Reset()
+			started = false
+		}
+	}
+	for j := 0; j < len(body); j++ {
+		c := body[j]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+				continue
+			}
+			cur.WriteByte(c)
+			started = true
+		case c == '\'' || c == '"':
+			quote = c
+			started = true
+		case c == '#':
+			for j < len(body) && body[j] != '\n' {
+				j++
+			}
+			flush()
+		case c == ')':
+			flush()
+			if len(out) == 0 {
+				return nil, fmt.Errorf("%s is empty", name)
+			}
+			return out, nil
+		case c == ' ' || c == '\t' || c == '\n':
+			flush()
+		case c == '$' || c == '`':
+			return nil, fmt.Errorf("%s needs shell evaluation", name)
+		default:
+			cur.WriteByte(c)
+			started = true
+		}
+	}
+	return nil, fmt.Errorf("%s array is not terminated", name)
+}
+
+// goStringSliceLiteral returns the string elements of a `var <name> = []string{...}`
+// declaration in a Go source file, read as source text so that a file behind a
+// build tag (the e2e package) can be inspected from this package.
+func goStringSliceLiteral(src, name string) ([]string, error) {
+	f, err := parser.ParseFile(token.NewFileSet(), "", src, 0)
+	if err != nil {
+		return nil, err
+	}
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Names) != 1 || vs.Names[0].Name != name || len(vs.Values) != 1 {
+				continue
+			}
+			lit, ok := vs.Values[0].(*ast.CompositeLit)
+			if !ok {
+				return nil, fmt.Errorf("%s is not a composite literal", name)
+			}
+			out := make([]string, 0, len(lit.Elts))
+			for _, elt := range lit.Elts {
+				bl, ok := elt.(*ast.BasicLit)
+				if !ok || bl.Kind != token.STRING {
+					return nil, fmt.Errorf("%s holds a non-literal element", name)
+				}
+				s, err := strconv.Unquote(bl.Value)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %v", name, err)
+				}
+				out = append(out, s)
+			}
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("no %s declaration", name)
+}
+
+// TestShadowedToolsMatchTheImageGate keeps the two halves of ADR-19 S19-18c in
+// step. The e2e plants a shadow binary for every name containerd, the kubelet or
+// their children resolve by NAME; scripts/verify-image-files.sh requires each of
+// those names to be satisfied on the shipped image, either by the image providing
+// it (RESOLVABLE_NAMES) or by a setting that stops the lookup (CLOSED_NAMES). The
+// image gate runs per minor in CI and the e2e run is heavier, so a name present in
+// one list and missing from the other is a hole: a base image that moved blkid or
+// losetup into the persistent /usr/local would break the kubelet and still pass.
+func TestShadowedToolsMatchTheImageGate(t *testing.T) {
+	script := readBuildFile(t, path.Join("scripts", "verify-image-files.sh"))
+	resolvable, err := bashArrayNames(script, "RESOLVABLE_NAMES")
+	if err != nil {
+		t.Fatalf("verify-image-files.sh: %v", err)
+	}
+	setuid, err := bashArrayNames(script, "SETUID_RESOLVABLE_NAMES")
+	if err != nil {
+		t.Fatalf("verify-image-files.sh: %v", err)
+	}
+	closed, err := bashArrayNames(script, "CLOSED_NAMES")
+	if err != nil {
+		t.Fatalf("verify-image-files.sh: %v", err)
+	}
+	gated := slices.Clone(resolvable)
+	for _, entry := range closed {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || name == "" {
+			t.Fatalf("CLOSED_NAMES holds %q, want \"<name>=<what closes it>\"", entry)
+		}
+		gated = append(gated, name)
+	}
+	for _, name := range setuid {
+		if !slices.Contains(resolvable, name) {
+			t.Errorf("SETUID_RESOLVABLE_NAMES holds %q, which is not in RESOLVABLE_NAMES; it would never be checked", name)
+		}
+	}
+
+	shadowed, err := goStringSliceLiteral(readBuildFile(t, path.Join("test", "e2e", "daemon_exec_path.go")), "u1ShadowedTools")
+	if err != nil {
+		t.Fatalf("test/e2e/daemon_exec_path.go: %v", err)
+	}
+	for _, name := range shadowed {
+		if !slices.Contains(gated, name) {
+			t.Errorf("the e2e shadows %q but scripts/verify-image-files.sh neither requires it in the image (RESOLVABLE_NAMES) nor closes it (CLOSED_NAMES), so only the heavy e2e would catch it moving to /usr/local", name)
+		}
+	}
+	for _, name := range gated {
+		if !slices.Contains(shadowed, name) {
+			t.Errorf("scripts/verify-image-files.sh gates %q but the e2e plants no shadow for it, so nothing proves the daemons refuse a planted copy", name)
 		}
 	}
 }
