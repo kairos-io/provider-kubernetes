@@ -416,7 +416,17 @@ COPY --chmod=0644 systemd/provider-kubernetes-image-import.service /etc/systemd/
 # whereas systemd collects drop-ins from every unit search directory (so these
 # apply even to a stale /etc fragment) and /usr/lib is replaced wholesale by every
 # A/B upgrade. --chmod=0644 because COPY would otherwise keep the checkout's mode
-# (0664 under umask 002); COPY's default owner is 0:0.
+# (0664 under umask 002); COPY's default owner is 0:0. The two <unit>.d directories
+# are created here rather than by the COPYs: --chmod also lands on a parent directory
+# the COPY creates, and whether it does is builder-dependent (0755 on Docker 26.1 with
+# BuildKit v0.32, 0644 on Docker 29.6 with the containerd image store -- QA report
+# against f5e0ad0), and a 0644 directory is traversable only by root.
+RUN set -eux; \
+    for d in /usr/lib/systemd/system/containerd.service.d \
+             /usr/lib/systemd/system/kubelet.service.d; do \
+      mkdir -p "${d}"; chown 0:0 "${d}"; chmod 0755 "${d}"; \
+    done
+
 COPY --chmod=0644 usr-lib-systemd/containerd.service.d/50-provider-kubernetes-exec-path.conf /usr/lib/systemd/system/containerd.service.d/50-provider-kubernetes-exec-path.conf
 COPY --chmod=0644 usr-lib-systemd/kubelet.service.d/50-provider-kubernetes-exec-path.conf    /usr/lib/systemd/system/kubelet.service.d/50-provider-kubernetes-exec-path.conf
 
