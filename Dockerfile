@@ -193,10 +193,11 @@ RUN set -eux; \
 # regular files; scripts/verify-image-files.sh checks the same on the shipped image.
 RUN set -eu; \
     bad_runc="$(find runc ! \( -type f -user 0 -group 0 -perm 0755 \))"; \
-    bad_cni="$(find cni -mindepth 1 ! \( -type f -user 0 -group 0 ! -perm /7022 \))"; \
+    bad_cni="$(find cni -mindepth 1 ! -name LICENSE ! -name README.md ! \( -type f -user 0 -group 0 -perm 0755 \))"; \
+    bad_cni_doc="$(find cni -mindepth 1 \( -name LICENSE -o -name README.md \) ! \( -type f -user 0 -group 0 -perm 0644 \))"; \
     got="$(stat -c '%F|%u|%g|%a' cni)"; \
-    if [ -n "${bad_runc}${bad_cni}" ] || [ "${got}" != "directory|0|0|755" ]; then \
-      echo "FATAL: want root:root without group/other write; runc: '${bad_runc}' plugins: '${bad_cni}' cni: ${got}" >&2; exit 1; \
+    if [ -n "${bad_runc}${bad_cni}${bad_cni_doc}" ] || [ "${got}" != "directory|0|0|755" ]; then \
+      echo "FATAL: want root:root regular files, plugins 0755 and LICENSE/README.md 0644; runc: '${bad_runc}' plugins: '${bad_cni}' docs: '${bad_cni_doc}' cni: ${got}" >&2; exit 1; \
     fi
 
 # ----------------------------------------------------------------------------
