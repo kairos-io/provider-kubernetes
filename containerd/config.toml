@@ -5,14 +5,104 @@
 #   Dockerfile), so it is always version-matched rather than a stale hardcoded tag.
 # - SystemdCgroup = true, matching the kubelet's default cgroup driver
 #   ("systemd"); see https://kubernetes.io/docs/setup/production-environment/container-runtimes/.
+# - The schema stays version = 2. containerd 2.x migrates it in memory at load
+#   (cmd/containerd/server/config/config.go:145-159, 473-493 at v2.3.5): the v2 ->
+#   v3 step has no top-level migration, per-plugin ConfigMigration hooks carry the
+#   cri tables across, and plugins without such a hook (the two below) read their
+#   table straight from the file under its full plugin URI (config.go:410-421).
 version = 2
 root = "/var/lib/containerd"
+
+# ADR-19 U1 (F-UNITPATH): containerd's `opt` internal plugin is compiled in and on
+# by default (cmd/containerd/builtins/builtins.go:48). Its InitFn creates
+# /opt/containerd/{bin,lib} and PREPENDS them to the daemon's own PATH and
+# LD_LIBRARY_PATH with os.Setenv (plugins/services/opt/service.go:42-59, default
+# path plugins/services/opt/path_unix.go:21). /opt is a Kairos persistent path, so
+# that would put a writable, upgrade-surviving directory ahead of the image's /usr
+# for every by-name lookup containerd and its children make - which is exactly what
+# the Environment=PATH drop-in exists to prevent. Setting `path` to an image-only
+# directory does not help: the prepend is unconditional and the MkdirAll would fail
+# on the read-only /usr. Disabling the plugin is the supported way out; the only
+# in-tree consumer is `ctr install` (client/install.go). `Requires` relates plugin
+# TYPES and only orders startup (plugin.Registry.Graph), so nothing else breaks.
+# The URI filter compares Type + "." + ID (config.go V2DisabledFilter, plugin.go
+# Registration.URI), and disabled_plugins is a top-level key that survives the
+# version-2 load unchanged.
+#
+# The two erofs plugins are disabled for a different reason (ADR-19 S19-18b). Both
+# are compiled in and both run `mkfs.erofs` BY NAME (the differ probes
+# `mkfs.erofs --help` during its own plugin init, internal/erofsutils/mount.go, and
+# the snapshotter runs it to build layers). The image ships no mkfs.erofs, so the
+# name resolves nowhere inside /usr - which is exactly the shape a directory
+# APPENDED to containerd's PATH could fill in later (see the NRI note below). The
+# differ already self-skips with ErrSkipPlugin when mkfs.erofs is absent and neither
+# plugin is used by this configuration, so disabling them costs nothing today. A
+# derived image that wants erofs must remove these two URIs and ship erofs-utils.
+# URIs: plugins/types.go:39 (SnapshotPlugin) and :45 (DiffPlugin) plus ID "erofs" in
+# plugins/snapshots/erofs/plugin/plugin.go:76 and plugins/diff/erofs/plugin/plugin.go:50.
+disabled_plugins = ["io.containerd.internal.v1.opt", "io.containerd.differ.v1.erofs", "io.containerd.snapshotter.v1.erofs"]
+
+# ADR-19 U1: the second persistent /opt exec. The image-verifier bindir plugin is
+# compiled in and enabled by default (builtins.go:27, plugins/imageverifier/
+# plugin.go:76-94) and runs up to max_verifiers executables from bin_dir on every
+# transfer-service pull - which is the path CRI image pulls take - with the power to
+# reject the pull (pkg/imageverifier/bindir/bindir.go:58-118). Its default bin_dir
+# is the persistent /opt/containerd/image-verifier/bin (plugins/imageverifier/
+# path_unix.go:21). There is no `disable` key, so point it at an image-only
+# directory instead; the image ships that directory empty and a missing or empty
+# bin_dir is an explicit "OK" with no exec (bindir.go:60-78), i.e. exactly today's
+# behavior on a stock node, minus the persistent directory.
+[plugins."io.containerd.image-verifier.v1.bindir"]
+  bin_dir = "/usr/lib/containerd/image-verifier/bin"
+
+# ADR-19 U1: the third persistent /opt exec. NRI is compiled in and enabled by
+# default (builtins.go:31, plugins/nri/plugin.go:27-38, internal/nri/config.go:48-53)
+# and launches EVERY executable found in plugin_path at containerd start
+# (vendor/github.com/containerd/nri/pkg/adaptation/adaptation.go:523-560, 714-760);
+# an NRI plugin can rewrite every container's OCI spec. The default plugin_path is
+# the persistent /opt/nri/plugins (adaptation.go:42). We move the launch directory
+# rather than setting `disable = true`, because disabling turns off NRI altogether
+# (internal/nri/nri.go:121-124) including externally launched plugins that connect
+# over the NRI socket, which is a capability an operator may legitimately want. A
+# plugin_path with no executables launches nothing (adaptation.go:724-741).
+# plugin_config_path is left at its default /etc/nri/conf.d: it is only read while
+# discovering launchable plugins, and /etc outside the Kairos persistent sub-paths
+# is rebuilt from the image on every boot.
+#
+# NOT closed by this setting, and not closable by configuration at v2.3.5 (R-19-13):
+# the CRI pod-sandbox service also calls the DEPRECATED NRI v0.1 client on every
+# sandbox create and delete (internal/cri/server/podsandbox/sandbox_run.go:274-290,
+# opts.go). nri.New() APPENDS the hardcoded "/opt/nri/bin" to containerd's own PATH,
+# once per daemon, at the FIRST SANDBOX CREATE (vendor/github.com/containerd/nri/
+# client.go:42-57; a missing /etc/nri/conf.json returns an empty config, not an
+# error, :191-201). The keys in this table govern only the modern NRI adaptation and
+# do not reach that client, which carries its own constant.
+# Because the element is APPENDED it can never shadow a name the image provides; it
+# can only supply a name the image does NOT have. The unconditional ones are closed
+# above and in the drop-in: igzip/unpigz by CONTAINERD_DISABLE_*, mkfs.erofs by
+# disabling both erofs plugins. What remains is conditional on features this
+# configuration does not use (fuse mounts, checkpoint/criu, devmapper). Re-check at
+# every containerd bump; the Tier-1 e2e pins the exception to this exact value
+# (test/e2e/daemon_exec_path.go, execPathWithNRIV010).
+[plugins."io.containerd.nri.v1.nri"]
+  plugin_path = "/usr/lib/nri/plugins"
 
 [plugins."io.containerd.grpc.v1.cri"]
   sandbox_image = "registry.k8s.io/pause:3.10.1"
 
   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
     runtime_type = "io.containerd.runc.v2"
+    # ADR-19 U1 defense in depth: an absolute runtime_path is used as-is after a
+    # stat (core/runtime/v2/shim_manager.go:388-396), so the shim is never resolved
+    # through the working-directory probe (`./containerd-shim-runc-v2`, i.e.
+    # /containerd-shim-runc-v2 for a unit with no WorkingDirectory), through PATH,
+    # or side-by-side. It holds even if an operator overrides the PATH drop-in.
+    # Key name: internal/cri/config/config.go:88-91 (`runtime_path`); the v2 file's
+    # runtimes table is carried into the v3 plugin config by the CRI runtime
+    # plugin's ConfigMigration (plugins/cri/runtime/plugin.go:54, 278-298).
+    runtime_path = "/usr/bin/containerd-shim-runc-v2"
     [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+      # Absolute, so the shim's own LookPath of the runtime binary
+      # (cmd/containerd-shim-runc-v2/manager/manager_linux.go) never searches PATH.
       BinaryName = "/usr/bin/runc"
       SystemdCgroup = true

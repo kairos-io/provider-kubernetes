@@ -188,9 +188,13 @@ RUN set -eux; \
     rm "${file}" "${file}.sha256"; \
     chown -R 0:0 cni
 
-# Every file this stage hands to the final image must be root:root without group or
-# other write or setuid/setgid/sticky: runc and the cni directory 0755, the plugins
-# regular files; scripts/verify-image-files.sh checks the same on the shipped image.
+# Every file this stage hands to the final image must be a root:root regular file
+# with an exact mode: runc and the cni directory 0755, every CNI plugin 0755, and
+# the two documentation files the plugins tarball also ships (LICENSE, README.md)
+# 0644. Naming both modes exactly, instead of only excluding the group/other-write
+# and setuid bits, means a plugin that arrived non-executable -- or any new entry a
+# future tarball adds -- fails the build instead of passing a mode-range test.
+# scripts/verify-image-files.sh makes the same assertions on the shipped image.
 RUN set -eu; \
     bad_runc="$(find runc ! \( -type f -user 0 -group 0 -perm 0755 \))"; \
     bad_cni="$(find cni -mindepth 1 ! -name LICENSE ! -name README.md ! \( -type f -user 0 -group 0 -perm 0755 \))"; \
@@ -402,6 +406,32 @@ COPY --chmod=0644 systemd/kubelet.service.d/10-kubeadm.conf /etc/systemd/system/
 COPY --chmod=0644 sysctl/k8s.conf                        /etc/sysctl.d/k8s.conf
 COPY --chmod=0644 modules-load/k8s.conf                  /etc/modules-load.d/k8s.conf
 COPY --chmod=0644 systemd/provider-kubernetes-image-import.service /etc/systemd/system/provider-kubernetes-image-import.service
+
+# --- Daemon exec path (ADR-19 U1, F-UNITPATH) --------------------------------
+# Image-only drop-ins that give containerd and the kubelet -- and every helper,
+# shim and CNI plugin they start -- a PATH that stays inside the read-only image
+# (internal/hostexec.ChildPATH). They go under /usr/lib, NOT /etc/systemd: /etc is
+# a persistent bind on Kairos refreshed with `rsync --update`, so an /etc copy
+# would only reach an upgraded node when the new build's mtime happens to be newer,
+# whereas systemd collects drop-ins from every unit search directory (so these
+# apply even to a stale /etc fragment) and /usr/lib is replaced wholesale by every
+# A/B upgrade. --chmod=0644 because COPY would otherwise keep the checkout's mode
+# (0664 under umask 002); COPY's default owner is 0:0.
+COPY --chmod=0644 usr-lib-systemd/containerd.service.d/50-provider-kubernetes-exec-path.conf /usr/lib/systemd/system/containerd.service.d/50-provider-kubernetes-exec-path.conf
+COPY --chmod=0644 usr-lib-systemd/kubelet.service.d/50-provider-kubernetes-exec-path.conf    /usr/lib/systemd/system/kubelet.service.d/50-provider-kubernetes-exec-path.conf
+
+# Image-only replacements for the two containerd directories that default into the
+# persistent /opt and whose contents containerd EXECUTES as root: the image-verifier
+# bin_dir (run on every pull) and the NRI plugin_path (launched at every daemon
+# start). containerd/config.toml points both here; see the comments there for the
+# plugin IDs and the upstream defaults. They ship empty, which is the same "nothing
+# to run" state a stock node has, except that this one lives on the read-only image.
+# Modes are set explicitly per directory rather than via mkdir's umask (PR #37).
+RUN set -eux; \
+    for d in /usr/lib/containerd /usr/lib/containerd/image-verifier \
+             /usr/lib/containerd/image-verifier/bin /usr/lib/nri /usr/lib/nri/plugins; do \
+      mkdir -p "$d"; chown 0:0 "$d"; chmod 0755 "$d"; \
+    done
 
 # --- Pre-bundled control-plane images (ADR-16, ADR-16-A2) -------------------
 # Embed the control-plane image tarballs and images.lock (fetched, verified and
