@@ -265,4 +265,13 @@ func TestSingleNodeInitConverges(t *testing.T) {
 	} else {
 		t.Logf("E-B7 (b): shadow marker %s is empty after reconcile, the assertions and import-images", shadowHitsPath)
 	}
+
+	// 9. ADR-19 U1 (F-UNITPATH), the daemon side of the same property: containerd,
+	//    the kubelet and everything they start resolve names against the read-only
+	//    image (see daemon_exec_path.go). It runs LAST, after E-B7's verdict, for
+	//    two reasons: it restarts containerd, the import unit and the kubelet, which
+	//    no earlier step should have to tolerate; and it needs a converged node, so
+	//    that real shims, real projected-token mounts and the kubelet's iptables
+	//    work are what the shadow binaries are measured against.
+	assertDaemonExecPath(t, nc)
 }

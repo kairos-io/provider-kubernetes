@@ -140,16 +140,91 @@ Consequences to be aware of:
 - **Custom images** must install these tools at `/usr/bin`; otherwise the provider
   fails loudly, naming the tool and path.
 
+### Daemons
+
+containerd and the kubelet are started by systemd, not by the provider, and they
+resolve a number of helpers by name. The image ships settings that keep those
+lookups inside the read-only OS image:
+
+- **`PATH` drop-ins.** `/usr/lib/systemd/system/containerd.service.d/50-provider-kubernetes-exec-path.conf`
+  and the matching `kubelet.service.d` file set
+  `Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin` - the same value the provider
+  gives kubeadm. This covers the kubelet's `mount`, `umount`, `systemd-run`,
+  `blkid`, `losetup` and `iptables` calls, containerd's own lookups, and everything
+  they start, including CNI plugins (which inherit containerd's environment). The
+  files live under `/usr/lib`, so an upgrade always replaces them and they also
+  apply to the unit copies Kairos keeps on the persistent `/etc/systemd`.
+- **Two lookups closed at the source.** The containerd drop-in also sets
+  `CONTAINERD_DISABLE_IGZIP=1` and `CONTAINERD_DISABLE_PIGZ=1`, and
+  `disabled_plugins` disables `io.containerd.differ.v1.erofs` and
+  `io.containerd.snapshotter.v1.erofs`. Those are the three names containerd would
+  look up and *not* find anywhere in the image - `igzip`, `unpigz` and `mkfs.erofs`
+  - which is the one thing an appended `PATH` element could still answer (see
+  below). containerd now skips those lookups entirely and uses its built-in Go gzip.
+  The cost is zero on this image, which ships none of the three. A derived image
+  that installs `pigz`/`igzip` for faster decompression must drop those two
+  variables; one that wants erofs must remove the two plugin URIs and ship
+  `erofs-utils`.
+- **`runtime_path = "/usr/bin/containerd-shim-runc-v2"`** and
+  **`BinaryName = "/usr/bin/runc"`** in containerd's config. The shim and runc are
+  taken by absolute path, so neither the working directory, nor `PATH`, nor a
+  directory next to containerd is ever searched - this holds even if the `PATH`
+  drop-in is overridden.
+- **Three `/opt` directories closed.** `/opt` is on the persistent partition.
+  containerd's `opt` internal plugin is disabled, so it no longer prepends
+  `/opt/containerd/bin` to the daemon's own `PATH` and `/opt/containerd/lib` to its
+  `LD_LIBRARY_PATH`; the image verifier reads `/usr/lib/containerd/image-verifier/bin`
+  instead of `/opt/containerd/image-verifier/bin` (it runs binaries from there on
+  every image pull); and NRI launches plugins from `/usr/lib/nri/plugins` instead of
+  `/opt/nri/plugins` (it launches every executable found there at each containerd
+  start, and an NRI plugin can rewrite every container's OCI spec). Both image-only
+  directories ship empty. NRI itself stays enabled, so plugins that connect over the
+  NRI socket keep working.
+
+One `/opt` path is **not** closed, because containerd offers no setting for it: its
+CRI pod-sandbox code calls the deprecated NRI v0.1 client on every sandbox
+create/delete, and that client appends `/opt/nri/bin` to containerd's own `PATH`, at
+the first sandbox create and once per daemon, whether or not any such plugin exists.
+Because it is appended and never prepended, it cannot shadow a binary the image
+ships - it can only supply a name the image does not have. The three unconditional
+such names are closed by the settings above; what remains depends on features this
+image does not configure (FUSE mounts, checkpoint/`criu`, devmapper). Treat
+`/opt/nri/bin` as a root-exec input on the node, and expect this to be re-checked at
+every containerd bump.
+
+This is an integrity measure, **not a privilege boundary**. Kairos keeps all
+persistent state as bind mounts out of `/usr/local/.state`, so anyone who can write
+`/usr/local` can already write `/etc/systemd`, `/opt`, `/var/lib/kubelet` and
+`/etc/kubernetes`. What it does fix is the accident: a runtime or helper installed
+under `/usr/local` by following upstream instructions silently replaces a root
+component of the node and survives every A/B upgrade, which means a fix delivered in
+a new image never takes effect. It also makes such drift visible.
+
 What this does **not** cover:
 
 - It stops name-based shadowing for the provider's own commands. It trusts the
   booted `/usr`: anyone who can change its contents (a tampered image, or an
   activated systemd-sysext overlay) controls these binaries.
-- Daemons still use systemd's default `PATH`, which lists `/usr/local` first:
-  containerd looks up its runc shim by name for every pod start, and the kubelet
-  finds helpers such as `mount` the same way. This is tracked separately.
+- **The daemon settings are overridable by anyone with root.** systemd reads unit
+  fragments and `<unit>.d/` drop-ins from `/etc/systemd/system` (persistent),
+  `/etc/systemd/system.control`, `/run/systemd/system`,
+  `/usr/local/lib/systemd/system` (persistent) and the top-level `service.d/`
+  directories, all of which outrank `/usr/lib`; an activated systemd-sysext can
+  overlay `/usr/lib` itself; and an `EnvironmentFile=` outranks `Environment=`, so
+  a `PATH` line in `/var/lib/kubelet/kubeadm-flags.env` (persistent) or
+  `/etc/default/kubelet` (rebuilt from the image each boot) wins over the drop-in.
 - Kairos itself runs yip stage commands through a `sh` found on `PATH`, and plugin
   discovery scans `PATH`. The provider only removes this for its own execs.
+- **Persistent inputs that run as root by design** are unchanged and out of scope:
+  `/etc/kubernetes/manifests` (static pods), `/var/lib/kubelet` (`config.yaml`,
+  `kubeadm-flags.env`), `/etc/cni/net.d` and `/opt/cni/bin`, `/etc/modprobe.d`
+  (install directives), the FlexVolume directory
+  `/usr/libexec/kubernetes/kubelet-plugins/volume/exec` (the kubelet runs
+  `<driver> init` from it), `/var/lib/extensions` and `/var/lib/confexts` (sysext
+  and confext images), and `/etc/ssl/certs`.
+- Booting a new image therefore does not make a tampered node known-good: it
+  replaces `/usr` and the image-owned units, and leaves every persistent path above
+  exactly as it was.
 - When a kubeadm run hits its deadline and is killed, a helper it started (for
   example the `cp -r` of the etcd data directory during an upgrade) can keep
   running; the provider stops waiting for it after 5 seconds.

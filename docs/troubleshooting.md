@@ -64,10 +64,53 @@ image tag for the minor you want, or adjust the pin. See
 
 The provider runs `kubeadm`, `kubectl`, `ctr`, `systemctl` and `etcdctl` only from
 `/usr/bin` in the image and never searches `PATH`. A custom or derived image must
-install them there. Copies you place in `/usr/local/bin` are ignored by the
-provider (containerd and the kubelet may still pick up tools there, so avoid putting
-Kubernetes binaries in that directory). See
+install them there. Copies you place in `/usr/local/bin` are ignored - by the
+provider and, as of the entry below, by containerd and the kubelet too. See
 [Security model](./security.md#exec-hygiene).
+
+### A runtime or helper installed under `/usr/local` or `/opt` is no longer found
+
+containerd and the kubelet run with
+`PATH=/usr/sbin:/usr/bin:/sbin:/bin`, set by the image-owned drop-ins
+`/usr/lib/systemd/system/{containerd,kubelet}.service.d/50-provider-kubernetes-exec-path.conf`.
+`/usr/local/bin`, `/usr/local/sbin` and `/opt/containerd/bin` are **not** searched,
+and containerd's image verifier and NRI plugin directories point at
+`/usr/lib/containerd/image-verifier/bin` and `/usr/lib/nri/plugins` instead of
+`/opt`. So a binary installed the upstream way - containerd release tarballs and
+`nerdctl-full` put `containerd-shim-runc-v2` in `/usr/local/bin`, NRI plugins go to
+`/opt/nri/plugins` - is ignored, and the symptom is a "not found" or "executable file
+not found in $PATH" error from the daemon rather than silence.
+
+Confirm what is in effect:
+
+```sh
+sudo systemctl show -p FragmentPath,DropInPaths,Environment containerd.service
+sudo tr '\0' '\n' < /proc/$(systemctl show -p MainPID --value containerd.service)/environ | grep '^PATH='
+sudo systemd-delta --type=extended /usr/lib/systemd/system
+```
+
+Then fix it at the source rather than by widening `PATH`:
+
+- **An extra runtime** (kata, gVisor, a second runc): give its containerd runtime an
+  absolute `runtime_path` (and `BinaryName` for a runc-like binary) in
+  `/etc/containerd/config.toml`, and install the binaries under `/usr/bin` in a
+  derived image. A `PATH` override brings back exactly the shadowing this closes.
+- **A helper the kubelet needs** (a `mount.<fs>` helper, a filesystem tool):
+  install it in a derived image, not on the node - `/usr/local` is the persistent
+  partition, so a copy there is invisible to the image build and survives upgrades.
+- **NRI plugins:** copy them into `/usr/lib/nri/plugins` in a derived image, or run
+  the plugin as a normal workload that connects to the NRI socket, which is still
+  enabled.
+- **`pigz`/`igzip` installed but unused:** the containerd drop-in sets
+  `CONTAINERD_DISABLE_PIGZ=1` and `CONTAINERD_DISABLE_IGZIP=1`, so containerd always
+  uses its built-in Go gzip. A derived image that installs either for faster layer
+  decompression must drop those two lines from its own copy of the drop-in.
+- **`erofs` snapshotter or differ not available:** both are in `disabled_plugins` in
+  `/etc/containerd/config.toml`. A derived image that wants them must remove the two
+  URIs and ship `erofs-utils`.
+- If you must override on the node, add your own later drop-in (for example
+  `/etc/systemd/system/containerd.service.d/60-path.conf`) and accept the risk;
+  do not edit the shipped file, which an upgrade replaces.
 
 ### kubeadm pulls control-plane images even though the image bundles them
 
