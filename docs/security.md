@@ -152,8 +152,10 @@ lookups inside the read-only OS image:
   gives kubeadm. This covers the kubelet's `mount`, `umount`, `systemd-run`,
   `blkid`, `losetup` and `iptables` calls, containerd's own lookups, and everything
   they start, including CNI plugins (which inherit containerd's environment). The
-  files live under `/usr/lib`, so an upgrade always replaces them and they also
-  apply to the unit copies Kairos keeps on the persistent `/etc/systemd`.
+  files live under `/usr/lib`, so an upgrade always replaces them, and because
+  systemd collects drop-ins from every unit search directory they also apply to a
+  stale unit copy on the persistent `/etc/systemd` (see below), which is the state
+  an upgraded node is in until the one-time cleanup removes it.
 - **Two lookups closed at the source.** The containerd drop-in also sets
   `CONTAINERD_DISABLE_IGZIP=1` and `CONTAINERD_DISABLE_PIGZ=1`, and
   `disabled_plugins` disables `io.containerd.differ.v1.erofs` and
@@ -191,6 +193,49 @@ such names are closed by the settings above; what remains depends on features th
 image does not configure (FUSE mounts, checkpoint/`criu`, devmapper). Treat
 `/opt/nri/bin` as a root-exec input on the node, and expect this to be re-checked at
 every containerd bump.
+
+### Unit files belong to the image
+
+The units this provider owns - `containerd.service`, `kubelet.service`,
+`provider-kubernetes-image-import.service`, `provider-kubernetes-unit-migrate.service`
+and the kubeadm drop-in `kubelet.service.d/10-kubeadm.conf` - are installed in
+`/usr/lib/systemd/system`, which is part of the booted image and is replaced
+wholesale by every A/B upgrade. They carry no `[Install]` section and are enabled by
+relative `../<unit>` symlinks the image ships in
+`/usr/lib/systemd/system/multi-user.target.wants/`, so `systemctl is-enabled` reports
+`static` and exits 0 (the exit code kubeadm's preflight reads).
+
+Earlier releases installed them into `/etc/systemd/system`. On Kairos that is a
+persistent bind mount which immucore refreshes from the image with `rsync --update`:
+a copy there is replaced only when the new build's mtime happens to be newer, it
+survives a rollback to an older OS, nothing ever deletes it, and `systemctl mask`
+fails while it exists. The first boot of a release with image-owned units therefore
+runs a one-time cleanup, `provider-kubernetes-unit-migrate.service`, before
+containerd, the import unit and the kubelet start.
+
+**The cleanup deletes only a copy that is byte-identical to something this project
+shipped at that exact path.** It works from a fixed list of paths and a frozen set
+of sha256 hashes - never a glob over the directory - and it walks each path
+component without following symlinks. Anything else is **kept**: an edited copy, a
+file we never shipped, a symlink (including a `mask` to `/dev/null`), a directory, a
+copy owned by another user or larger than 64 KiB, or any path it cannot check
+safely. Every kept file is named in the journal with a reason, and the unit then
+**fails**, so a copy that is still shadowing an image unit shows up in
+`systemctl --failed` instead of being silent. It also reports - without touching
+them - any remaining override of these units in
+`/etc/systemd/system{,.control,.attached}`, `/run/systemd/system` and
+`/usr/local/lib/systemd/system`. See
+[Troubleshooting](./troubleshooting.md#the-unit-file-migration-unit-migrate) and
+[Upgrades](./upgrades.md#unit-files-moved-into-the-image).
+
+What this does **not** change: it is not a privilege boundary either. Every unit
+directory that outranks `/usr/lib/systemd/system` is persistent and root-writable
+(see the bullet below), so anyone with root can still override any of these units,
+and the cleanup is deliberately conservative enough that it never deletes such an
+override. What it fixes is that *our* files are now image content, so a unit change
+takes effect on upgrade regardless of mtimes, a rollback runs the older image's own
+units, and anything else in `/etc/systemd` is a visible addition rather than an
+invisible stale copy.
 
 This is an integrity measure, **not a privilege boundary**. Kairos keeps all
 persistent state as bind mounts out of `/usr/local/.state`, so anyone who can write

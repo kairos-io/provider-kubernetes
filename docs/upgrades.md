@@ -205,6 +205,71 @@ on a kubeadm/Kairos control plane that means:
    `--initial-cluster-token`. Then move `<new-dir>/member` into `/var/lib/etcd/`.
 5. Put the manifests back and confirm with `kubectl get nodes`.
 
+## Unit files moved into the image
+
+Since this release the units the provider owns - `containerd.service`,
+`kubelet.service`, `provider-kubernetes-image-import.service` and the kubeadm
+drop-in `kubelet.service.d/10-kubeadm.conf` - are installed in
+`/usr/lib/systemd/system`, which is part of the image you boot. Earlier releases
+installed them into `/etc/systemd/system`, which Kairos keeps on the persistent
+partition and refreshes from the image with `rsync --update` (update-only, no
+delete). A copy there was replaced only when the new build's mtime happened to be
+newer, survived a rollback, and could never be removed by an upgrade.
+
+**The one-time cleanup.** The first boot of this release runs
+`provider-kubernetes-unit-migrate.service` before containerd, the import unit and
+the kubelet, removes the copies it recognizes, and reloads systemd so the same boot
+already runs the image's units. It logs one summary line:
+
+```sh
+sudo journalctl -b -u provider-kubernetes-unit-migrate.service
+# unit-migrate: summary outcome=migrated removed=7 kept=0 overrides=0 reloaded=true
+```
+
+`outcome=clean` on a fresh install, a recovery boot or any later boot means there
+was nothing to do. Check where a unit now comes from with:
+
+```sh
+sudo systemctl show -p FragmentPath,DropInPaths kubelet.service
+sudo systemctl cat kubelet.service
+```
+
+**Only byte-identical copies are deleted.** The cleanup knows the exact bytes this
+project shipped at each of those four paths and removes a file only if it matches
+one of them - nothing else, and never anything that is not on that fixed list. **A
+copy you edited is kept**, named in the journal
+(`unit-migrate: kept "/etc/systemd/system/kubelet.service" reason=modified`), and
+the unit **fails**, so `systemctl --failed` shows it. That is deliberate: the edited
+copy keeps overriding the image's unit on every boot, and only you can decide what
+to do with it. Convert the change into a drop-in and delete the full-unit copy:
+
+```sh
+sudo systemctl cat kubelet.service            # see what is in effect and from where
+sudo systemd-delta --type=extended /usr/lib/systemd/system
+sudo mkdir -p /etc/systemd/system/kubelet.service.d
+sudo vi /etc/systemd/system/kubelet.service.d/20-local.conf   # only the directives you change
+sudo rm /etc/systemd/system/kubelet.service
+sudo systemctl daemon-reload
+sudo systemctl restart provider-kubernetes-unit-migrate.service   # optional: clears the failure now
+```
+
+A drop-in in `/etc/systemd/system/<unit>.d/` is never touched by the cleanup and
+keeps working across upgrades - and it is the upstream-supported way to override a
+packaged unit.
+
+**Disabling a unit.** `systemctl disable` is a no-op for these units (they have no
+`[Install]` section, and `systemctl is-enabled` reports `static`). Use
+`systemctl mask <unit>` instead; unlike before, that now sticks, because no regular
+file sits at `/etc/systemd/system/<unit>` for the mask symlink to collide with. A
+mask is also left alone by the cleanup.
+
+**Rollback.** Booting an older image re-creates that image's own `/etc` copies and
+`.wants` links - immucore copies files that are missing - so the old OS runs exactly
+its own units, which is better than before. Coming back to a release with
+image-owned units removes them again and reloads. Each round trip costs one cleanup
+and one reload; an edited copy keeps being kept, and the unit keeps failing, until
+you convert it.
+
 ## Rollback
 
 **Bundled images after upgrading from an older release.** Images that bundle the
