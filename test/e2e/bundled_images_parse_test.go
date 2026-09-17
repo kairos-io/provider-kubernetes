@@ -386,7 +386,9 @@ func TestImportUnitState(t *testing.T) {
 		return p
 	}
 	const shape = "Type=oneshot\nRemainAfterExit=yes\n"
-	const base = shape + "LoadState=loaded\nUnitFileState=enabled\n"
+	// static, not enabled: since ADR-19 U2 the unit ships in /usr/lib with no
+	// [Install] section and a relative multi-user.target.wants link.
+	const base = shape + "LoadState=loaded\nUnitFileState=static\n"
 
 	done := show(base + "ActiveState=active\nSubState=exited\nResult=success\nConditionResult=yes\nConditionTimestampMonotonic=5170243\nExecMainStatus=0\n")
 	if !importUnitSettled(done) || len(importUnitViolations(done)) != 0 {
@@ -405,11 +407,14 @@ func TestImportUnitState(t *testing.T) {
 		{"import failed", base + "ActiveState=failed\nSubState=failed\nResult=exit-code\nConditionResult=yes\nConditionTimestampMonotonic=5170243\nExecMainStatus=1\n", true, "Result"},
 		{"masked", shape + "LoadState=masked\nUnitFileState=masked\nActiveState=inactive\nSubState=dead\nResult=success\nConditionResult=no\nConditionTimestampMonotonic=0\nExecMainStatus=0\n", true, "LoadState"},
 		{"disabled", shape + "LoadState=loaded\nUnitFileState=disabled\nActiveState=inactive\nSubState=dead\nResult=success\nConditionResult=no\nConditionTimestampMonotonic=0\nExecMainStatus=0\n", true, "UnitFileState"},
+		// "enabled" is a finding of its own now: it means an [Install] section and a
+		// persistent /etc/systemd/system link are back (ADR-19 U2).
+		{"enabled again", shape + "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\nSubState=exited\nResult=success\nConditionResult=yes\nConditionTimestampMonotonic=5170243\nExecMainStatus=0\n", true, "UnitFileState"},
 		// A changed unit shape is reported as such, and at once (settled), instead of
 		// waiting on or misreading states these checks do not model.
-		{"no longer a oneshot", "Type=simple\nRemainAfterExit=no\nLoadState=loaded\nUnitFileState=enabled\nActiveState=active\nSubState=running\nResult=success\nConditionResult=yes\nConditionTimestampMonotonic=5170243\nExecMainStatus=0\n", true, "assume Type=oneshot"},
-		{"no RemainAfterExit", "Type=oneshot\nRemainAfterExit=no\nLoadState=loaded\nUnitFileState=enabled\nActiveState=inactive\nSubState=dead\nResult=success\nConditionResult=yes\nConditionTimestampMonotonic=5170243\nExecMainStatus=0\n", true, "RemainAfterExit=\"no\""},
-		{"shape not reported", "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\nSubState=exited\nResult=success\nConditionResult=yes\nConditionTimestampMonotonic=5170243\nExecMainStatus=0\n", true, "Type=\"\""},
+		{"no longer a oneshot", "Type=simple\nRemainAfterExit=no\nLoadState=loaded\nUnitFileState=static\nActiveState=active\nSubState=running\nResult=success\nConditionResult=yes\nConditionTimestampMonotonic=5170243\nExecMainStatus=0\n", true, "assume Type=oneshot"},
+		{"no RemainAfterExit", "Type=oneshot\nRemainAfterExit=no\nLoadState=loaded\nUnitFileState=static\nActiveState=inactive\nSubState=dead\nResult=success\nConditionResult=yes\nConditionTimestampMonotonic=5170243\nExecMainStatus=0\n", true, "RemainAfterExit=\"no\""},
+		{"shape not reported", "LoadState=loaded\nUnitFileState=static\nActiveState=active\nSubState=exited\nResult=success\nConditionResult=yes\nConditionTimestampMonotonic=5170243\nExecMainStatus=0\n", true, "Type=\"\""},
 	}
 	for _, tc := range cases {
 		p := show(tc.props)

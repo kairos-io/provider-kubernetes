@@ -46,7 +46,8 @@ import (
 const (
 	// The image-only drop-ins (ADR-19 U1 decision 1). Under /usr/lib, so they are
 	// replaced by every A/B upgrade and apply to whichever unit fragment wins,
-	// including the persistent /etc copy every pre-U2 node boots from.
+	// including a persistent /etc copy an upgraded node still carries until the U2
+	// migration removes it.
 	containerdExecPathDropIn = "/usr/lib/systemd/system/containerd.service.d/50-provider-kubernetes-exec-path.conf"
 	kubeletExecPathDropIn    = "/usr/lib/systemd/system/kubelet.service.d/50-provider-kubernetes-exec-path.conf"
 
@@ -387,10 +388,11 @@ func assertDaemonExecPathLive(t *testing.T, nc *nodeContainer) {
 		t.Logf("U1-a %s: %q %d:%d %04o, %q", d.Path, st.Type, st.UID, st.GID, st.Mode, d.Directives)
 	}
 
-	// 2. systemd applies them, and reports the unit fragment they apply to. On a
-	//    pre-U2 image the fragment is the persistent /etc copy, which is exactly the
-	//    state every upgraded node is in: proving the /usr/lib drop-in still lands
-	//    there is the point of putting it under /usr/lib (S19-4).
+	// 2. systemd applies them, and reports the unit fragment they apply to. The
+	//    fragment is checked by U2 (image_owned_units.go), not here: a /usr/lib
+	//    drop-in applies to whichever fragment wins, which is the point of putting
+	//    it under /usr/lib and is what keeps U1 effective on an upgraded node whose
+	//    /etc copy has not been migrated away yet (S19-4).
 	for _, d := range execPathDropIns {
 		props, err := nc.unitProps(d.Unit, "Environment", "DropInPaths", "FragmentPath")
 		if err != nil {
