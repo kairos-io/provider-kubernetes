@@ -217,11 +217,18 @@ containerd, the import unit and the kubelet start.
 shipped at that exact path.** It works from a fixed list of paths and a frozen set
 of sha256 hashes - never a glob over the directory - and it walks each path
 component without following symlinks. Anything else is **kept**: an edited copy, a
-file we never shipped, a symlink (including a `mask` to `/dev/null`), a directory, a
-copy owned by another user or larger than 64 KiB, or any path it cannot check
-safely. Every kept file is named in the journal with a reason, and the unit then
-**fails**, so a copy that is still shadowing an image unit shows up in
-`systemctl --failed` instead of being silent. It also reports - without touching
+file we never shipped, a directory, a copy owned by another user or larger than
+64 KiB, or any path it cannot check safely. Every kept file is named in the journal
+with a reason, and the unit then **fails**, so a copy that is still shadowing an
+image unit shows up in `systemctl --failed` instead of being silent.
+
+A **symlink** at one of these paths is the one exception: it is left alone silently,
+whatever it points at. It is never removed, never followed, never counted as kept
+and never fails the unit, so `systemctl mask` keeps working. It appears only as an
+`override` line in the summary's `overrides=` count. That also means a symlink
+pointing at a unit file somewhere writable - not just a `mask` to `/dev/null` - is a
+shadow this cleanup reports rather than flags: check `systemctl cat` and
+`systemd-delta` if you need to know what a node is really running. It also reports - without touching
 them - any remaining override of these units in
 `/etc/systemd/system{,.control,.attached}`, `/run/systemd/system` and
 `/usr/local/lib/systemd/system`. See

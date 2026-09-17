@@ -126,22 +126,24 @@ sudo journalctl -b -u provider-kubernetes-unit-migrate.service
 | `outcome=` | Exit | Meaning |
 |------------|------|---------|
 | `clean` | 0 | Nothing to remove. A fresh install, a recovery boot, and every boot after the first one. |
-| `migrated` | 0 | Removed `removed=N` copies and reloaded systemd, so this boot already runs the image's units. |
+| `migrated` | 0 | Removed `removed=N` copies. If a unit file or drop-in was among them it also reloaded systemd (`reloaded=true`), so this boot already runs the image's units; removing only `.wants` links changes no loaded definition and needs no reload (`reloaded=false`). |
 | `kept-modified` | 1 | At least one copy is **not** what we shipped, so it was kept - and it is still overriding the image's unit. The unit fails, deliberately. |
 | `failed` | 1 | An I/O error, an unsafe path, or a failed reload. Anything already removed stays removed; the run is retried at the next boot. |
 
 Only a file that is **byte-identical** to something this project shipped at that
-exact path is deleted. Everything else is kept and named with a reason:
+exact path is deleted. Everything else is kept and named with a reason. A symlink is
+not in this table: whatever it points at, it is left silently, is not counted as
+kept, does not fail the unit, and shows up only in `overrides=`:
 
 | `reason=` | What it means |
 |-----------|---------------|
 | `modified` | The bytes differ from every version we shipped there - somebody edited it, or it came from a fork. |
-| `symlink` | A symlink, for example a `systemctl mask` to `/dev/null`. Left alone, silently. |
 | `not-regular` | A directory, FIFO, device or socket at that path. |
 | `owner` | Not owned by root. |
 | `size` | Larger than 64 KiB. |
 | `link-target` | A `.wants` link pointing somewhere other than the file we installed. |
 | `walk-unsafe` | A parent directory is a symlink or not a directory, so the subtree was skipped. |
+| `race` | The file changed between being checked and being removed, so it was left alone. These directories are writable only by root and nothing rewrites them this early in boot, so treat it as a sign that something else touched the file. |
 | `io` | The file could not be read or removed. |
 
 The migration never logs the content, size or hash of a file it keeps - a unit file
