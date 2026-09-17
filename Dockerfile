@@ -399,6 +399,20 @@ COPY --from=provider-builder /out/agent-provider-kubernetes /system/providers/ag
 # --- Static configuration ---------------------------------------------------
 # COPY from the build context keeps each file's mode from the checkout, which
 # depends on the umask it was made with (0664 under umask 002), so set 0644.
+#
+# --chmod also lands on any PARENT DIRECTORY the COPY has to create, and whether it
+# does is builder-dependent: on Docker 26.1 with BuildKit v0.32 the directories come
+# out 0755, while on Docker 29.6 with the containerd image store the same Dockerfile
+# leaves them 0644 (reported against f5e0ad0, reproduced there on BuildKit v0.31 and
+# v0.32 and on the docker-container driver; the layer tar itself records
+# drw-r--r--). A 0644 directory is not traversable by anything but root, and the
+# image's own gate rejects it. Create every directory these COPYs would otherwise
+# create, with an explicit mode, so the result cannot depend on the builder.
+RUN set -eux; \
+    for d in /etc/containerd /etc/systemd/system/kubelet.service.d; do \
+      mkdir -p "${d}"; chown 0:0 "${d}"; chmod 0755 "${d}"; \
+    done
+
 COPY --chmod=0644 containerd/config.toml                 /etc/containerd/config.toml
 COPY --chmod=0644 systemd/containerd.service             /etc/systemd/system/containerd.service
 COPY --chmod=0644 systemd/kubelet.service                /etc/systemd/system/kubelet.service
@@ -406,6 +420,20 @@ COPY --chmod=0644 systemd/kubelet.service.d/10-kubeadm.conf /etc/systemd/system/
 COPY --chmod=0644 sysctl/k8s.conf                        /etc/sysctl.d/k8s.conf
 COPY --chmod=0644 modules-load/k8s.conf                  /etc/modules-load.d/k8s.conf
 COPY --chmod=0644 systemd/provider-kubernetes-image-import.service /etc/systemd/system/provider-kubernetes-image-import.service
+
+# Fail the build, on whatever builder runs it, if any directory holding the files
+# above is not a root:root 0755 directory. scripts/verify-image-files.sh asserts the
+# same on the shipped image; this catches it in the build that caused it, before an
+# image reaches the release gate.
+RUN set -eu; \
+    bad=""; \
+    for d in /etc/containerd /etc/systemd/system /etc/systemd/system/kubelet.service.d \
+             /etc/sysctl.d /etc/modules-load.d; do \
+      got="$(stat -c '%F|%u|%g|%a' "${d}")"; \
+      [ "${got}" = "directory|0|0|755" ] || bad="${bad} ${d} is ${got},"; \
+    done; \
+    if [ -n "${bad}" ]; then echo "FATAL: want root:root 0755 directories;${bad%,} want directory|0|0|755" >&2; exit 1; fi; \
+    echo "static configuration directories: root:root 0755"
 
 # --- Daemon exec path (ADR-19 U1, F-UNITPATH) --------------------------------
 # Image-only drop-ins that give containerd and the kubelet -- and every helper,
@@ -442,6 +470,20 @@ RUN set -eux; \
              /usr/lib/containerd/image-verifier/bin /usr/lib/nri /usr/lib/nri/plugins; do \
       mkdir -p "$d"; chown 0:0 "$d"; chmod 0755 "$d"; \
     done
+
+# Same check for the directories this block adds: the drop-in directories above and
+# the two containerd executes from. A 0644 directory here would make systemd unable
+# to read the drop-in as anything but root, which is how the /etc ones were caught.
+RUN set -eu; \
+    bad=""; \
+    for d in /usr/lib/systemd/system/containerd.service.d /usr/lib/systemd/system/kubelet.service.d \
+             /usr/lib/containerd /usr/lib/containerd/image-verifier \
+             /usr/lib/containerd/image-verifier/bin /usr/lib/nri /usr/lib/nri/plugins; do \
+      got="$(stat -c '%F|%u|%g|%a' "${d}")"; \
+      [ "${got}" = "directory|0|0|755" ] || bad="${bad} ${d} is ${got},"; \
+    done; \
+    if [ -n "${bad}" ]; then echo "FATAL: want root:root 0755 directories;${bad%,} want directory|0|0|755" >&2; exit 1; fi; \
+    echo "daemon exec-path directories: root:root 0755"
 
 # --- Pre-bundled control-plane images (ADR-16, ADR-16-A2) -------------------
 # Embed the control-plane image tarballs and images.lock (fetched, verified and
