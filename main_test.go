@@ -120,3 +120,31 @@ func TestParseImportImagesArgs(t *testing.T) {
 		})
 	}
 }
+
+// TestParseMigrateUnitsArgs is ADR-19 U2 / S19-8: migrate-units takes no
+// arguments at all; any argument (a flag, a stray positional, anything) is a
+// usage error, unlike import-images which accepts --verify-only.
+func TestParseMigrateUnitsArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{"no args", nil, false},
+		{"empty slice", []string{}, false},
+		{"unknown flag", []string{"--verify-only"}, true},
+		{"bare positional", []string{"units"}, true},
+		{"extra positional", []string{"foo", "bar"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := parseMigrateUnitsArgs(c.args)
+			if c.wantErr && err == nil {
+				t.Fatalf("parseMigrateUnitsArgs(%v) = nil, want an error", c.args)
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("parseMigrateUnitsArgs(%v) unexpected error: %v", c.args, err)
+			}
+		})
+	}
+}
