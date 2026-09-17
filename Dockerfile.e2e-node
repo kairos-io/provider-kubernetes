@@ -38,8 +38,13 @@ ENV container=docker
 #    same set kind masks in its node image entrypoint.
 # 2. Ensure the journal goes to a writable location and systemd does not try to
 #    set up a separate cgroup hierarchy (we run cgroup v2 unified, delegated).
-# 3. Enable containerd + kubelet so systemd brings them up at boot (the base
-#    image already `systemctl enable`s them, but we re-assert idempotently).
+#
+# Nothing here enables containerd or the kubelet. The base image ships them in
+# /usr/lib/systemd/system with relative multi-user.target.wants links and no
+# [Install] section (ADR-19 U2), so `systemctl enable` would fail; the
+# `|| true` it used to carry would have hidden exactly the regression this
+# derived image has to prove absent, which is why S19-11 has the e2e node image
+# checked by scripts/verify-image-files.sh too.
 RUN set -eux; \
     # Units that must not run in a container.
     for unit in \
@@ -54,9 +59,7 @@ RUN set -eux; \
         systemctl mask "$unit" || true; \
     done; \
     # Do not let getty/console units spin.
-    systemctl mask getty.target console-getty.service || true; \
-    # Make sure containerd + kubelet start under systemd.
-    systemctl enable containerd.service kubelet.service || true
+    systemctl mask getty.target console-getty.service || true
 
 # The kubelet must not be gated on swap; kind passes failSwapOn=false via the
 # kubelet config. kubeadm in the supported window handles swap by default, but a privileged

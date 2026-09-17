@@ -2,7 +2,7 @@
 # `COPY . .` to run `go build`, so without this every build ships the whole repo
 # (including build/, which holds multi-GB VM ISOs and disks) to the daemon.
 # Only the Go module + the config dirs the Dockerfile explicitly COPYs
-# (containerd/, systemd/, usr-lib-systemd/, sysctl/, modules-load/) are needed.
+# (containerd/, usr-lib-systemd/, sysctl/, modules-load/) are needed.
 
 .git
 .github

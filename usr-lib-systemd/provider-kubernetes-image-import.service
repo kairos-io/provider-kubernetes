@@ -13,6 +13,10 @@
 # failed, which leaves this unit failed and visible. It ends with one
 # "image-import: summary outcome=..." line in the journal. The unit is not
 # RequiredBy kubelet: a refused image is pulled by tag on nodes with registry access.
+#
+# Installed under /usr/lib, not /etc/systemd (persistent on Kairos), and with no
+# [Install] section: see the header of containerd.service for the full reasoning
+# and the systemd citations (ADR-19 U2, F-UNITPATH).
 [Unit]
 Description=provider-kubernetes: import pre-bundled control-plane images into containerd
 Documentation=https://github.com/kairos-io/provider-kubernetes
@@ -27,6 +31,3 @@ RemainAfterExit=yes
 # subcommand itself also caps its work (5 minute deadline).
 TimeoutStartSec=360
 ExecStart=/system/providers/agent-provider-kubernetes import-images
-
-[Install]
-WantedBy=multi-user.target

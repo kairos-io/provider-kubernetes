@@ -409,17 +409,13 @@ COPY --from=provider-builder /out/agent-provider-kubernetes /system/providers/ag
 # image's own gate rejects it. Create every directory these COPYs would otherwise
 # create, with an explicit mode, so the result cannot depend on the builder.
 RUN set -eux; \
-    for d in /etc/containerd /etc/systemd/system/kubelet.service.d; do \
+    for d in /etc/containerd; do \
       mkdir -p "${d}"; chown 0:0 "${d}"; chmod 0755 "${d}"; \
     done
 
 COPY --chmod=0644 containerd/config.toml                 /etc/containerd/config.toml
-COPY --chmod=0644 systemd/containerd.service             /etc/systemd/system/containerd.service
-COPY --chmod=0644 systemd/kubelet.service                /etc/systemd/system/kubelet.service
-COPY --chmod=0644 systemd/kubelet.service.d/10-kubeadm.conf /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
 COPY --chmod=0644 sysctl/k8s.conf                        /etc/sysctl.d/k8s.conf
 COPY --chmod=0644 modules-load/k8s.conf                  /etc/modules-load.d/k8s.conf
-COPY --chmod=0644 systemd/provider-kubernetes-image-import.service /etc/systemd/system/provider-kubernetes-image-import.service
 
 # Fail the build, on whatever builder runs it, if any directory holding the files
 # above is not a root:root 0755 directory. scripts/verify-image-files.sh asserts the
@@ -427,13 +423,99 @@ COPY --chmod=0644 systemd/provider-kubernetes-image-import.service /etc/systemd/
 # image reaches the release gate.
 RUN set -eu; \
     bad=""; \
-    for d in /etc/containerd /etc/systemd/system /etc/systemd/system/kubelet.service.d \
-             /etc/sysctl.d /etc/modules-load.d; do \
+    for d in /etc/containerd /etc/sysctl.d /etc/modules-load.d; do \
       got="$(stat -c '%F|%u|%g|%a' "${d}")"; \
       [ "${got}" = "directory|0|0|755" ] || bad="${bad} ${d} is ${got},"; \
     done; \
     if [ -n "${bad}" ]; then echo "FATAL: want root:root 0755 directories;${bad%,} want directory|0|0|755" >&2; exit 1; fi; \
     echo "static configuration directories: root:root 0755"
+
+# --- systemd units (ADR-19 U2, F-UNITPATH) -----------------------------------
+# Every unit this provider owns lives in /usr/lib/systemd/system, which is part of
+# the booted image and is replaced wholesale by each A/B upgrade. NOT in
+# /etc/systemd/system: on Kairos that is a persistent bind immucore refreshes with
+# `rsync -aquAX` (update-only, no --delete), which means a copy there is replaced
+# only when the new build's mtime happens to be newer, survives a rollback to an
+# older OS, can never be removed by an upgrade, and makes `systemctl mask` fail.
+# Moving the units here makes unit content a property of the booted image;
+# provider-kubernetes-unit-migrate.service removes the copies earlier releases
+# left behind on existing nodes.
+#
+# None of these units has an [Install] section, so `systemctl is-enabled` reports
+# "static" and exits 0 (systemd v260.2 src/shared/install.c:62-69,3197-3203 and
+# src/systemctl/systemctl-is-enabled.c:140-154), which is what kubeadm's preflight
+# ServiceCheck reads, and `systemctl disable` cannot leave an invisible persistent
+# override behind. They are enabled by the relative links created below.
+#
+# The directories are created explicitly with owner and mode instead of being left
+# to the COPYs: --chmod also lands on any parent directory a COPY has to create,
+# and whether it does is builder-dependent (0755 on Docker 26.1 with BuildKit v0.32,
+# 0644 on Docker 29.6 with the containerd image store), and a 0644 directory is
+# traversable only by root -- systemd would not be able to read the units.
+RUN set -eux; \
+    for d in /usr/lib/systemd/system \
+             /usr/lib/systemd/system/kubelet.service.d \
+             /usr/lib/systemd/system/multi-user.target.wants; do \
+      mkdir -p "${d}"; chown 0:0 "${d}"; chmod 0755 "${d}"; \
+    done
+
+COPY --chmod=0644 usr-lib-systemd/containerd.service                       /usr/lib/systemd/system/containerd.service
+COPY --chmod=0644 usr-lib-systemd/kubelet.service                          /usr/lib/systemd/system/kubelet.service
+COPY --chmod=0644 usr-lib-systemd/provider-kubernetes-image-import.service /usr/lib/systemd/system/provider-kubernetes-image-import.service
+COPY --chmod=0644 usr-lib-systemd/provider-kubernetes-unit-migrate.service /usr/lib/systemd/system/provider-kubernetes-unit-migrate.service
+COPY --chmod=0644 usr-lib-systemd/kubelet.service.d/10-kubeadm.conf        /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf
+
+# Enable the four units the only way an image can, and the way systemd documents:
+# a symlink in multi-user.target.wants NAMED after the unit. systemd adds the
+# dependency from the ENTRY name and reads the target only to compare basenames
+# (v260.2 src/core/load-dropin.c:62-73,75-98,100), so the target is deliberately
+# RELATIVE (`../<unit>`): it stays correct inside an image, a sysext hierarchy or a
+# chroot, and it can never point into a persistent directory. `ln -sfn` keeps the
+# step idempotent if a base image ever ships one of these names.
+RUN set -eux; \
+    for u in containerd.service kubelet.service \
+             provider-kubernetes-image-import.service \
+             provider-kubernetes-unit-migrate.service; do \
+      ln -sfn "../${u}" "/usr/lib/systemd/system/multi-user.target.wants/${u}"; \
+    done
+
+# Fail the build if the layout above is not exactly what U2 promises: root:root
+# 0755 directories, no [Install] section in any unit (which would make
+# `systemctl is-enabled` report "disabled" and `systemctl disable` stick a
+# persistent override into /etc), a relative `../<unit>` symlink for each unit, and
+# no provider-owned name anywhere under /etc/systemd. scripts/verify-image-files.sh
+# asserts the same on the shipped image, for the release image and the e2e node
+# image (S19-11); this catches it in the build that caused it.
+RUN set -eu; \
+    bad=""; \
+    for d in /usr/lib/systemd/system /usr/lib/systemd/system/kubelet.service.d \
+             /usr/lib/systemd/system/multi-user.target.wants; do \
+      got="$(stat -c '%F|%u|%g|%a' "${d}")"; \
+      [ "${got}" = "directory|0|0|755" ] || bad="${bad} ${d} is ${got},"; \
+    done; \
+    for u in containerd.service kubelet.service \
+             provider-kubernetes-image-import.service \
+             provider-kubernetes-unit-migrate.service; do \
+      l="/usr/lib/systemd/system/multi-user.target.wants/${u}"; \
+      got="$(stat -c '%F' "${l}" 2>/dev/null || echo missing)"; \
+      [ "${got}" = "symbolic link" ] || bad="${bad} ${l} is ${got}, want a symbolic link,"; \
+      got="$(readlink "${l}" 2>/dev/null || echo missing)"; \
+      [ "${got}" = "../${u}" ] || bad="${bad} ${l} points at ${got} not ../${u},"; \
+      if grep -q '^\[Install\]' "/usr/lib/systemd/system/${u}"; then \
+        bad="${bad} /usr/lib/systemd/system/${u} still has an [Install] section,"; \
+      fi; \
+    done; \
+    if [ -d /etc/systemd ]; then \
+      stray="$(find /etc/systemd -maxdepth 4 \
+        \( -name containerd.service -o -name kubelet.service \
+           -o -name 'provider-kubernetes-*.service' -o -name kubelet.service.d \) -print)"; \
+      if [ -n "${stray}" ]; then \
+        printf '%s\n' "${stray}" >&2; \
+        bad="${bad} the paths above are provider-owned names under /etc/systemd,"; \
+      fi; \
+    fi; \
+    if [ -n "${bad}" ]; then echo "FATAL: image-owned unit layout (ADR-19 U2);${bad%,}" >&2; exit 1; fi; \
+    echo "image-owned units: /usr/lib/systemd/system, static, linked with ../<unit>, nothing under /etc/systemd"
 
 # --- Daemon exec path (ADR-19 U1, F-UNITPATH) --------------------------------
 # Image-only drop-ins that give containerd and the kubelet -- and every helper,
@@ -515,8 +597,14 @@ RUN set -eux; \
     grep -q "sandbox_image = \"${pause}\"" /etc/containerd/config.toml; \
     echo "pinned containerd sandbox_image to ${pause}"
 
-# --- Boot-time setup: enable services; modules and sysctls load via /etc -----
-RUN systemctl enable containerd.service kubelet.service provider-kubernetes-image-import.service
+# --- Boot-time setup --------------------------------------------------------
+# There is no `systemctl enable` here any more (ADR-19 U2): it writes ABSOLUTE
+# symlinks into the persistent /etc/systemd/system (systemd v260.2
+# src/shared/install.c:572-601), which is the trap this release removes, and it
+# needs an [Install] section, which these units deliberately no longer have. The
+# units are enabled by the relative multi-user.target.wants links created with
+# them above. Modules and sysctls still load from /etc/modules-load.d and
+# /etc/sysctl.d, which are per-boot overlay content on Kairos, not persistent.
 
 # Record the bundled Kubernetes version on the image (OS_VERSION style banner
 # kept short; the provider also detects/enforces the version at runtime).
