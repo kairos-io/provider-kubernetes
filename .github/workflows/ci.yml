@@ -449,6 +449,17 @@ jobs:
             BASE_IMAGE=kairos-kubeadm:${{ steps.ver.outputs.k8s }} \
             E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:${{ steps.ver.outputs.k8s }}
 
+      - name: Verify the e2e node image still owns its units (ADR-19 U2, S19-11)
+        run: |
+          set -euo pipefail
+          # The node image FROM-derives the release image, so anything it does to
+          # the units reaches the e2e run but not the image job's gate. It used to
+          # re-run `systemctl enable ... || true`, which would have written absolute
+          # links back into the persistent /etc/systemd/system and hidden the
+          # failure. Same checks as the image job, restricted to the unit layout.
+          bash scripts/verify-image-files.sh \
+            "kairos-kubeadm-e2e-node:${{ steps.ver.outputs.k8s }}" --units-only
+
       - name: Run e2e suite
         run: |
           E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:${{ steps.ver.outputs.k8s }} \

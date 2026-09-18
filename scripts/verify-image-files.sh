@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify-image-files.sh <image>
+# verify-image-files.sh <image> [--units-only]
 #
 # Verify the owner and mode of the files the Dockerfile installs into a built
 # provider-kubernetes image. tar run as root keeps the owner stored in an archive
@@ -45,6 +45,26 @@
 #       reachable from a persistent directory.
 # The shim and runc themselves are in (2), so they are also proven to be root:root
 # 0755 regular files at the absolute paths (7) names.
+# Finally it asserts the ADR-19 U2 (F-UNITPATH) unit layout, which is the whole
+# content of --units-only:
+#  (10) no provider-owned unit name -- a fragment, a `<unit>.d/` drop-in directory
+#       or a `.wants` link -- exists under /etc/systemd/system, .control,
+#       .attached or /usr/local/lib/systemd/system. All of those outrank
+#       /usr/lib/systemd/system in systemd's search path and all of them are
+#       persistent on Kairos, so one file left there would silently keep
+#       overriding the image's unit across every future upgrade;
+#  (11) each unit and the kubeadm drop-in under /usr/lib/systemd/system is a
+#       root:root 0644 regular file, byte-identical to the build context, with no
+#       [Install] section (an [Install] section makes `systemctl is-enabled`
+#       report "disabled" instead of "static" and lets `systemctl disable` write a
+#       persistent override into /etc);
+#  (12) each unit is enabled by a symlink in
+#       /usr/lib/systemd/system/multi-user.target.wants named after the unit whose
+#       target is exactly `../<unit>` -- relative, so it can never point out of the
+#       image -- and the one-time migration unit is among them.
+# S19-11 requires (10)-(12) on the e2e node image as well, which FROM-derives the
+# release image and used to re-run `systemctl enable ... || true`: pass
+# --units-only to check just those on a derived image.
 # CI runs it on every supported minor and the release workflow runs it before
 # `docker push`, so both gates run the same checks.
 #
@@ -61,7 +81,6 @@ readonly DIRS=(
   /opt/cni
   /opt/cni/bin
   /etc/containerd
-  /etc/systemd/system/kubelet.service.d
   /usr/lib/systemd/system/containerd.service.d
   /usr/lib/systemd/system/kubelet.service.d
   /usr/lib/containerd
@@ -85,13 +104,11 @@ readonly BINARIES=(
   /usr/bin/runc
   /system/providers/agent-provider-kubernetes
 )
-# Configuration files the Dockerfile installs.
+# Configuration files the Dockerfile installs. The unit files and the kubeadm
+# drop-in are NOT here: check (11) covers them, so that --units-only can run the
+# same assertions on a derived image.
 readonly CONFIGS=(
   /etc/containerd/config.toml
-  /etc/systemd/system/containerd.service
-  /etc/systemd/system/kubelet.service
-  /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-  /etc/systemd/system/provider-kubernetes-image-import.service
   /etc/sysctl.d/k8s.conf
   /etc/modules-load.d/k8s.conf
   /usr/lib/systemd/system/containerd.service.d/50-provider-kubernetes-exec-path.conf
@@ -181,13 +198,67 @@ readonly EMPTY_EXEC_DIRS=(
   /usr/lib/nri/plugins
 )
 
-if [ "$#" -ne 1 ]; then
-  echo "usage: $0 <image>" >&2
-  exit 2
-fi
+# (10)-(12) ADR-19 U2: the units are a property of the booted image.
+# The directory that holds them, the one the kubeadm drop-in lives in, and the
+# .wants directory the enablement links live in.
+readonly UNIT_DIR=/usr/lib/systemd/system
+readonly UNIT_DROPIN_DIR=/usr/lib/systemd/system/kubelet.service.d
+readonly WANTS_DIR=/usr/lib/systemd/system/multi-user.target.wants
+# Every unit this project owns. Each must be a static fragment under UNIT_DIR and
+# be linked from WANTS_DIR by a relative `../<unit>` symlink. The migration unit is
+# in the list, so "the migrate unit is present and linked" is not a separate check.
+readonly IMAGE_UNITS=(
+  containerd.service
+  kubelet.service
+  provider-kubernetes-image-import.service
+  provider-kubernetes-unit-migrate.service
+)
+# "<path in the image>|<path in the build context>" for the units and the drop-in:
+# same rule as EXACT_COPIES, kept separate so --units-only checks them too.
+readonly UNIT_EXACT_COPIES=(
+  "/usr/lib/systemd/system/containerd.service|usr-lib-systemd/containerd.service"
+  "/usr/lib/systemd/system/kubelet.service|usr-lib-systemd/kubelet.service"
+  "/usr/lib/systemd/system/provider-kubernetes-image-import.service|usr-lib-systemd/provider-kubernetes-image-import.service"
+  "/usr/lib/systemd/system/provider-kubernetes-unit-migrate.service|usr-lib-systemd/provider-kubernetes-unit-migrate.service"
+  "/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf|usr-lib-systemd/kubelet.service.d/10-kubeadm.conf"
+)
+# The unit search directories that OUTRANK /usr/lib/systemd/system and are
+# persistent on Kairos (path-lookup.c:513-532; /etc/systemd and /usr/local are both
+# binds from /usr/local/.state). Nothing provider-owned may ship in any of them.
+# Expressed as the two roots that always exist plus the -path patterns below, so
+# one find call covers all of them without failing on an absent directory.
+readonly PERSISTENT_UNIT_ROOTS=(/etc/systemd /usr/local)
+readonly PERSISTENT_UNIT_PATHS=(
+  '*/systemd/system/*'
+  '*/systemd/system.control/*'
+  '*/systemd/system.attached/*'
+)
+# The names that must not appear there: the fragments and `.wants` links (same
+# names) plus the per-unit drop-in directories.
+readonly FORBIDDEN_UNIT_NAMES=(
+  containerd.service
+  kubelet.service
+  'provider-kubernetes-*.service'
+  containerd.service.d
+  kubelet.service.d
+  'provider-kubernetes-*.service.d'
+)
+
+MODE=full
+case "$#" in
+  1) : ;;
+  2)
+    case "$2" in
+      --units-only) MODE=units ;;
+      *) echo "usage: $0 <image> [--units-only] (got '$2')" >&2; exit 2 ;;
+    esac
+    ;;
+  *) echo "usage: $0 <image> [--units-only]" >&2; exit 2 ;;
+esac
+readonly MODE
 IMG="$1"
 case "$IMG" in
-  "" | -*) echo "usage: $0 <image> (got an empty or option-like argument '${IMG}')" >&2; exit 2 ;;
+  "" | -*) echo "usage: $0 <image> [--units-only] (got an empty or option-like argument '${IMG}')" >&2; exit 2 ;;
 esac
 
 fail() { echo "$*" >&2; exit 1; }
@@ -220,6 +291,149 @@ check_exact() {
     echo "ok: ${path} ${ftype} ${uid}:${gid} ${mode}"
   done <<< "$out"
 }
+
+# The build context lives one directory above this script, which is how CI, the
+# release workflow and the e2e job all invoke it. Hashing both sides with the
+# IMAGE's own sha256sum (the source over stdin) keeps the host requirement at bash
+# + docker and compares bytes, not text, so a lost or added trailing newline is a
+# failure.
+REPO_ROOT="."
+case "${BASH_SOURCE[0]}" in
+  */*) REPO_ROOT="${BASH_SOURCE[0]%/*}/.." ;;
+esac
+readonly REPO_ROOT
+
+image_sha256() {
+  local out
+  out="$(in_image /usr/bin/sha256sum -- "$1")" || return 1
+  printf '%s\n' "${out%% *}"
+}
+# source_sha256 reads the file to hash on stdin, so the build-context file is never
+# named inside the container and `docker run -i` streams it in.
+source_sha256() {
+  local out
+  out="$(docker run --rm -i --pull never --network none --entrypoint /usr/bin/sha256sum "$IMG" -)" || return 1
+  printf '%s\n' "${out%% *}"
+}
+
+# check_exact_copies <pair>...: each "<path in the image>|<path in the context>"
+# must be byte-identical on both sides.
+check_exact_copies() {
+  local pair in_img src want got
+  for pair in "$@"; do
+    in_img="${pair%%|*}"
+    src="${REPO_ROOT}/${pair#*|}"
+    [ -f "$src" ] || fail "${src} is missing from the build context, so ${in_img} cannot be checked against it"
+    want="$(source_sha256 < "$src")" || fail "could not hash ${src} with the image's sha256sum"
+    got="$(image_sha256 "$in_img")" || fail "could not hash ${in_img} in the image"
+    [ "$want" = "$got" ] \
+      || fail "${in_img} is not byte-identical to ${src} (image sha256 ${got}, source sha256 ${want})"
+    echo "ok: ${in_img} is byte-identical to ${src} (sha256 ${got})"
+  done
+}
+
+# Compare trimmed, uncommented lines: the files are indented, and a value may not
+# carry a trailing comment (the Go and shell sandbox_image parsers refuse one too).
+# LINES is filled by read_lines and consumed right after each call.
+LINES=()
+read_lines() {
+  local raw line
+  raw="$(in_image /usr/bin/cat -- "$1")" || fail "could not read $1 from the image"
+  LINES=()
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in "" | "#"*) continue ;; esac
+    LINES+=("$line")
+  done <<< "$raw"
+}
+# want_once <file> <wanted line>: exactly one uncommented occurrence in LINES.
+want_once() {
+  local file="$1" want="$2" line n=0
+  for line in "${LINES[@]}"; do
+    [ "$line" = "$want" ] && n=$((n + 1))
+  done
+  [ "$n" -eq 1 ] || fail "${file} has ${n} lines '${want}', want exactly 1 (ADR-19 U1)"
+  echo "ok: ${file} has exactly one '${want}'"
+}
+
+# (10)-(12) The ADR-19 U2 unit layout. This is the whole of --units-only, so it
+# repeats the owner/mode and byte-identity rules for the units rather than leaning
+# on the arrays the full run checks.
+check_image_owned_units() {
+  local unit path line target bad n
+  # (11a) the directories the units and their links live in.
+  check_exact directory 755 "$UNIT_DIR" "$UNIT_DROPIN_DIR" "$WANTS_DIR"
+
+  # (11b) the units and the kubeadm drop-in: root:root 0644 regular files, and
+  # byte-identical to the build context.
+  local unit_paths=()
+  for unit in "${IMAGE_UNITS[@]}"; do
+    unit_paths+=("${UNIT_DIR}/${unit}")
+  done
+  unit_paths+=("${UNIT_DROPIN_DIR}/10-kubeadm.conf")
+  check_exact "regular file" 644 "${unit_paths[@]}"
+  check_exact_copies "${UNIT_EXACT_COPIES[@]}"
+
+  # (11c) no [Install] section: with one, `systemctl is-enabled` reports "disabled"
+  # rather than "static" (install.c:3197-3203), kubeadm's preflight warns, and
+  # `systemctl disable` writes a persistent override into /etc.
+  for path in "${unit_paths[@]}"; do
+    read_lines "$path"
+    for line in "${LINES[@]}"; do
+      [ "$line" != "[Install]" ] \
+        || fail "${path} has an [Install] section; the units are enabled by the ${WANTS_DIR} links and must report is-enabled 'static' (ADR-19 U2)"
+    done
+    echo "ok: ${path} has no [Install] section"
+  done
+
+  # (12) each unit is linked from the .wants directory by a RELATIVE ../<unit>
+  # symlink. systemd takes the dependency from the entry NAME and only compares the
+  # target's basename with it (load-dropin.c:62-73,75-98,100 at v260.2), so the
+  # relative form is both sufficient and unable to point out of the image.
+  local links=()
+  for unit in "${IMAGE_UNITS[@]}"; do
+    links+=("${WANTS_DIR}/${unit}")
+  done
+  check_exact "symbolic link" 777 "${links[@]}"
+  local targets
+  targets="$(in_image /usr/bin/readlink -- "${links[@]}")" \
+    || fail "readlink failed for one of: ${links[*]}"
+  n=0
+  while IFS= read -r target; do
+    unit="${IMAGE_UNITS[$n]}"
+    [ "$target" = "../${unit}" ] \
+      || fail "${WANTS_DIR}/${unit} points at '${target}', want exactly '../${unit}' (ADR-19 U2)"
+    echo "ok: ${WANTS_DIR}/${unit} -> ../${unit}"
+    n=$((n + 1))
+  done <<< "$targets"
+  [ "$n" -eq "${#IMAGE_UNITS[@]}" ] \
+    || fail "readlink reported ${n} targets for ${#IMAGE_UNITS[@]} links"
+
+  # (10) nothing provider-owned in a persistent search directory that outranks
+  # /usr/lib/systemd/system. One find over the two roots that always exist,
+  # restricted by -path to the unit directories, so an absent
+  # /usr/local/lib/systemd/system is simply no match rather than an error.
+  local expr=()
+  for path in "${PERSISTENT_UNIT_PATHS[@]}"; do
+    if [ "${#expr[@]}" -eq 0 ]; then expr+=(-path "$path"); else expr+=(-o -path "$path"); fi
+  done
+  local names=()
+  for path in "${FORBIDDEN_UNIT_NAMES[@]}"; do
+    if [ "${#names[@]}" -eq 0 ]; then names+=(-name "$path"); else names+=(-o -name "$path"); fi
+  done
+  bad="$(in_image /usr/bin/find "${PERSISTENT_UNIT_ROOTS[@]}" -maxdepth 6 \
+    \( "${expr[@]}" \) \( "${names[@]}" \) -print)" \
+    || fail "find failed in ${PERSISTENT_UNIT_ROOTS[*]}"
+  [ -z "$bad" ] || { printf '%s\n' "$bad" >&2; fail "the entries above are provider-owned unit names in a PERSISTENT systemd search directory that outranks ${UNIT_DIR}; on Kairos they would keep overriding the image's units across every upgrade (ADR-19 U2, S19-11)"; }
+  echo "ok: no provider-owned unit name under ${PERSISTENT_UNIT_ROOTS[*]} in a systemd unit directory"
+}
+
+check_image_owned_units
+if [ "$MODE" = units ]; then
+  echo "ok: ${IMG} passes the ADR-19 U2 unit checks (--units-only)"
+  exit 0
+fi
 
 # (1)-(3)
 check_exact directory 755 "${DIRS[@]}"
@@ -259,65 +473,10 @@ bad="$(in_image /usr/bin/find "${TREE_ROOTS[@]}" ! -type l \( ! -user 0 -o -perm
 [ -z "$bad" ] || { printf '%s\n' "$bad" >&2; fail "the entries above are owned by a user other than root or writable by group or others"; }
 echo "ok: nothing under ${TREE_ROOTS[*]} is owned by a user other than root or writable by group or others"
 
-# (6) The build context lives one directory above this script, which is how both CI
-# and the release workflow invoke it. Hashing both sides with the image's own
-# sha256sum (the source over stdin) keeps the host requirement at bash + docker and
-# compares bytes, not text, so a lost or added trailing newline is a failure.
-REPO_ROOT="."
-case "${BASH_SOURCE[0]}" in
-  */*) REPO_ROOT="${BASH_SOURCE[0]%/*}/.." ;;
-esac
-readonly REPO_ROOT
+# (6) Byte-identity of the U1 drop-ins, with the same helper the unit check uses.
+check_exact_copies "${EXACT_COPIES[@]}"
 
-image_sha256() {
-  local out
-  out="$(in_image /usr/bin/sha256sum -- "$1")" || return 1
-  printf '%s\n' "${out%% *}"
-}
-# source_sha256 reads the file to hash on stdin, so the build-context file is never
-# named inside the container and `docker run -i` streams it in.
-source_sha256() {
-  local out
-  out="$(docker run --rm -i --pull never --network none --entrypoint /usr/bin/sha256sum "$IMG" -)" || return 1
-  printf '%s\n' "${out%% *}"
-}
-
-for pair in "${EXACT_COPIES[@]}"; do
-  in_img="${pair%%|*}"
-  src="${REPO_ROOT}/${pair#*|}"
-  [ -f "$src" ] || fail "${src} is missing from the build context, so ${in_img} cannot be checked against it"
-  want="$(source_sha256 < "$src")" || fail "could not hash ${src} with the image's sha256sum"
-  got="$(image_sha256 "$in_img")" || fail "could not hash ${in_img} in the image"
-  [ "$want" = "$got" ] \
-    || fail "${in_img} is not byte-identical to ${src} (image sha256 ${got}, source sha256 ${want})"
-  echo "ok: ${in_img} is byte-identical to ${src} (sha256 ${got})"
-done
-
-# (7) Compare trimmed, uncommented lines: the files are indented, and a value may not
-# carry a trailing comment (the Go and shell sandbox_image parsers refuse one too).
-# LINES is filled by read_lines and consumed right after each call.
-LINES=()
-read_lines() {
-  local raw line
-  raw="$(in_image /usr/bin/cat -- "$1")" || fail "could not read $1 from the image"
-  LINES=()
-  while IFS= read -r line; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    case "$line" in "" | "#"*) continue ;; esac
-    LINES+=("$line")
-  done <<< "$raw"
-}
-# want_once <file> <wanted line>: exactly one uncommented occurrence in LINES.
-want_once() {
-  local file="$1" want="$2" line n=0
-  for line in "${LINES[@]}"; do
-    [ "$line" = "$want" ] && n=$((n + 1))
-  done
-  [ "$n" -eq 1 ] || fail "${file} has ${n} lines '${want}', want exactly 1 (ADR-19 U1)"
-  echo "ok: ${file} has exactly one '${want}'"
-}
-
+# (7) The containerd config lines, compared as trimmed, uncommented lines.
 read_lines "$CONTAINERD_CONFIG"
 for want in "${CONTAINERD_CONFIG_LINES[@]}"; do
   want_once "$CONTAINERD_CONFIG" "$want"

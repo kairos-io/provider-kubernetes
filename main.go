@@ -33,6 +33,7 @@ import (
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 	"github.com/kairos-io/provider-kubernetes/internal/provider"
 	"github.com/kairos-io/provider-kubernetes/internal/reset"
+	"github.com/kairos-io/provider-kubernetes/internal/unitmigrate"
 	"github.com/kairos-io/provider-kubernetes/version"
 )
 
@@ -87,6 +88,8 @@ func main() {
 			os.Exit(runMintJoin(args[1:]))
 		case "import-images":
 			os.Exit(runImportImages(args[1:]))
+		case "migrate-units":
+			os.Exit(runMigrateUnits(args[1:]))
 		case "version", "--version", "-v":
 			fmt.Println(version.Version)
 			return
@@ -302,6 +305,42 @@ func runImportImages(args []string) int {
 	return imageimport.ExitCode(res.Outcome)
 }
 
+// parseMigrateUnitsArgs validates migrate-units' argv per ADR-19 U2 / S19-8:
+// no arguments at all (the migrate unit must not read cloud-config, env, the
+// bus or the network before or through this command). It is a pure function
+// so the CLI's usage contract is unit-testable without running Migrate. Any
+// argument is a usage error.
+func parseMigrateUnitsArgs(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: agent-provider-kubernetes migrate-units")
+	}
+	return nil
+}
+
+// runMigrateUnits removes the stale /etc/systemd/system copies of
+// containerd.service, kubelet.service, provider-kubernetes-image-import.service
+// and the kubelet 10-kubeadm.conf drop-in (ADR-19 U2 decision 3), but only
+// when each is byte-identical to a blob this project has ever shipped at that
+// path, and reloads systemd if a fragment or drop-in was removed. Invoked at
+// boot by the image-only provider-kubernetes-unit-migrate.service oneshot,
+// ordered before containerd, the image-import unit and kubelet.
+func runMigrateUnits(args []string) int {
+	if err := parseMigrateUnitsArgs(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		printUsage(os.Stderr)
+		return 2
+	}
+	// Bounded so the boot path can never hang (#4099-1); ADR-19 S19-7's overall
+	// deadline is 20s.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	logrus.Infof("provider-kubernetes migrate-units %s", version.Version)
+	// Migrate's summary line carries the outcome and must stay the last line
+	// this command logs (CI and the e2e tests read it as such).
+	res := unitmigrate.Migrate(ctx, kubeadm.SystemctlRunner())
+	return unitmigrate.ExitCode(res.Outcome)
+}
+
 func printUsage(w *os.File) {
 	_, _ = fmt.Fprintf(w, `agent-provider-kubernetes %s
 
@@ -312,6 +351,7 @@ Usage:
   agent-provider-kubernetes mint-join [...] mint join material on a CP and print a join cloud-config
   agent-provider-kubernetes import-images [--verify-only]
                                            import (or verify) the bundled control-plane image tarballs
+  agent-provider-kubernetes migrate-units   remove stale /etc/systemd/system unit copies (ADR-19 U2)
   agent-provider-kubernetes version         print the build version
 
 mint-join flags:

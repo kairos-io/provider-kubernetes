@@ -399,11 +399,17 @@ func importUnitShapeViolations(p map[string]string) []string {
 // it will not leave on its own, so the checks neither race a running import nor
 // wait for a unit that will never start: finished (active or failed), inactive
 // with its conditions evaluated, or not startable at all (not loaded, or not
-// enabled). A unit that is not a oneshot with RemainAfterExit counts as settled so
-// importUnitViolations reports that at once.
+// wired into the boot). A unit that is not a oneshot with RemainAfterExit counts
+// as settled so importUnitViolations reports that at once.
+//
+// The wired-in state is "static", not "enabled": since ADR-19 U2 the unit ships in
+// /usr/lib/systemd/system with no [Install] section and a relative link in
+// /usr/lib/systemd/system/multi-user.target.wants, which systemd reports as static
+// (src/shared/install.c:3197-3203 at v260.2). "enabled" would mean an [Install]
+// section and a persistent /etc link are back.
 func importUnitSettled(p map[string]string) bool {
 	switch {
-	case p["LoadState"] != "loaded", p["UnitFileState"] != "enabled":
+	case p["LoadState"] != "loaded", p["UnitFileState"] != importUnitFileState:
 		return true
 	case len(importUnitShapeViolations(p)) > 0:
 		return true
@@ -416,18 +422,22 @@ func importUnitSettled(p map[string]string) bool {
 	return false
 }
 
+// importUnitFileState is the UnitFileState an image-owned, statically linked unit
+// has (ADR-19 U2). See importUnitSettled.
+const importUnitFileState = "static"
+
 // importUnitViolations lists how a settled import unit differs from a completed,
 // successful run. It assumes, and first checks, Type=oneshot with
-// RemainAfterExit=yes and an enabled unit: then success is loaded, enabled,
-// active/exited, Result=success, conditions met (a unit skipped by a condition
-// also reports Result=success) and main process exit status 0. Exit status 0
-// alone does not prove images were imported (outcome=not-bundled also exits 0);
-// the callers check the summary line for that.
+// RemainAfterExit=yes and a statically linked unit: then success is loaded,
+// static, active/exited, Result=success, conditions met (a unit skipped by a
+// condition also reports Result=success) and main process exit status 0. Exit
+// status 0 alone does not prove images were imported (outcome=not-bundled also
+// exits 0); the callers check the summary line for that.
 func importUnitViolations(p map[string]string) []string {
 	v := importUnitShapeViolations(p)
 	want := []struct{ key, value string }{
 		{"LoadState", "loaded"},
-		{"UnitFileState", "enabled"},
+		{"UnitFileState", importUnitFileState},
 		{"ActiveState", "active"},
 		{"SubState", "exited"},
 		{"Result", "success"},

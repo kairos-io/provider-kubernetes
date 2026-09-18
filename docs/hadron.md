@@ -38,6 +38,33 @@ The provider executes `kubeadm`, `kubectl`, `ctr`, `systemctl` and `etcdctl` onl
 by their `/usr/bin` paths (see [Security model](./security.md#exec-hygiene)), so an
 image derived from this one must keep them there.
 
+The systemd units the provider owns - `containerd.service`, `kubelet.service`,
+`provider-kubernetes-image-import.service`, `provider-kubernetes-unit-migrate.service`
+and `kubelet.service.d/10-kubeadm.conf` - are installed in
+`/usr/lib/systemd/system`, with no `[Install]` section and a relative
+`../<unit>` symlink in `/usr/lib/systemd/system/multi-user.target.wants/`. A derived
+image must keep them there and must **not** `systemctl enable` them: that needs an
+`[Install]` section and writes absolute links into `/etc/systemd/system`, which is
+persistent on Kairos.
+
+Which matters because these directories are **persistent** on a Kairos node, all
+outrank `/usr/lib/systemd/system` in systemd's unit search path, and none of them is
+refreshed from the image the way `/usr` is:
+
+| Path | What it holds | Kairos behavior |
+|------|---------------|-----------------|
+| `/etc/systemd/system`, `.control`, `.attached` | unit fragments, `<unit>.d/` drop-ins, `.wants` links | bind mount from the persistent partition, refreshed from the image with `rsync --update` (update-only, never deletes) |
+| `/usr/local/lib/systemd/system` | the same | on `COS_PERSISTENT`; never refreshed from the image at all |
+| `/var/lib/kubelet/kubeadm-flags.env`, `/etc/default/kubelet` | `EnvironmentFile=` content, which outranks `Environment=` | the first is persistent; the second is rebuilt from the image each boot |
+| `/var/lib/extensions`, `/var/lib/confexts` | sysext/confext images that can overlay `/usr/lib` or `/etc` | persistent |
+
+So anything an operator puts in one of them keeps overriding the image's units
+across every upgrade and rollback. Put local changes in a drop-in under
+`/etc/systemd/system/<unit>.d/` (supported, never touched by the provider) rather
+than editing a full unit, and see
+[Upgrades](./upgrades.md#unit-files-moved-into-the-image) for the one-time cleanup of
+the copies earlier releases left there.
+
 The pre-bundled control-plane images live in `/system/provider-kubernetes/images`
 (with `images.lock`), beside the provider binary in `/system/providers`. `/system`
 is part of the read-only OS image and is not a persistent or overlaid path on

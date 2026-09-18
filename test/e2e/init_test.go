@@ -65,6 +65,17 @@ func TestSingleNodeInitConverges(t *testing.T) {
 	// on this image. Before anything else, so no later step can have altered them.
 	assertExecPathImageInvariants(t, nc)
 
+	// ADR-19 U2 (F-UNITPATH): the units are the image's, and the one-time cleanup
+	// of the copies earlier releases left in the persistent /etc/systemd/system
+	// runs at BOOT, before containerd, the import unit and the kubelet start (see
+	// image_owned_units.go). It runs here, first, because it RESTARTS the node
+	// container: /run is a tmpfs, so nothing the provider writes there may exist
+	// yet, and no shadow binary may be planted, since a by-name lookup during the
+	// boot it forces belongs to E-B7 and U1, not here.
+	assertImageOwnedUnits(t, nc)
+
+	// After the restart above, docker may have given the container a different
+	// address, so the Cluster is built from the address it has NOW.
 	ip := nc.IP(t)
 
 	// Build the Cluster exactly as Kairos would hand it to the provider:

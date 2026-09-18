@@ -112,6 +112,63 @@ Then fix it at the source rather than by widening `PATH`:
   `/etc/systemd/system/containerd.service.d/60-path.conf`) and accept the risk;
   do not edit the shipped file, which an upgrade replaces.
 
+### The unit-file migration (`unit-migrate`)
+
+`provider-kubernetes-unit-migrate.service` runs once per boot, before containerd,
+the import unit and the kubelet, and removes the unit copies that releases before
+this one installed into the persistent `/etc/systemd/system`. It ends with one
+summary line:
+
+```sh
+sudo journalctl -b -u provider-kubernetes-unit-migrate.service
+```
+
+| `outcome=` | Exit | Meaning |
+|------------|------|---------|
+| `clean` | 0 | Nothing to remove. A fresh install, a recovery boot, and every boot after the first one. |
+| `migrated` | 0 | Removed `removed=N` copies. If a unit file or drop-in was among them it also reloaded systemd (`reloaded=true`), so this boot already runs the image's units; removing only `.wants` links changes no loaded definition and needs no reload (`reloaded=false`). |
+| `kept-modified` | 1 | At least one copy is **not** what we shipped, so it was kept - and it is still overriding the image's unit. The unit fails, deliberately. |
+| `failed` | 1 | An I/O error, an unsafe path, or a failed reload. Anything already removed stays removed; the run is retried at the next boot. |
+
+Only a file that is **byte-identical** to something this project shipped at that
+exact path is deleted. Everything else is kept and named with a reason. A symlink is
+not in this table: whatever it points at, it is left silently, is not counted as
+kept, does not fail the unit, and shows up only in `overrides=`:
+
+| `reason=` | What it means |
+|-----------|---------------|
+| `modified` | The bytes differ from every version we shipped there - somebody edited it, or it came from a fork. |
+| `not-regular` | A directory, FIFO, device or socket at that path. |
+| `owner` | Not owned by root. |
+| `size` | Larger than 64 KiB. |
+| `link-target` | A `.wants` link pointing somewhere other than the file we installed. |
+| `walk-unsafe` | A parent directory is a symlink or not a directory, so the subtree was skipped. |
+| `race` | The file changed between being checked and being removed, so it was left alone. These directories are writable only by root and nothing rewrites them this early in boot, so treat it as a sign that something else touched the file. |
+| `io` | The file could not be read or removed. |
+
+The migration never logs the content, size or hash of a file it keeps - a unit file
+can carry proxy credentials in an `Environment=` line.
+
+Lines like `unit-migrate: override "/etc/systemd/system/kubelet.service.d/20-local.conf"`
+are **advisory**: they list overrides of these units that remain in a directory that
+outranks `/usr/lib/systemd/system`. Nothing is done about them; drop-ins there are
+the supported way to customize the units.
+
+To fix a `kept-modified`:
+
+```sh
+sudo systemctl cat kubelet.service        # what is in effect, and from which file
+sudo systemd-delta --type=extended /usr/lib/systemd/system
+```
+
+then move your change into `/etc/systemd/system/<unit>.d/20-local.conf`, delete the
+full-unit copy, `daemon-reload`, and re-run the unit
+(`systemctl restart provider-kubernetes-unit-migrate.service`) to clear the failure.
+See [Upgrades](./upgrades.md#unit-files-moved-into-the-image).
+
+`systemctl disable` does nothing to these units (they are `static`); use
+`systemctl mask`, which now sticks.
+
 ### kubeadm pulls control-plane images even though the image bundles them
 
 The image bundles the control-plane images for its Kubernetes version and imports

@@ -24,8 +24,10 @@ package e2e
 // systemd's own PATH lookups for the units (the containerd shim, the kubelet's
 // helpers, and the persistent /opt directories containerd executes from) are
 // ADR-19 U1 and live in daemon_exec_path.go, which runs after this phase on the
-// same node container. Unit FILE placement and the stale persistent copies under
-// /etc/systemd are still open (ADR-19 U2), as is the CNI plugin directory (U3).
+// same node container. Unit FILE placement and the cleanup of the stale
+// persistent copies under /etc/systemd are ADR-19 U2 and live in
+// image_owned_units.go, which runs BEFORE this phase (it reboots the node). The
+// CNI plugin directory is still open (U3).
 
 import (
 	"bytes"
