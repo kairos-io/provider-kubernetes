@@ -328,6 +328,86 @@ func TestBuildStatusConfigInvalidWithoutErrIsIgnored(t *testing.T) {
 	}
 }
 
+// TestBuildStatusDegraded is D-2: an established member (Initialized or
+// Joined) whose reconcile.Plan verdict was degraded must report
+// PhaseDegraded/OutcomeFailure/ReasonKubeletUnhealthy, non-terminal, and must
+// NEVER be reported as PhaseConverged.
+func TestBuildStatusDegraded(t *testing.T) {
+	tests := []struct {
+		name       string
+		membership actualstate.Membership
+	}{
+		{name: "initialized member", membership: actualstate.Initialized},
+		{name: "joined member", membership: actualstate.Joined},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := baseParams()
+			p.Membership = tc.membership
+			p.LastAction = reconcile.ActionNone
+			p.Err = nil
+			p.Degraded = true
+
+			s := BuildStatus(p)
+
+			if s.Phase == PhaseConverged {
+				t.Fatalf("phase = %q, must never be Converged when Degraded is set", s.Phase)
+			}
+			if s.Phase != PhaseDegraded {
+				t.Errorf("phase = %q, want Degraded", s.Phase)
+			}
+			if s.Outcome != OutcomeFailure {
+				t.Errorf("outcome = %q, want failure (a real problem, even though non-terminal)", s.Outcome)
+			}
+			if s.Reason != ReasonKubeletUnhealthy {
+				t.Errorf("reason = %q, want KubeletUnhealthy", s.Reason)
+			}
+			if s.Terminal {
+				t.Error("degraded must be non-terminal: a later boot or an explicit reset may still converge")
+			}
+			if s.Membership != string(tc.membership) {
+				t.Errorf("membership = %q, want %q (probed value kept: no action ran)", s.Membership, tc.membership)
+			}
+			if s.Budget.Attempts != 0 || s.Budget.MaxAttempts != 0 {
+				t.Errorf("budget = %+v, want {0,0}", s.Budget)
+			}
+		})
+	}
+}
+
+// TestBuildStatusDegradedFalseIsInertWithoutErr is the converse of
+// TestBuildStatusDegraded: Degraded defaults to false (its zero value), so
+// every existing success-path caller that does not set it is unaffected.
+func TestBuildStatusDegradedFalseIsInertWithoutErr(t *testing.T) {
+	p := baseParams()
+	p.Membership = actualstate.Initialized
+	p.LastAction = reconcile.ActionNone
+	p.Err = nil
+	// p.Degraded left at its zero value (false).
+
+	s := BuildStatus(p)
+	if s.Phase != PhaseConverged {
+		t.Errorf("phase = %q, want Converged (Degraded defaults to false)", s.Phase)
+	}
+}
+
+// TestBuildStatusDegradedIgnoredWhenErrSet: Degraded must never override a
+// real failure's phase/reason -- it is only consulted on the Err == nil path.
+func TestBuildStatusDegradedIgnoredWhenErrSet(t *testing.T) {
+	p := baseParams()
+	p.LastAction = reconcile.ActionRunJoin
+	p.Err = errors.New("connection refused")
+	p.Degraded = true // must be inert here
+
+	s := BuildStatus(p)
+	if s.Phase != PhaseFailed {
+		t.Errorf("phase = %q, want Failed (Degraded must not mask a real error)", s.Phase)
+	}
+	if s.Reason != ReasonJoinTimeout {
+		t.Errorf("reason = %q, want JoinTimeout (deriveReason's normal mapping, untouched by Degraded)", s.Reason)
+	}
+}
+
 // TestBuildStatusIsDeterministic verifies BuildStatus is pure: same inputs ->
 // identical outputs regardless of how many times it is called.
 func TestBuildStatusIsDeterministic(t *testing.T) {

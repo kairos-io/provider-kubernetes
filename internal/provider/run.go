@@ -54,6 +54,16 @@ type Options struct {
 	// APIServerReachableProbe reports whether the LOCAL apiserver answers /healthz
 	// (ADR-12-R1); nil -> a /healthz probe to 127.0.0.1:6443.
 	APIServerReachableProbe func(ctx context.Context) bool
+
+	// KubeletHealthyProbe reports local kubelet liveness (actualstate.State.
+	// KubeletHealthy), which reconcile.Plan uses to distinguish a fully
+	// converged established member from one that is already Initialized/
+	// Joined but degraded (status.PhaseDegraded, D-2). nil -> kubeletHealthyProbe():
+	// a bounded GET of the kubelet's own loopback healthz
+	// (http://127.0.0.1:10248/healthz, kubelethealth.go) -- the same check
+	// kubeadm itself waits on. Inject a fake in tests that need a healthy or
+	// degraded fixture without a real kubelet.
+	KubeletHealthyProbe func(ctx context.Context) bool
 }
 
 // Options also carries an injectable StatusSink for testing; nil -> production
@@ -113,6 +123,11 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		finalErr        error
 		finalState      actualstate.State
 		finalLastAction reconcile.Action
+		// finalDegraded is D-2's signal: reconcile.Plan returned VerdictDegraded
+		// (an already-established member whose kubelet is not healthy). It must
+		// only ever suppress a would-be Converged status, never mask a real
+		// error -- BuildStatus only consults it on the p.Err == nil path.
+		finalDegraded bool
 	)
 	// Defer record-then-return: runs exactly once on every exit path.
 	defer func() {
@@ -124,6 +139,7 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 			LastAction: finalLastAction,
 			Err:        finalErr,
 			Result:     finalResult,
+			Degraded:   finalDegraded,
 			Now:        time.Now().UTC().Format(time.RFC3339),
 			BootID:     bootID,
 			Version:    providerVersion,
@@ -178,7 +194,18 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	// auto-upgrade. The version probes are wired only when a target is set, so the
 	// no-upgrade path stays free of cluster/kubelet version reads.
 	target := ""
-	prober := actualstate.FileProber{RootPath: pctx.RootPath, ControlPlaneReachable: cpReachable}
+	prober := actualstate.FileProber{
+		RootPath:              pctx.RootPath,
+		ControlPlaneReachable: cpReachable,
+	}
+	// D-2: unconditional (unlike the upgrade-only probes below), since Plan's
+	// base (non-upgrade) path also needs KubeletHealthy to distinguish a
+	// converged member from a degraded one. nil -> the production default,
+	// a bounded loopback healthz probe (kubelethealth.go).
+	prober.KubeletHealthy = opts.KubeletHealthyProbe
+	if prober.KubeletHealthy == nil {
+		prober.KubeletHealthy = kubeletHealthyProbe()
+	}
 	if uc.ClusterConfiguration.KubernetesVersion != "" {
 		target = resolved
 		// One kubectl runner for both probes (ADR-1-A1): absolute path, closed
@@ -204,7 +231,8 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		finalErr = err
 		return err
 	}
-	actions := reconcile.Plan(role, target, state)
+	actions, verdict := reconcile.Plan(role, target, state)
+	finalDegraded = verdict == reconcile.VerdictDegraded
 
 	var join *credential.JoinMaterial
 	if role == actualstate.RoleWorker || role == actualstate.RoleControlPlane {

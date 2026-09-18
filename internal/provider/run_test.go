@@ -2,6 +2,9 @@ package provider
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -206,6 +209,13 @@ func TestRunDefaultStatusSinkAnnotatesKubeadmNodeName(t *testing.T) {
 	}
 	opts, _ := hermeticRunOptions(t, fr)
 	opts.StatusSink = nil
+	// This fixture is "already initialized -> converged no-op" (see the
+	// mustWrite comment above): make that literally true by injecting a
+	// healthy kubelet, matching the test's intent. Without this, an
+	// Initialized node with unknown/unverified kubelet health now (correctly,
+	// D-2) reports PhaseDegraded, not PhaseConverged -- this test is about the
+	// default status sink's node-name resolution, not kubelet health.
+	opts.KubeletHealthyProbe = func(context.Context) bool { return true }
 	if err := Run(context.Background(), cluster, opts); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -229,6 +239,140 @@ func TestRunDefaultStatusSinkAnnotatesKubeadmNodeName(t *testing.T) {
 	if i := slices.Index(call, "--kubeconfig"); i < 0 || i+1 >= len(call) || call[i+1] != adminConf {
 		t.Fatalf("kubectl argv=%v, want --kubeconfig %s", call, adminConf)
 	}
+}
+
+// TestRunAlreadyInitializedUnhealthyKubeletReportsDegradedNotConverged is D-2
+// end-to-end (Run -> reconcile.Plan -> status.BuildStatus): an already
+// Initialized node whose kubelet health probe reports false must NOT exit
+// with an error (the reconcile action is still the reboot-safe ActionNone;
+// #4099-1 never blocks later boot stages) and must NOT record phase=Converged
+// -- it must record phase=Degraded, outcome=failure (a real problem, non-
+// terminal), reason=KubeletUnhealthy.
+func TestRunAlreadyInitializedUnhealthyKubeletReportsDegradedNotConverged(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "etc", "kubernetes", "admin.conf"), "apiVersion: v1\n")
+
+	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if args[0] == "version" {
+			return kubeadm.Result{Stdout: "v1.35.0\n"}, nil
+		}
+		return kubeadm.Result{}, nil
+	}}
+	cluster := clusterplugin.Cluster{
+		Role:             clusterplugin.RoleInit,
+		ClusterToken:     validToken(),
+		ControlPlaneHost: "10.0.0.1",
+		ProviderOptions:  map[string]string{"cluster_root_path": root},
+	}
+	opts, sink := hermeticRunOptions(t, fr)
+	opts.KubeletHealthyProbe = func(context.Context) bool { return false }
+
+	err := Run(context.Background(), cluster, opts)
+	if err != nil {
+		t.Fatalf("Run must not fail loud for a degraded (not unmet-prerequisite) reboot-safe no-op: %v", err)
+	}
+	if fr.called("init") {
+		t.Fatalf("degraded already-initialized node must NOT auto re-bootstrap; calls=%v", fr.calls)
+	}
+
+	got := sink.only(t)
+	if got.Phase == status.PhaseConverged {
+		t.Fatalf("recorded phase=%q, must not be Converged when the kubelet is unhealthy", got.Phase)
+	}
+	if got.Phase != status.PhaseDegraded {
+		t.Fatalf("recorded phase=%q, want %q", got.Phase, status.PhaseDegraded)
+	}
+	if got.Outcome != status.OutcomeFailure {
+		t.Fatalf("recorded outcome=%q, want %q", got.Outcome, status.OutcomeFailure)
+	}
+	if got.Reason != status.ReasonKubeletUnhealthy {
+		t.Fatalf("recorded reason=%q, want %q", got.Reason, status.ReasonKubeletUnhealthy)
+	}
+	if got.Terminal {
+		t.Fatal("degraded must be non-terminal: a later boot (or an explicit reset) may still converge")
+	}
+}
+
+// TestRunProductionKubeletHealthyProbeDefaultAgainstRealLoopback proves the
+// wiring in run.go itself, not just the probe function in isolation: when
+// Options.KubeletHealthyProbe is left at its nil zero value (the ONE field
+// this test overrides away from hermeticRunOptions' healthy fake), Run
+// consults the REAL production default (kubeletHealthyProbe: a loopback GET
+// to 127.0.0.1:10248/healthz) -- the exact endpoint kubeadm itself waits on.
+// This is the combination the fix exists for: an already-Initialized node
+// with a live healthz reports Converged; the identical node with nothing
+// listening reports Degraded with reason=KubeletUnhealthy. Before wiring a
+// real default, EVERY already-converged node reported Degraded (nothing ever
+// answered); before D-2 existed at all, a masked kubelet reported Converged.
+//
+// Skips (rather than fails) if 127.0.0.1:10248 cannot be bound in this
+// environment, so a shared/restricted sandbox never makes this test flake;
+// kubeletHealthyProbeAt's own unit tests already cover the probe logic
+// against an arbitrary address.
+func TestRunProductionKubeletHealthyProbeDefaultAgainstRealLoopback(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "etc", "kubernetes", "admin.conf"), "apiVersion: v1\n")
+	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if args[0] == "version" {
+			return kubeadm.Result{Stdout: "v1.35.0\n"}, nil
+		}
+		return kubeadm.Result{}, nil
+	}}
+	cluster := clusterplugin.Cluster{
+		Role:             clusterplugin.RoleInit,
+		ClusterToken:     validToken(),
+		ControlPlaneHost: "10.0.0.1",
+		ProviderOptions:  map[string]string{"cluster_root_path": root},
+	}
+
+	t.Run("live healthz on 127.0.0.1:10248 -> Converged", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:10248")
+		if err != nil {
+			t.Skipf("cannot bind 127.0.0.1:10248 in this environment: %v", err)
+		}
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		_ = srv.Listener.Close()
+		srv.Listener = ln
+		srv.Start()
+		defer srv.Close()
+
+		opts, sink := hermeticRunOptions(t, fr)
+		opts.KubeletHealthyProbe = nil // exercise the REAL production default
+		if err := Run(context.Background(), cluster, opts); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got := sink.only(t)
+		if got.Phase != status.PhaseConverged {
+			t.Fatalf("phase = %q, want Converged (a real loopback healthz answered 200)", got.Phase)
+		}
+	})
+
+	t.Run("nothing listening on 127.0.0.1:10248 -> Degraded", func(t *testing.T) {
+		// Confirm the port is actually free here (not left bound by a stray
+		// process); if not, skip rather than risk a false pass/fail.
+		probe, err := net.Listen("tcp", "127.0.0.1:10248")
+		if err != nil {
+			t.Skipf("127.0.0.1:10248 is not free in this environment: %v", err)
+		}
+		if err := probe.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		opts, sink := hermeticRunOptions(t, fr)
+		opts.KubeletHealthyProbe = nil // exercise the REAL production default
+		if err := Run(context.Background(), cluster, opts); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got := sink.only(t)
+		if got.Phase != status.PhaseDegraded {
+			t.Fatalf("phase = %q, want Degraded (nothing listens on 127.0.0.1:10248)", got.Phase)
+		}
+		if got.Reason != status.ReasonKubeletUnhealthy {
+			t.Fatalf("reason = %q, want KubeletUnhealthy", got.Reason)
+		}
+	})
 }
 
 func mustWrite(t *testing.T, path, content string) {
