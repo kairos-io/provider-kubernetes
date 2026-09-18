@@ -13,7 +13,11 @@ The provider runs one bounded **reconcile** pass on each boot (from the
 
 If the node is already a converged, healthy member, the plan is empty and
 reconcile is a fast no-op. The provider does not re-bootstrap or re-join an
-already-converged node.
+already-converged node - including when that member's kubelet is unhealthy
+(masked, crashed, or every control-plane container exited): the action stays a
+no-op either way, but the status the node reports differs. A healthy member
+reports `phase: Converged`; an unhealthy one reports `phase: Degraded` so the
+outage is never silently hidden as a success. See [Node status](./status.md).
 
 ## Bounded, fail-loud, never hang
 
