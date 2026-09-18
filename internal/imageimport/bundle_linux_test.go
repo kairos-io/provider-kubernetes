@@ -102,6 +102,26 @@ func withDeviceOverride(t *testing.T, pathSuffix string, devOverride uint64) {
 	t.Cleanup(func() { fstatFn = real })
 }
 
+// withReadOnlyOverride makes checkDirSafe's D-1 read-only waiver report ro
+// for any fd whose /proc/self/fd readlink target ends with pathSuffix,
+// simulating a read-only mount (e.g. a UKI node's tmpfs "/") without a real
+// one -- unprivileged tests cannot mount anything read-only. Every other fd
+// falls through to the real statfsReadOnly, so this never masks a genuine
+// read-only/writable result on paths the test does not care about. This is
+// the readOnlyOverride seam: package-private, default nil, never settable
+// from imageimport's exported API (same style as fstatFn/rootPath/
+// expectedOwnerUID).
+func withReadOnlyOverride(t *testing.T, pathSuffix string, ro bool) {
+	t.Helper()
+	readOnlyOverride = func(fd int) bool {
+		if link, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd)); err == nil && strings.HasSuffix(link, pathSuffix) {
+			return ro
+		}
+		return statfsReadOnly(fd)
+	}
+	t.Cleanup(func() { readOnlyOverride = nil })
+}
+
 func TestWalkBundleAcceptsValidTree(t *testing.T) {
 	tp := newValidTree(t)
 
@@ -267,6 +287,10 @@ func TestWalkBundleWrongOwner(t *testing.T) {
 	}
 }
 
+// TestWalkBundleGroupOtherWritableDir is D-1 case (a): a group/other-writable
+// directory on a WRITABLE filesystem is still refused. newValidTree's tree
+// lives on the test's real (writable) temp filesystem and no readOnlyOverride
+// is installed, so this exercises the real, un-waived statfsReadOnly path.
 func TestWalkBundleGroupOtherWritableDir(t *testing.T) {
 	tp := newValidTree(t)
 	if err := os.Chmod(tp.imagesDir, 0o777); err != nil {
@@ -278,6 +302,131 @@ func TestWalkBundleGroupOtherWritableDir(t *testing.T) {
 	if !errors.As(err, &be) || be.reason != ReasonDirUnsafe {
 		t.Fatalf("err = %v, want a dir-unsafe bundleError (mode)", err)
 	}
+}
+
+// TestWalkBundleGroupOtherWritableDirWaivedOnReadOnlyFS is D-1 case (b): the
+// SAME group/other-writable directory is ACCEPTED when fstatfs on that same
+// dirfd reports ST_RDONLY (simulated via readOnlyOverride, since an
+// unprivileged test cannot mount anything read-only) -- reproducing a UKI
+// node's read-only tmpfs "/" at mode 1777. The waiver must also be logged.
+func TestWalkBundleGroupOtherWritableDirWaivedOnReadOnlyFS(t *testing.T) {
+	tp := newValidTree(t)
+	// 1777: sticky + rwxrwxrwx, exactly the UKI tmpfs "/" mode from the field
+	// evidence (build/vmtest-u2/s8-uki-import-side-finding.txt). The sticky
+	// bit is NOT what makes this pass -- dirReadOnly's forced true is.
+	if err := os.Chmod(tp.imagesDir, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	withReadOnlyOverride(t, "/images", true)
+	logs := captureLogs(t)
+
+	b, err := walkBundle()
+	if err != nil {
+		t.Fatalf("walkBundle: %v, want the read-only waiver to accept a group/other-writable dir", err)
+	}
+	defer b.Close()
+
+	if !strings.Contains(logs.joined(), "waived") {
+		t.Fatalf("logs = %q, want a waiver line for the group/other-writable dir", logs.joined())
+	}
+}
+
+// TestWalkBundleGroupOtherWritableDirReadOnlyDoesNotWaiveOtherChecks is D-1
+// case (c): on the SAME read-only filesystem, uid mismatch, a non-directory,
+// and the device-anchor mismatch are still refused -- the read-only waiver
+// must not leak into any other check.
+func TestWalkBundleGroupOtherWritableDirReadOnlyDoesNotWaiveOtherChecks(t *testing.T) {
+	t.Run("wrong owner still refused", func(t *testing.T) {
+		tp := newValidTree(t)
+		if err := os.Chmod(tp.imagesDir, 0o777|os.ModeSticky); err != nil {
+			t.Fatal(err)
+		}
+		// Force every directory in the walk to report read-only (not just
+		// "images"): the uid mismatch is hit on "/" first (the walk's first
+		// checkDirSafe call), so the waiver must not leak into that call's
+		// owner check regardless of which directory trips it.
+		readOnlyOverride = func(int) bool { return true }
+		t.Cleanup(func() { readOnlyOverride = nil })
+		setSeams(t, tp.root, os.Getuid()+12345) // no real file matches this uid
+
+		_, err := walkBundle()
+		var be *bundleError
+		if !errors.As(err, &be) || be.reason != ReasonDirUnsafe {
+			t.Fatalf("err = %v, want a dir-unsafe bundleError (owner), even on a read-only fs", err)
+		}
+	})
+
+	// checkDirSafe is only ever invoked (from walkBundle) on a fd opened with
+	// O_DIRECTORY, which already refuses a non-directory at open() time (see
+	// TestWalkBundleNonDirectoryComponent) -- so checkDirSafe's own S_ISDIR
+	// branch cannot be exercised through walkBundle. Call it directly on a
+	// regular-file fd, with the read-only waiver forced true for every fd, to
+	// prove the waiver (which lives strictly after the S_ISDIR check) cannot
+	// let a non-directory through.
+	t.Run("non-directory still refused", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "not-a-dir")
+		if err := os.WriteFile(filePath, []byte("x"), 0o777); err != nil {
+			t.Fatal(err)
+		}
+		fd, err := unix.Open(filePath, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = unix.Close(fd) }()
+		readOnlyOverride = func(int) bool { return true } // force "read-only" everywhere
+		t.Cleanup(func() { readOnlyOverride = nil })
+
+		ok, detail := checkDirSafe(fd, "not-a-dir")
+		if ok {
+			t.Fatalf("checkDirSafe accepted a non-directory even with the read-only waiver forced true (detail=%q)", detail)
+		}
+	})
+
+	t.Run("device-anchor mismatch still refused", func(t *testing.T) {
+		tp := newValidTree(t)
+		if err := os.Chmod(tp.imagesDir, 0o777|os.ModeSticky); err != nil {
+			t.Fatal(err)
+		}
+		withReadOnlyOverride(t, "/images", true)
+		withDeviceOverride(t, "/example.tar", 0xDEADBEEF)
+
+		b, err := walkBundle()
+		if err != nil {
+			t.Fatalf("walkBundle: %v (the dir waiver must still let the walk complete)", err)
+		}
+		defer b.Close()
+		f, reason, _ := b.OpenTarball("example.tar", minTarballSize, maxTarballSize, ReasonMissing)
+		if reason != ReasonDevice {
+			t.Fatalf("reason = %s, want device (f=%v), even on a read-only fs", reason, f)
+		}
+	})
+}
+
+// TestCheckDirSafeMessagePrints1777Not0777 is D-1's message fix: the refused
+// (non-waived) detail must mask the FULL permission bits (0o7777), so a mode
+// 1777 (sticky + rwxrwxrwx) directory prints as "mode 01777", never the
+// truncated (and misleading) "mode 0777".
+func TestCheckDirSafeMessagePrints1777Not0777(t *testing.T) {
+	tp := newValidTree(t)
+	if err := os.Chmod(tp.imagesDir, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	// No read-only override installed: the real (writable) temp filesystem
+	// keeps this refused, so the message is observable.
+
+	_, err := walkBundle()
+	var be *bundleError
+	if !errors.As(err, &be) {
+		t.Fatalf("err = %v, want a bundleError", err)
+	}
+	if !strings.Contains(be.detail, "01777") {
+		t.Fatalf("detail = %q, want it to contain the full mode 01777, not a truncated 0777", be.detail)
+	}
+	if strings.Contains(be.detail, "0777)") {
+		t.Fatalf("detail = %q, must not print the sticky bit's mode as 0777", be.detail)
+	}
+	_ = tp
 }
 
 func TestOpenTarballGroupOtherWritableFile(t *testing.T) {

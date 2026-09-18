@@ -58,6 +58,13 @@ func (r *recordingSink) only(t *testing.T) status.Status {
 // it is inert -- no exec happens), but only invokes it through these nil
 // defaults, so setting them below keeps a test hermetic. Tests override the
 // fields their path needs.
+//
+// KubeletHealthyProbe defaults to "healthy" here, NOT failIfCalled: unlike the
+// upgrade-only probes above, run.go wires it unconditionally (D-2 needs it on
+// the base, non-upgrade path too), and its nil production default
+// (kubeletHealthyProbe) makes a real loopback HTTP call -- exactly what this
+// helper exists to keep tests away from. Tests asserting D-2's degraded path
+// override this field explicitly.
 func hermeticRunOptions(t *testing.T, runner kubeadm.Runner) (Options, *recordingSink) {
 	t.Helper()
 	sink := &recordingSink{}
@@ -73,6 +80,7 @@ func hermeticRunOptions(t *testing.T, runner kubeadm.Runner) (Options, *recordin
 		},
 		KubeletRestart:          failIfCalled[error](t, "KubeletRestart"),
 		APIServerReachableProbe: failIfCalled[bool](t, "APIServerReachableProbe"),
+		KubeletHealthyProbe:     func(context.Context) bool { return true },
 	}, sink
 }
 

@@ -37,6 +37,15 @@ const (
 	PhaseFailed Phase = "Failed"
 	// PhaseReset: the node was reset via EventClusterReset.
 	PhaseReset Phase = "Reset"
+	// PhaseDegraded: the node is an already-established member (Initialized or
+	// Joined) but its kubelet health signal is not healthy (D-2, the 2026-09-17
+	// U2 security sign-off). The reconcile action is still ActionNone --
+	// recovering an established member is a deliberate, explicit reset flow,
+	// never an automatic re-bootstrap -- so this is NOT a Failed/terminal
+	// phase: the next boot (or an operator reset) may still converge cleanly.
+	// It exists so that fact is never silently reported as Converged, which
+	// would hide a real outage (e.g. every control-plane container exited).
+	PhaseDegraded Phase = "Degraded"
 )
 
 // Outcome is the explicit success/failure signal, redundant with Phase but
@@ -64,6 +73,10 @@ const (
 	ReasonConfigInvalid           Reason = "ConfigInvalid"
 	ReasonResetFailed             Reason = "ResetFailed"
 	ReasonResetOK                 Reason = "ResetOK"
+	// ReasonKubeletUnhealthy names the kubelet health signal behind
+	// PhaseDegraded (D-2): the node is already Initialized or Joined but
+	// actualstate.State.KubeletHealthy is false.
+	ReasonKubeletUnhealthy Reason = "KubeletUnhealthy"
 )
 
 // Budget captures how many attempts were consumed for the last/failing action.
@@ -132,6 +145,12 @@ type BuildParams struct {
 	Err error
 	// Result carries attempt counts from the driver (S4).
 	Result reconcile.RunResult
+	// Degraded is D-2's signal: reconcile.Plan returned VerdictDegraded (the
+	// node is already Initialized or Joined but its kubelet is not healthy).
+	// Only consulted when Err is nil (a real failure already has its own
+	// phase/reason via the failure path below); forces PhaseDegraded instead
+	// of PhaseConverged so this is never silently reported as success.
+	Degraded bool
 	// Now is an RFC3339 timestamp for UpdatedAt. Inject in tests for
 	// determinism; in production callers pass time.Now().UTC().Format(time.RFC3339).
 	Now string
@@ -199,6 +218,21 @@ func BuildStatus(p BuildParams) Status {
 
 	// Normal reconcile path.
 	if p.Err == nil {
+		// D-2: an established member (Initialized/Joined) whose kubelet is not
+		// healthy must not report Converged/success, even though the reconcile
+		// action was (deliberately) ActionNone. Membership is left as the
+		// probed value (s.Membership, set above) -- no action ran, so there is
+		// no post-action membership to derive as the switch below does.
+		if p.Degraded {
+			s.Phase = PhaseDegraded
+			s.Outcome = OutcomeFailure
+			s.Reason = ReasonKubeletUnhealthy
+			s.Terminal = false
+			s.Budget = Budget{Attempts: 0, MaxAttempts: 0}
+			s.Message = sanitize("kubelet health check is failing on an already-" + s.Membership +
+				" node; recovery is an explicit reset, not automatic")
+			return s
+		}
 		s.Phase = PhaseConverged
 		s.Outcome = OutcomeSuccess
 		s.Reason = ReasonNone

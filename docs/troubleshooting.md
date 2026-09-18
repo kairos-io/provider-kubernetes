@@ -32,6 +32,27 @@ looping.
 
 Expected until you install a CNI. See [CNI](./cni.md).
 
+### Status reports `phase: Degraded`
+
+The node is already a cluster member (`membership: initialized` or `joined`),
+but its kubelet failed a liveness check: a plain HTTP GET of
+`http://127.0.0.1:10248/healthz` on this node, expecting exactly HTTP 200
+within 2 seconds - the same endpoint kubeadm itself waits on. This is **not**
+"the kubelet systemd unit is running" or "every control-plane container is
+up"; it is specifically the kubelet's own healthz answer. A "connection
+refused" result (nothing listening) is exactly what a masked or stopped
+kubelet looks like and is reported the same way as a timeout or a non-200
+response - all of them mean "not healthy" here.
+
+The provider does **not** automatically re-run `kubeadm init`/`join` in this
+state: recovering an established member is a deliberate operator action (an
+explicit reset), never an automatic re-bootstrap. `reason: KubeletUnhealthy`
+names the signal; `terminal: false` means a later boot may still converge on
+its own once the kubelet is healthy again. Check `journalctl -u kubelet`,
+`journalctl -u containerd`, and `crictl ps -a` to find out WHY the kubelet's
+healthz is failing before deciding whether to reset. See
+[Node status](./status.md) and [Lifecycle and reset](./lifecycle.md).
+
 ### `role: init` refused: "a control plane already answers at ..."
 
 Working as intended. The node is configured `role: init` but a control plane

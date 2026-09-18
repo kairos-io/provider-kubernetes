@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
 
@@ -27,6 +28,15 @@ var (
 	// to inject a device value that would otherwise require a second real
 	// filesystem to exercise (the O-3 device-mismatch case).
 	fstatFn = unix.Fstat
+
+	// readOnlyOverride is a package-private test seam for checkDirSafe's D-1
+	// read-only waiver (same style as rootPath/expectedOwnerUID/fstatFn: never
+	// settable from the exported API). nil is the production default and
+	// means "ask the real filesystem" via statfsReadOnly on the SAME dirfd
+	// being checked; tests set it to simulate a read-only mount (e.g. a UKI
+	// node's tmpfs "/", mode 1777) without needing real unprivileged root
+	// access to create one.
+	readOnlyOverride func(fd int) bool
 )
 
 const (
@@ -182,6 +192,19 @@ func openDirNoFollow(parentFd int, name string) (int, error) {
 
 // checkDirSafe applies the O-3 directory rules (S_ISDIR, uid ==
 // expectedOwnerUID, not group/other-writable; gid is NOT checked) to fd.
+//
+// D-1 waiver (security-architect, PROJECT_CONTEXT.md ADR-16-A2 security
+// sign-off 2026-09-17): on a trusted-boot (UKI) node "/" is a tmpfs mounted
+// read-only with mode 1777, so the group/other-writable refusal below would
+// refuse every bundle on every boot. The ONLY relaxation is: when fd's OWN
+// filesystem (the SAME dirfd just fstat'd above, via fstatfs) reports
+// ST_RDONLY, the group/other-writable refusal is waived and logged with its
+// own detail; nothing else changes. S_ISDIR, the uid check, and every other
+// caller's checks (the O_NOFOLLOW walk, the device anchor, setuid/setgid and
+// size bands) already returned false above or live in other functions
+// entirely, so they cannot be reached by, or short-circuited by, this
+// waiver -- a non-directory, wrong-owner, wrong-device or setuid/setgid
+// entry is refused exactly as before regardless of read-only status.
 func checkDirSafe(fd int, label string) (ok bool, detail string) {
 	var st unix.Stat_t
 	if err := fstatFn(fd, &st); err != nil {
@@ -194,9 +217,28 @@ func checkDirSafe(fd int, label string) (ok bool, detail string) {
 		return false, fmt.Sprintf("%q is owned by uid %d, want %d", label, st.Uid, expectedOwnerUID)
 	}
 	if st.Mode&0o022 != 0 {
-		return false, fmt.Sprintf("%q is group- or other-writable (mode %#o)", label, st.Mode&0o777)
+		if dirReadOnly(fd) {
+			logrus.Warnf("image-import: waived group/other-writable check for %q: filesystem is read-only (mode %#o)",
+				label, st.Mode&0o7777)
+			return true, ""
+		}
+		return false, fmt.Sprintf("%q is group- or other-writable (mode %#o)", label, st.Mode&0o7777)
 	}
 	return true, ""
+}
+
+// dirReadOnly reports whether fd's filesystem is mounted read-only, for the
+// D-1 waiver above. It consults the readOnlyOverride test seam first;
+// production leaves that nil and falls through to statfsReadOnly(fd) -- the
+// SAME helper the bundle summary already uses for its informational
+// readonly= field, reused here rather than duplicated, but called on the
+// dirfd checkDirSafe is CURRENTLY validating (e.g. "/"), not on the images
+// directory the summary reports on.
+func dirReadOnly(fd int) bool {
+	if readOnlyOverride != nil {
+		return readOnlyOverride(fd)
+	}
+	return statfsReadOnly(fd)
 }
 
 // openFileChecked opens name under dirFd with the O-3 file-open flags
