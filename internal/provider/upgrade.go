@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
+	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
 )
 
 // This file holds the production probes the upgrade path (ADR-12 U6) wires into
@@ -83,13 +84,19 @@ func runningKubeletVersionViaKubectl(rootPath string, r kubeadm.Runner) func(ctx
 // localAPIHealthyProbe reports whether the LOCAL apiserver answers /healthz
 // (ADR-12-R1). Liveness only (InsecureSkipVerify); used to decide whether the
 // kubelet config needs repair after an A/B image swap and to gate upgrade apply.
-func localAPIHealthyProbe() func(ctx context.Context) bool {
+//
+// bindPort is the cluster's localAPIEndpoint.bindPort, which kubeadm renders
+// as the apiserver's --secure-port. It has to be threaded in: a cluster that
+// pins a non-default port serves /healthz only there, and probing 6443 would
+// report a healthy control plane as down on every pass.
+func localAPIHealthyProbe(bindPort int32) func(ctx context.Context) bool {
 	client := &http.Client{
 		Timeout:   5 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // liveness probe only
 	}
+	healthz := kubeadmconfig.LocalAPIHealthzURL(bindPort)
 	return func(ctx context.Context) bool {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://127.0.0.1:6443/healthz", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthz, nil)
 		if err != nil {
 			return false
 		}

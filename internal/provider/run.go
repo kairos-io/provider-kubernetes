@@ -52,7 +52,8 @@ type Options struct {
 	// KubeletRestart restarts the kubelet after an upgrade; nil -> systemctl.
 	KubeletRestart func(ctx context.Context) error
 	// APIServerReachableProbe reports whether the LOCAL apiserver answers /healthz
-	// (ADR-12-R1); nil -> a /healthz probe to 127.0.0.1:6443.
+	// (ADR-12-R1); nil -> a /healthz probe to 127.0.0.1 on the cluster's
+	// localAPIEndpoint.bindPort (6443 when unset).
 	APIServerReachableProbe func(ctx context.Context) bool
 
 	// KubeletHealthyProbe reports local kubelet liveness (actualstate.State.
@@ -221,7 +222,7 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		}
 		prober.APIServerReachable = opts.APIServerReachableProbe
 		if prober.APIServerReachable == nil {
-			prober.APIServerReachable = localAPIHealthyProbe()
+			prober.APIServerReachable = localAPIHealthyProbe(in.BindPort)
 		}
 	}
 
