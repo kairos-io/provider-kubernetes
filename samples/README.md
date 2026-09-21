@@ -82,13 +82,13 @@ config_url field, etc.).
    steps:
    ```sh
    # Worker join cloud-config (token + CA pin):
-   sudo agent-provider-kubernetes mint-join \
+   sudo /system/providers/agent-provider-kubernetes mint-join \
      --role worker --ttl 1h \
      --cluster-token "<the cluster's cluster_token>" > worker-join.yaml
 
    # Additional control-plane: --role controlplane also mints a fresh
    # certificate-encryption key (upstream kubeadm applies a 2h expiry on it).
-   sudo agent-provider-kubernetes mint-join \
+   sudo /system/providers/agent-provider-kubernetes mint-join \
      --role controlplane --ttl 2h \
      --cluster-token "<the cluster's cluster_token>" > cp-join.yaml
    ```

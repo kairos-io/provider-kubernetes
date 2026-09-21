@@ -8,7 +8,7 @@ nodes never mint their own credentials.
 ## Usage
 
 ```sh
-agent-provider-kubernetes mint-join [flags]
+/system/providers/agent-provider-kubernetes mint-join [flags]
 ```
 
 Run it **on a healthy control-plane node**, as root (it needs the local admin
@@ -42,7 +42,7 @@ certificate key never appears on a command line.
 Worker:
 
 ```sh
-sudo agent-provider-kubernetes mint-join \
+sudo /system/providers/agent-provider-kubernetes mint-join \
   --role worker --ttl 1h \
   --cluster-token "the-clusters-cluster-token"
 ```
@@ -50,7 +50,7 @@ sudo agent-provider-kubernetes mint-join \
 Additional control plane (HA), telling it the new node's IP:
 
 ```sh
-sudo agent-provider-kubernetes mint-join \
+sudo /system/providers/agent-provider-kubernetes mint-join \
   --role controlplane --ttl 1h \
   --endpoint k8s-api.example.test:6443 \
   --advertise-address 172.16.56.241 \

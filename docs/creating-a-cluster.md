@@ -24,11 +24,11 @@ On the running control plane, mint material for the node you want to add:
 
 ```sh
 # a worker:
-sudo agent-provider-kubernetes mint-join --role worker --ttl 1h \
+sudo /system/providers/agent-provider-kubernetes mint-join --role worker --ttl 1h \
   --cluster-token "<the cluster's cluster_token>"
 
 # an additional control plane:
-sudo agent-provider-kubernetes mint-join --role controlplane --ttl 1h \
+sudo /system/providers/agent-provider-kubernetes mint-join --role controlplane --ttl 1h \
   --advertise-address <the-new-node-ip> \
   --cluster-token "<the cluster's cluster_token>"
 ```

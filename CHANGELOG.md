@@ -102,7 +102,8 @@ accidental substitution, and state that outlives the image it came from.
   which limits disclosure but does not prevent that.
 - On trusted-boot nodes no log channel survives from before the pivot. The status
   document, and its `/var/log` mirror, are the only record of an early refusal.
-- arm64 images are built but were not validated for this release.
+- Only amd64 images are published. The Dockerfile handles arm64, but the release
+  workflow builds amd64 only, so there is no arm64 image for this release.
 
 ## v0.3.0 - 2026-07-01
 
