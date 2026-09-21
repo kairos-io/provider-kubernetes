@@ -28,6 +28,58 @@ looping.
 
 ## Common situations
 
+### First boot after install (or a state reset) never bootstraps (D-3 / F-UKIBOOT)
+
+**Symptom:** on a UKI (trusted-boot) node, the very first boot after install -
+or the boot right after a state reset - never bootstraps: the kubelet
+crash-loops, and (before this fix) nothing on the node explained why. A plain
+`reboot` used to make it converge; a UKI state reset reproduced the same
+non-convergence instead of fixing it.
+
+**Cause:** kairos-sdk's `clusterplugin` writes
+`/usr/local/cloud-config/cluster.kairos.yaml` by opening it with
+`O_CREATE|O_WRONLY|O_TRUNC` and never creates the parent directory. On a
+non-UKI (GRUB) install that directory is created as a side effect of the
+install's chroot hook before the first boot; the UKI install and reset paths
+have no equivalent chrooted hook, so on those layouts the directory simply
+does not exist yet the first time it is needed.
+
+**Fix:** the provider now creates that one directory itself -
+`/usr/local/cloud-config`, and only that directory, never its ancestors -
+before the SDK writes to it, on every `agent.boot` event. A fresh UKI install
+or a UKI state reset should converge normally with no manual step.
+
+**If it still does not converge**, check the status document (`reason:`
+field) and the boot log for a `provider-kubernetes: cluster-config-dir: ...`
+line at `level=error`:
+
+- `/run/provider-kubernetes/status.yaml` (current boot, tmpfs) or
+  `/var/log/provider-kubernetes/status.yaml` (persistent mirror). See
+  [Node status](./status.md).
+
+| `reason:` | Meaning | What to do |
+|-----------|---------|------------|
+| `ClusterConfigAncestorUnsafe` | `/usr` or `/usr/local` itself is a symlink, not a plain directory, or not owned by root. | The provider withholds `cluster_token` and emits no bootstrap commands this boot: it could not verify where that component actually leads, and the SDK's write would resolve straight through it. Investigate the mount/persistent partition before retrying. |
+| `ClusterConfigAncestorMissing` | `/usr` or `/usr/local` itself is simply absent. | Reported only, not withheld: the SDK's own write then fails the identical "not found" error either way, so nothing is gained by withholding. Something is likely wrong with the persistent partition or its mount; reinstall or investigate. |
+| `ClusterConfigDirUnsafe` | Something already occupies `/usr/local/cloud-config` and is not a plain, root-owned directory (a symlink, a FIFO, a device, or a regular file). | The provider withholds `cluster_token` and emits no bootstrap commands this boot. Remove or fix the offending entry, then reboot. |
+| `ClusterConfigTokenFileUnsafe` | `cluster.kairos.yaml` (or your `cluster_config_path` override's target) already exists and is anything other than absent or an intact, root-owned 0600 regular file - a symlink, a FIFO, a device, a socket, a directory, not owned by root, group/other-writable, or hard-linked. | The provider withholds `cluster_token` and emits no bootstrap commands this boot. Remove the offending entry, then reboot. |
+| `ClusterConfigDirWritable` | `/usr/local/cloud-config` exists, is owned by root, but is group- or other-writable. Expected from the second boot onward - the platform itself widens the mode. | Reported only; the boot still converges normally. No action needed. |
+| `ClusterConfigOverrideRejected` | `cluster_config_path` is set to somewhere other than directly under `/usr/local/cloud-config`. | The provider creates nothing there. You own pre-creating that directory safely, or drop the override to use the default path. |
+| `ClusterConfigNotPersistent` | `/usr/local` is not actually a separate mount on this boot (same device as `/`). | The token is about to be written to ephemeral storage; it will not survive a reboot, so the node will not stay converged. Check that `COS_PERSISTENT` mounted. |
+| `ClusterConfigDirCreateFailed` | The directory could not be created for a reason other than already existing (for example a read-only filesystem). | Check `dmesg`/`journalctl` for the underlying mount error. |
+
+Three of these (`ClusterConfigAncestorUnsafe`, `ClusterConfigDirUnsafe`,
+`ClusterConfigTokenFileUnsafe`) **withhold `cluster_token` and every
+bootstrap command** for this boot rather than let the SDK write the real
+secret where it could not verify the write would land safely; every other
+reason - including a merely-**missing** ancestor - is reported only and does
+not change whether the boot converges.
+
+This fix closes the specific missing-parent-directory defect; it is
+**not a security boundary** - see
+[Security model](./security.md#cluster-config-directory-creation-is-not-a-security-boundary-d-3--f-ukiboot)
+for exactly what the directory's mode does and does not protect.
+
 ### Node is `NotReady`
 
 Expected until you install a CNI. See [CNI](./cni.md).
