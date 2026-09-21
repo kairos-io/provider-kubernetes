@@ -44,7 +44,7 @@ cluster:
 
   config: |
     clusterConfiguration:
-      kubernetesVersion: v1.34.0
+      kubernetesVersion: v1.37.0
       # STABLE HA endpoint -- a VIP / LB / DNS, NOT cp1's node IP. All control
       # planes and workers reach the API server through this address, and it is
       # baked into the API server serving certificate (the provider also adds it

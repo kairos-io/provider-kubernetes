@@ -27,9 +27,50 @@ handling:
   runs on musl.
 - **kubeadm, kubectl, crictl, runc** are already static and run on musl unchanged,
   so they stay the checksum-verified official downloads.
+- **etcdctl, etcdutl** are the static upstream binaries extracted from the
+  signature-verified etcd control-plane image bundled for the minor (the build
+  fails if they do not run on musl or do not match that etcd version).
 
 This is all automatic - there are no build flags to set. `make image` produces a
 Hadron image.
+
+The provider executes `kubeadm`, `kubectl`, `ctr`, `systemctl` and `etcdctl` only
+by their `/usr/bin` paths (see [Security model](./security.md#exec-hygiene)), so an
+image derived from this one must keep them there.
+
+The systemd units the provider owns - `containerd.service`, `kubelet.service`,
+`provider-kubernetes-image-import.service`, `provider-kubernetes-unit-migrate.service`
+and `kubelet.service.d/10-kubeadm.conf` - are installed in
+`/usr/lib/systemd/system`, with no `[Install]` section and a relative
+`../<unit>` symlink in `/usr/lib/systemd/system/multi-user.target.wants/`. A derived
+image must keep them there and must **not** `systemctl enable` them: that needs an
+`[Install]` section and writes absolute links into `/etc/systemd/system`, which is
+persistent on Kairos.
+
+Which matters because these directories are **persistent** on a Kairos node, all
+outrank `/usr/lib/systemd/system` in systemd's unit search path, and none of them is
+refreshed from the image the way `/usr` is:
+
+| Path | What it holds | Kairos behavior |
+|------|---------------|-----------------|
+| `/etc/systemd/system`, `.control`, `.attached` | unit fragments, `<unit>.d/` drop-ins, `.wants` links | bind mount from the persistent partition, refreshed from the image with `rsync --update` (update-only, never deletes) |
+| `/usr/local/lib/systemd/system` | the same | on `COS_PERSISTENT`; never refreshed from the image at all |
+| `/var/lib/kubelet/kubeadm-flags.env`, `/etc/default/kubelet` | `EnvironmentFile=` content, which outranks `Environment=` | the first is persistent; the second is rebuilt from the image each boot |
+| `/var/lib/extensions`, `/var/lib/confexts` | sysext/confext images that can overlay `/usr/lib` or `/etc` | persistent |
+
+So anything an operator puts in one of them keeps overriding the image's units
+across every upgrade and rollback. Put local changes in a drop-in under
+`/etc/systemd/system/<unit>.d/` (supported, never touched by the provider) rather
+than editing a full unit, and see
+[Upgrades](./upgrades.md#unit-files-moved-into-the-image) for the one-time cleanup of
+the copies earlier releases left there.
+
+The pre-bundled control-plane images live in `/system/provider-kubernetes/images`
+(with `images.lock`), beside the provider binary in `/system/providers`. `/system`
+is part of the read-only OS image and is not a persistent or overlaid path on
+Kairos. A derived image must keep the bundle there, owned by root and not writable
+by group or others, and must not bind-mount anything over it: the import refuses
+tarballs that are not on the same filesystem as the provider binary.
 
 ## Supply-chain pinning
 
@@ -37,14 +78,15 @@ The static builds clone the upstream **version tag** and then verify it resolves
 to a **pinned commit SHA** (`KUBERNETES_COMMIT` / `CONTAINERD_COMMIT`), because a
 git tag is mutable while a commit is content-addressed - giving the from-source
 path the same integrity guarantee as the checksum-verified download path. The
-defaults match the default `KUBERNETES_VERSION` (v1.34.0) and `CONTAINERD_VERSION`.
-Building a **different** Kubernetes minor requires the matching commit, or the
-build fails loud:
+defaults match the default `KUBERNETES_VERSION` (v1.37.0) and `CONTAINERD_VERSION`.
+Building a **different** Kubernetes minor requires the matching commit (and the
+matching `CRICTL_VERSION`), or the build fails loud:
 
 ```sh
 make image \
-  KUBERNETES_VERSION=v1.35.5 \
-  KUBERNETES_COMMIT=$(git ls-remote https://github.com/kubernetes/kubernetes refs/tags/v1.35.5^{} | cut -f1)
+  KUBERNETES_VERSION=v1.35.8 \
+  KUBERNETES_COMMIT=$(git ls-remote https://github.com/kubernetes/kubernetes refs/tags/v1.35.8^{} | cut -f1) \
+  CRICTL_VERSION=v1.35.0
 ```
 
 ## Verify
@@ -53,7 +95,7 @@ A Hadron node is a normal provider-kubernetes node: on boot the reconcile runs a
 writes `/run/provider-kubernetes/status.yaml` (`phase: Converged` on success) and
 the `provider-kubernetes.kairos.io/*` Node annotations - see
 [Node status](./status.md). A converged control plane shows the node at the bundled
-Kubernetes version with `containerd://2.1.4`, OS-IMAGE `Hadron Linux`, and a
+Kubernetes version with `containerd://2.3.5`, OS-IMAGE `Hadron Linux`, and a
 `...-hadron` kernel. The node is `NotReady` until you install a CNI ([CNI](./cni.md)).
 
 ## Caveats

@@ -1,0 +1,46 @@
+#cloud-config
+# Worker joining the cluster from init-custom-port.yaml, whose API server
+# listens on 7443.
+#
+# STATUS: early public release; adapt to your environment, not yet certified for production.
+#
+# Produce the token and CA pin on a control-plane node:
+#   sudo agent-provider-kubernetes mint-join --role worker --ttl 1h \
+#     --endpoint 192.168.1.10:7443 \
+#     --cluster-token "<the cluster's cluster_token>"
+# mint-join derives the endpoint from admin.conf, which already carries the
+# custom port, so --endpoint is only needed if you want to override it.
+
+install:
+  device: "auto"
+  auto: true
+  reboot: true
+
+users:
+  - name: kairos
+    groups: ["admin", "sudo"]
+    passwd: kairos
+
+hostname: worker-7443
+
+cluster:
+  cluster_token: "CHANGE-ME-to-match-the-control-plane-cluster_token"
+
+  # The port again: this is what the provider TCP-probes before joining.
+  control_plane_host: "192.168.1.10:7443"
+
+  role: worker
+
+  providerConfig:
+    cluster_root_path: "/"
+
+  config: |
+    joinConfiguration:
+      discovery:
+        bootstrapToken:
+          token: "abcdef.0123456789abcdef"
+          apiServerEndpoint: "192.168.1.10:7443"
+          # CA pinning is mandatory; the provider never sets
+          # unsafeSkipCAVerification.
+          caCertHashes:
+            - "sha256:REPLACE-WITH-CA-SPKI-PIN"

@@ -1,0 +1,22 @@
+# kubelet systemd unit aligned with the upstream kubeadm pattern. The kubelet is
+# started here; the drop-in that wires kubeadm's flags into it is
+# /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf, which THIS IMAGE
+# ships, exactly as the upstream kubeadm packages do. kubeadm never writes or
+# touches that drop-in: the only file kubeadm writes for the kubelet is
+# /var/lib/kubelet/kubeadm-flags.env (kubeadm 1.37.0 app/constants/constants.go:
+# 318-321), which the drop-in reads as an EnvironmentFile.
+#
+# Installed under /usr/lib, not /etc/systemd (persistent on Kairos), and with no
+# [Install] section: see the header of containerd.service for the full reasoning
+# and the systemd citations (ADR-19 U2, F-UNITPATH).
+[Unit]
+Description=kubelet: The Kubernetes Node Agent
+Documentation=https://kubernetes.io/docs/
+Wants=network-online.target containerd.service
+After=network-online.target containerd.service
+
+[Service]
+ExecStart=/usr/bin/kubelet
+Restart=always
+StartLimitInterval=0
+RestartSec=10

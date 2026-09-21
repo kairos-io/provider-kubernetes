@@ -50,8 +50,9 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          # Pin to the version validated locally against the v2 config.
-          version: v2.12.2
+          # Pin to the version validated locally against the v2 config. Must be
+          # built with a Go >= the go.mod `go` directive (v2.13.2: go1.27.0).
+          version: v2.13.2
 
   # Derive the image-build matrix from the single source of truth for the
   # supported Kubernetes window: kubeadm.SupportedMinors in version.go (ADR-3).
@@ -160,14 +161,152 @@ jobs:
           esac
           echo "OK: image bundles the k8s ${{ matrix.minor }} toolchain"
 
+      - name: Verify owner and mode of the files the image installs
+        env:
+          IMG: kairos-kubeadm:ci-${{ matrix.minor }}
+        run: |
+          set -euo pipefail
+          # tar run as root keeps an archive's owner and COPY --from keeps it, so a
+          # foreign owner (the crictl release tarball stores uid 1001) could reach the
+          # image with no build step failing. The release gate runs the same script.
+          bash scripts/verify-image-files.sh "$IMG"
+
+      - name: Verify the image-only bundle, its exact refs and import-images --verify-only (F-IMPORTREF, ADR-16-A2)
+        env:
+          IMG: kairos-kubeadm:ci-${{ matrix.minor }}
+          K8S: ${{ steps.ver.outputs.k8s }}
+        run: |
+          set -euo pipefail
+          # The bundle must ship only in /system/provider-kubernetes/images (nothing
+          # under the persistent /opt), root-owned along the whole path and within half
+          # of every boot importer bound; every bundled control-plane tarball must
+          # import under its EXACT ref, or an air-gap first boot cannot find kubeadm's
+          # images / the sandbox image; and the image's own `import-images
+          # --verify-only` must report outcome=verified for every images.lock entry.
+          # The checks live in one script that the release gate runs too (see its
+          # header), so both gates run the same checks.
+          bash scripts/verify-bundle-refs.sh "$IMG" "$K8S"
+
+      - name: Verify bundled etcdctl/etcdutl are the verified etcd image's (ADR-12-A1)
+        env:
+          IMG: kairos-kubeadm:ci-${{ matrix.minor }}
+          K8S: ${{ steps.ver.outputs.k8s }}
+        run: |
+          set -euo pipefail
+          # etcdctl/etcdutl are extracted at build time from the cosign-verified etcd
+          # image kubeadm pins (ADR-12-A1). Assert against the SHIPPED image:
+          #   (a) regular files, 0755, root:root, no setuid/setgid;
+          #   (b) version == the bundled kubeadm's etcd tag minus -N (never hardcoded);
+          #   (c) byte-identical to /usr/local/bin/* of the bundled etcd image tarball.
+          work="$(mktemp -d)"
+          cids=()
+          loaded=""
+          cleanup() {
+            for c in "${cids[@]}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done
+            if [ -n "$loaded" ]; then docker image rm -f "$loaded" >/dev/null 2>&1 || true; fi
+            rm -rf "$work"
+          }
+          trap cleanup EXIT
+
+          # (a) stat is GNU coreutils in the image. An exact "755" also rules out
+          # setuid/setgid/sticky, which %a would print as a leading 4th digit.
+          modes="$(docker run --rm --entrypoint stat "$IMG" -c '%n|%F|%a|%u|%g' \
+            /usr/bin/etcdctl /usr/bin/etcdutl)"
+          printf '%s\n' "$modes"
+          want_modes="$(printf '%s\n' '/usr/bin/etcdctl|regular file|755|0|0' \
+            '/usr/bin/etcdutl|regular file|755|0|0')"
+          [ "$modes" = "$want_modes" ] \
+            || { echo "etcdctl/etcdutl must be root:root 0755 regular files without setuid/setgid" >&2; exit 1; }
+
+          # (b) the expected version comes from the bundled kubeadm's etcd pin.
+          etcd_ref="$(docker run --rm --entrypoint /usr/bin/kubeadm "$IMG" \
+            config images list --kubernetes-version "$K8S" \
+            --image-repository registry.k8s.io | grep '/etcd:')" \
+            || { echo "could not resolve the etcd image from the bundled kubeadm ${K8S}" >&2; exit 1; }
+          [ "$(printf '%s\n' "$etcd_ref" | wc -l)" -eq 1 ] \
+            || { echo "expected exactly one etcd image, got: ${etcd_ref}" >&2; exit 1; }
+          etcd_tag="${etcd_ref##*:}"
+          [[ "$etcd_tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] \
+            || { echo "unexpected etcd image tag '${etcd_tag}'" >&2; exit 1; }
+          want="${etcd_tag%-*}"
+          for tool in etcdctl etcdutl; do
+            out="$(docker run --rm --entrypoint "/usr/bin/${tool}" "$IMG" version)"
+            first="${out%%$'\n'*}"
+            echo "bundled: ${first} (kubeadm ${K8S} pins ${etcd_ref})"
+            [ "$first" = "${tool} version: ${want}" ] \
+              || { echo "${tool} version mismatch: got '${first}', want '${tool} version: ${want}'" >&2; exit 1; }
+          done
+
+          # (c) select the single etcd entry from the image's own images.lock.
+          docker run --rm --entrypoint cat "$IMG" \
+            /system/provider-kubernetes/images/images.lock > "$work/images.lock"
+          sel='.images[] | select(.ref | test("/etcd:"))'
+          n="$(jq "[${sel}] | length" "$work/images.lock")"
+          [ "$n" -eq 1 ] || { echo "images.lock has ${n} etcd entries, want 1" >&2; exit 1; }
+          lock_ref="$(jq -r "${sel} | .ref" "$work/images.lock")"
+          lock_tar="$(jq -r "${sel} | .tarball" "$work/images.lock")"
+          lock_verified="$(jq -r "${sel} | .verified" "$work/images.lock")"
+          [ "$lock_ref" = "$etcd_ref" ] \
+            || { echo "images.lock etcd ${lock_ref} != kubeadm etcd ${etcd_ref}" >&2; exit 1; }
+          [ "$lock_verified" = true ] \
+            || { echo "images.lock etcd entry is not signature-verified" >&2; exit 1; }
+          [[ "$lock_tar" =~ ^[A-Za-z0-9._-]+\.tar$ ]] \
+            || { echo "unexpected etcd tarball name '${lock_tar}'" >&2; exit 1; }
+          docker run --rm --entrypoint cat "$IMG" \
+            "/system/provider-kubernetes/images/${lock_tar}" > "$work/etcd.tar"
+          # The build names every bundled tarball's image with its exact ref
+          # (F-IMPORTREF), so docker load creates the image "${lock_ref}" and the trap
+          # removes that name afterwards. Refuse to go on if the name already exists
+          # locally: this step must never delete an image it did not create. The
+          # RepoTags bytes must be exactly ["<lock_ref>"] (the whole manifest.json is
+          # asserted byte-for-byte by the tarball-naming step). A tag (unlike an image
+          # ID) resolves the same on the classic and the containerd image store.
+          if docker image inspect "$lock_ref" >/dev/null 2>&1; then
+            echo "an image named ${lock_ref} already exists locally; refusing to load over it (the cleanup would delete it)" >&2
+            exit 1
+          fi
+          manifest="$(tar -xOf "$work/etcd.tar" manifest.json)"
+          if [ "$(grep -o '"RepoTags":\[' <<<"$manifest" | wc -l)" -ne 1 ] \
+            || [[ "$manifest" != *"\"RepoTags\":[\"${lock_ref}\"]"* ]]; then
+            echo "etcd tarball RepoTags must be exactly [\"${lock_ref}\"]" >&2
+            exit 1
+          fi
+          loaded="$lock_ref"
+          load_out="$(docker load -i "$work/etcd.tar")"
+          printf '%s\n' "$load_out"
+          grep -qxF "Loaded image: ${loaded}" <<<"$load_out" \
+            || { echo "docker load did not load ${loaded}" >&2; exit 1; }
+          # NEVER docker run the etcd image: docker create only materializes its
+          # filesystem for docker cp (the command argument is never started), and
+          # --pull never guarantees it is the loaded tarball, not a registry pull.
+          etcd_cid="$(docker create --pull never "$loaded" /usr/local/bin/etcdctl)"
+          cids+=("$etcd_cid")
+          final_cid="$(docker create --pull never "$IMG" /usr/bin/etcdctl)"
+          cids+=("$final_cid")
+          for tool in etcdctl etcdutl; do
+            docker cp "${etcd_cid}:/usr/local/bin/${tool}" "$work/etcd-image-${tool}"
+            docker cp "${final_cid}:/usr/bin/${tool}" "$work/final-image-${tool}"
+            for f in "$work/etcd-image-${tool}" "$work/final-image-${tool}"; do
+              if [ ! -f "$f" ] || [ -L "$f" ]; then echo "${f} is not a regular file" >&2; exit 1; fi
+            done
+            a="$(sha256sum "$work/etcd-image-${tool}" | cut -d' ' -f1)"
+            b="$(sha256sum "$work/final-image-${tool}" | cut -d' ' -f1)"
+            echo "${tool}: ${lock_ref} /usr/local/bin sha256=${a}; ${IMG} /usr/bin sha256=${b}"
+            [ "$a" = "$b" ] || { echo "${tool} in the image is not byte-identical to the verified etcd image's" >&2; exit 1; }
+          done
+          echo "OK: etcdctl/etcdutl ${want} are the verified ${lock_ref} binaries"
+
       - name: Verify containerd sandbox (pause) image is version-matched (C4)
         run: |
           set -euo pipefail
           img="kairos-kubeadm:ci-${{ matrix.minor }}"
           # The build pins containerd's sandbox_image to the pause kubeadm expects;
           # assert they match so a stale/hardcoded pause tag can't regress (C4).
+          # Pass the bundled version explicitly: without it kubeadm resolves a
+          # remote "stable" label, which makes the expected pause network-dependent.
           want="$(docker run --rm --entrypoint /usr/bin/kubeadm "$img" \
-            config images list --image-repository registry.k8s.io | grep -E '/pause:[0-9]')"
+            config images list --kubernetes-version "${{ steps.ver.outputs.k8s }}" \
+            --image-repository registry.k8s.io | grep -E '/pause:[0-9]')"
           got="$(docker run --rm --entrypoint sh "$img" -c \
             "grep -oE 'registry.k8s.io/pause:[0-9.]+' /etc/containerd/config.toml")"
           echo "kubeadm pause: ${want}; containerd sandbox_image: ${got}"
@@ -309,6 +448,17 @@ jobs:
             KUBERNETES_VERSION=${{ steps.ver.outputs.k8s }} \
             BASE_IMAGE=kairos-kubeadm:${{ steps.ver.outputs.k8s }} \
             E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:${{ steps.ver.outputs.k8s }}
+
+      - name: Verify the e2e node image still owns its units (ADR-19 U2, S19-11)
+        run: |
+          set -euo pipefail
+          # The node image FROM-derives the release image, so anything it does to
+          # the units reaches the e2e run but not the image job's gate. It used to
+          # re-run `systemctl enable ... || true`, which would have written absolute
+          # links back into the persistent /etc/systemd/system and hidden the
+          # failure. Same checks as the image job, restricted to the unit layout.
+          bash scripts/verify-image-files.sh \
+            "kairos-kubeadm-e2e-node:${{ steps.ver.outputs.k8s }}" --units-only
 
       - name: Run e2e suite
         run: |

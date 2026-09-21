@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
+
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 )
 
 // externalKubeadmInit brings up a single-node control plane WITHOUT the provider:
@@ -35,7 +37,7 @@ import (
 func externalKubeadmInit(t *testing.T, nc *nodeContainer, ip, k8sVer string) {
 	t.Helper()
 	out, err := nc.ExecTimeout(reconcileTimeout,
-		"kubeadm", "init",
+		hostexec.KubeadmPath, "init",
 		"--apiserver-advertise-address", ip,
 		"--pod-network-cidr", "10.244.0.0/16",
 		"--kubernetes-version", k8sVer,
@@ -45,7 +47,7 @@ func externalKubeadmInit(t *testing.T, nc *nodeContainer, ip, k8sVer string) {
 		t.Fatalf("plain kubeadm init (external CP): %v\n--- output ---\n%s", err, out)
 	}
 	nc.waitFor(t, "external CP apiserver /healthz ok", 120*time.Second, func() bool {
-		o, e := nc.execErr("kubectl", "--kubeconfig", adminConf, "get", "--raw", "/healthz")
+		o, e := nc.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf, "get", "--raw", "/healthz")
 		return e == nil && strings.TrimSpace(o) == "ok"
 	})
 }
@@ -76,7 +78,7 @@ func TestExternallyManagedControlPlaneJoin(t *testing.T) {
 
 	// Sanity: the CP is externally managed -- the provider never ran on it, so it
 	// has no provider status file. This distinguishes the scenario from TestWorkerJoin.
-	if _, statErr := cpNC.execErr("test", "-e", statusRunPath); statErr == nil {
+	if _, statErr := cpNC.execErr(binTest, "-e", statusRunPath); statErr == nil {
 		t.Fatalf("external CP unexpectedly has a provider status file at %s; it should be externally managed (provider never ran on it)", statusRunPath)
 	}
 
@@ -88,7 +90,7 @@ func TestExternallyManagedControlPlaneJoin(t *testing.T) {
 	if !strings.Contains(caPEM, "BEGIN CERTIFICATE") {
 		t.Fatalf("external CP ca.crt does not look like a PEM cert:\n%s", caPEM)
 	}
-	tokenOut, err := cpNC.ExecTimeout(60*time.Second, "kubeadm", "token", "create")
+	tokenOut, err := cpNC.ExecTimeout(60*time.Second, hostexec.KubeadmPath, "token", "create")
 	if err != nil {
 		t.Fatalf("kubeadm token create on external CP: %v\n%s", err, tokenOut)
 	}
@@ -145,7 +147,7 @@ func TestExternallyManagedControlPlaneJoin(t *testing.T) {
 	// 5b. The externally-managed CP now sees 2 registered nodes.
 	var nodeCount int
 	cpNC.waitFor(t, "2 nodes registered on external CP", 90*time.Second, func() bool {
-		o, e := cpNC.execErr("kubectl", "--kubeconfig", adminConf,
+		o, e := cpNC.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf,
 			"get", "nodes", "-o", "jsonpath={.items[*].metadata.name}")
 		if e != nil {
 			return false

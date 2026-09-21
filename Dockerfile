@@ -3,6 +3,12 @@
 # checksum-verified against the publisher's HTTPS-served .sha256 file, fixing the
 # unverified-curl supply-chain pitfall of the previous kubeadm provider.
 #
+# etcdctl and etcdutl (used for the pre-upgrade etcd snapshot, ADR-12-A1) are not
+# downloaded at all: they are extracted from the etcd control-plane image the
+# image-bundler stage already digest-pins, cosign-verifies and bundles, so they are
+# static, version-matched to the etcd kubeadm deploys, and add no new download
+# origin or pin.
+#
 # Base is the Kairos Hadron immutable OS (musl). We mirror the canonical Kairos
 # image build flow (images/Dockerfile upstream): the base is a pure upstream OS
 # that kairos-init transforms into a Kairos system in two phases (install, init).
@@ -12,7 +18,7 @@
 #
 # Build:
 #   docker build \
-#     --build-arg KUBERNETES_VERSION=v1.34.0 \
+#     --build-arg KUBERNETES_VERSION=v1.37.0 \
 #     --build-arg PROVIDER_VERSION=$(git describe --always) \
 #     -t ghcr.io/<you>/kairos-kubeadm:<tag> .
 #
@@ -35,7 +41,9 @@ ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940
 # kairos-init that matches the version Kairos itself uses to build Hadron. Older
 # pins (e.g. v0.6.0) cannot regenerate Hadron's initramfs (dracut -f ... fails).
 ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
-ARG GO_BUILDER_IMAGE=golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648
+# Provider toolchain: its tag MUST match the go.mod `go` directive (enforced by
+# `make verify-pins`), so the image build never drifts from CI.
+ARG GO_BUILDER_IMAGE=golang:1.27.1-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125
 ARG TARGETARCH=amd64
 
 # containerd and kubelet are ALWAYS built fully static from source: Hadron is
@@ -43,26 +51,33 @@ ARG TARGETARCH=amd64
 # runs on musl AND glibc. STATIC_BUILDER is the from-source toolchain (Debian Go,
 # matching the validated recipe); patch-pinned (matches GO_BUILDER_IMAGE's pin
 # level) so the from-source compiler is reproducible across Go patch releases.
-ARG STATIC_BUILDER_IMAGE=golang:1.26.4@sha256:f96cc555eb8db430159a3aa6797cd5bae561945b7b0fe7d0e284c63a3b291609
+# It deliberately tracks the Go MINOR that upstream Kubernetes builds every
+# release in the supported window with (.go-version: 1.26.x for 1.35-1.37), at its
+# latest patch, rather than the provider's Go: kubelet is upstream code, so it is
+# compiled with the toolchain upstream qualifies it against. Move it to a newer
+# Go minor only once upstream release branches do.
+ARG STATIC_BUILDER_IMAGE=golang:1.26.8@sha256:3c3e25a4da13fd0478eed2df1eb35a0e667094a7124d3993a6a1d30f71c17e79
 
 # Kubernetes (must be within the supported window the provider enforces at
-# runtime: 1.34 / 1.35 / 1.36 as of 2026).
-ARG KUBERNETES_VERSION=v1.34.0
+# runtime: 1.35 / 1.36 / 1.37 as of September 2026).
+ARG KUBERNETES_VERSION=v1.37.0
 # Commit SHA the KUBERNETES_VERSION tag must resolve to. Used by the static
 # from-source kubelet build to pin the clone to an immutable commit (a git tag is
 # mutable; a commit SHA is content-addressed), matching the checksum discipline of
 # the binary-download path. MUST be updated together with KUBERNETES_VERSION or
 # the build fails loud.
-ARG KUBERNETES_COMMIT=f28b4c9efbca5c5c0af716d9f2d5702667ee8a45
+ARG KUBERNETES_COMMIT=f54c212e3a2f75d674b717a9b29052b20b60aefc
 
 # Container runtime stack.
-ARG CONTAINERD_VERSION=2.1.4
+ARG CONTAINERD_VERSION=2.3.5
 # Commit SHA for CONTAINERD_VERSION (same rationale as KUBERNETES_COMMIT; used by
 # the static from-source containerd build).
-ARG CONTAINERD_COMMIT=75cb2b7193e4e490e9fbdc236c0e811ccaba3376
-ARG RUNC_VERSION=v1.3.0
-ARG CNI_PLUGINS_VERSION=v1.8.0
-ARG CRICTL_VERSION=v1.34.0
+ARG CONTAINERD_COMMIT=1294c24a7da8e5a793ed378161673abe94118892
+# renovate: datasource=github-releases depName=opencontainers/runc
+ARG RUNC_VERSION=v1.5.1
+# renovate: datasource=github-releases depName=containernetworking/plugins
+ARG CNI_PLUGINS_VERSION=v1.9.1
+ARG CRICTL_VERSION=v1.37.0
 
 # Provider build version (injected into the binary via -ldflags).
 ARG PROVIDER_VERSION=dev
@@ -113,10 +128,12 @@ RUN set -eux; \
       curl -fsSL -o "${bin}.sha256" "${base}/${bin}.sha256"; \
       echo "$(cat ${bin}.sha256)  ${bin}" | sha256sum -c -; \
       rm "${bin}.sha256"; \
-      chmod +x "${bin}"; \
+      chmod 0755 "${bin}"; \
     done
 
-# crictl: published with a SHA256SUMS file alongside the release tarballs.
+# crictl: published with a SHA256SUMS file alongside the release tarballs. tar run
+# as root keeps the owner stored in the archive (the cri-tools tarball stores crictl
+# as uid 1001), and COPY --from keeps the owner it finds, so set it explicitly.
 RUN set -eux; \
     base="https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}"; \
     file="crictl-${CRICTL_VERSION}-linux-${TARGETARCH}.tar.gz"; \
@@ -125,7 +142,14 @@ RUN set -eux; \
     echo "$(cat ${file}.sha256)  ${file}" | sha256sum -c -; \
     tar -xzf "${file}"; \
     rm "${file}" "${file}.sha256"; \
-    chmod +x crictl
+    chown 0:0 crictl; \
+    chmod 0755 crictl
+
+# Every binary this stage hands to the final image must be a root:root 0755 regular
+# file; scripts/verify-image-files.sh checks the same on the shipped image.
+RUN set -eu; \
+    bad="$(find kubeadm kubectl crictl ! \( -type f -user 0 -group 0 -perm 0755 \))"; \
+    if [ -n "${bad}" ]; then echo "FATAL: not root:root 0755 regular files: ${bad}" >&2; exit 1; fi
 
 # ----------------------------------------------------------------------------
 # Stage: download and verify the runtime stack we DON'T build from source
@@ -149,9 +173,11 @@ RUN set -eux; \
     grep "  runc.${TARGETARCH}$" runc.sha256sum | sha256sum -c -; \
     rm runc.sha256sum; \
     mv "runc.${TARGETARCH}" runc; \
-    chmod +x runc
+    chmod 0755 runc
 
-# CNI plugins: each release tarball has a matching <file>.sha256 sibling.
+# CNI plugins: each release tarball has a matching <file>.sha256 sibling. The
+# tarball stores root-owned entries today; chown anyway, since tar run as root
+# keeps whatever owner the archive stores.
 RUN set -eux; \
     base="https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}"; \
     file="cni-plugins-linux-${TARGETARCH}-${CNI_PLUGINS_VERSION}.tgz"; \
@@ -159,7 +185,24 @@ RUN set -eux; \
     curl -fsSL -o "${file}.sha256" "${base}/${file}.sha256"; \
     echo "$(awk '{print $1}' ${file}.sha256)  ${file}" | sha256sum -c -; \
     mkdir -p cni && tar -xzf "${file}" -C cni; \
-    rm "${file}" "${file}.sha256"
+    rm "${file}" "${file}.sha256"; \
+    chown -R 0:0 cni
+
+# Every file this stage hands to the final image must be a root:root regular file
+# with an exact mode: runc and the cni directory 0755, every CNI plugin 0755, and
+# the two documentation files the plugins tarball also ships (LICENSE, README.md)
+# 0644. Naming both modes exactly, instead of only excluding the group/other-write
+# and setuid bits, means a plugin that arrived non-executable -- or any new entry a
+# future tarball adds -- fails the build instead of passing a mode-range test.
+# scripts/verify-image-files.sh makes the same assertions on the shipped image.
+RUN set -eu; \
+    bad_runc="$(find runc ! \( -type f -user 0 -group 0 -perm 0755 \))"; \
+    bad_cni="$(find cni -mindepth 1 ! -name LICENSE ! -name README.md ! \( -type f -user 0 -group 0 -perm 0755 \))"; \
+    bad_cni_doc="$(find cni -mindepth 1 \( -name LICENSE -o -name README.md \) ! \( -type f -user 0 -group 0 -perm 0644 \))"; \
+    got="$(stat -c '%F|%u|%g|%a' cni)"; \
+    if [ -n "${bad_runc}${bad_cni}${bad_cni_doc}" ] || [ "${got}" != "directory|0|0|755" ]; then \
+      echo "FATAL: want root:root regular files, plugins 0755 and LICENSE/README.md 0644; runc: '${bad_runc}' plugins: '${bad_cni}' docs: '${bad_cni_doc}' cni: ${got}" >&2; exit 1; \
+    fi
 
 # ----------------------------------------------------------------------------
 # Stage: build kubelet fully static from source.
@@ -181,6 +224,16 @@ RUN git clone --depth 1 --branch "${KUBERNETES_VERSION}" \
  && if [ "${got}" != "${KUBERNETES_COMMIT}" ]; then \
       echo "kubernetes ${KUBERNETES_VERSION} resolved to ${got}, expected ${KUBERNETES_COMMIT}; update KUBERNETES_COMMIT to match KUBERNETES_VERSION" >&2; exit 1; \
     fi
+# Fail loud if upstream qualified this release on a NEWER Go than STATIC_BUILDER
+# provides (the builder would be missing Go fixes upstream ships with); warn when
+# the Go minors differ so a builder minor bump is not forgotten.
+RUN set -eu; \
+    want="$(cat /src/.go-version)"; have="$(go env GOVERSION)"; have="${have#go}"; \
+    if [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -1)" != "$want" ]; then \
+      echo "kubernetes ${KUBERNETES_VERSION} is qualified on Go ${want}; STATIC_BUILDER_IMAGE is Go ${have}; bump STATIC_BUILDER_IMAGE" >&2; exit 1; \
+    fi; \
+    [ "${want%.*}" = "${have%.*}" ] || echo "WARNING: kubelet built with Go ${have}; upstream Go minor is ${want%.*}" >&2; \
+    echo "kubelet Go toolchain ${have} >= upstream .go-version ${want}"
 WORKDIR /src
 RUN set -eux; \
     V="${KUBERNETES_VERSION}"; \
@@ -233,18 +286,37 @@ RUN set -eux; \
 # set from the bundled kubeadm (same source as the pause pin, so refs never drift),
 # cosign-VERIFY each against the Kubernetes release identity, and fetch each as a
 # ctr-importable tarball with crane (daemonless). The tarballs + a digest lockfile
-# are embedded read-only in the final image and imported into containerd at boot,
-# so a first boot converges with NO registry access (air-gap). Because the images
-# land in the immutable OS with no later admission check, signature verification is
-# done here at BUILD time (P5). CNI is intentionally NOT bundled (operator choice).
+# (images.lock) are embedded in the read-only OS image at
+# /system/provider-kubernetes/images and imported into containerd at boot, so a
+# first boot converges with NO registry access (air-gap). Because the images land
+# in the immutable OS with no later admission check, signature verification is done
+# here at BUILD time (P5). CNI is intentionally NOT bundled (operator choice).
+#
+# The boot import is lock-driven and validating (ADR-16-A2): it imports only the
+# images.lock entries, and refuses any directory, lock or tarball that is not
+# root-owned, is group/other-writable, is not a regular file or sits on another
+# filesystem than the provider binary. The bundle's owner and mode are therefore
+# set HERE (root:root, directory 0755, files 0644): COPY keeps each file's owner and
+# mode from this stage, and fixing them in the final stage would store every
+# tarball a second time in a new layer.
+#
+# The same run then extracts the static etcdctl + etcdutl from the bundled etcd
+# image tarball into /tools (never /images), offline, after the signature floor
+# (etcd MUST verify) and images.lock are settled (ADR-12-A1). Taking them from the
+# verified etcd image rather than a separate download keeps one trust root and
+# guarantees the tools match the etcd version kubeadm deploys for this release.
+# TARGETARCH is passed explicitly: crane pull selects that platform from each
+# verified multi-arch index (crane's implicit default is linux/amd64).
 # ----------------------------------------------------------------------------
 FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS image-bundler
 ARG KUBERNETES_VERSION
 ARG TARGETARCH
 # crane + cosign are static Go binaries that run on musl; both are version-pinned
 # and checksum-verified at install, matching the rest of the binary supply chain.
+# renovate: datasource=github-releases depName=google/go-containerregistry
 ARG CRANE_VERSION=v0.20.3
-ARG COSIGN_VERSION=v2.4.3
+# renovate: datasource=github-releases depName=sigstore/cosign
+ARG COSIGN_VERSION=v2.6.5
 RUN apk add --no-cache curl ca-certificates
 COPY --from=k8s-binaries /bin/kubeadm /usr/bin/kubeadm
 # Install crane (checksum-verified against the release checksums.txt).
@@ -271,10 +343,25 @@ RUN set -eux; \
     grep " ${asset}\$" cosign_checksums.txt | sha256sum -c -; \
     install -m0755 "${asset}" /usr/bin/cosign; \
     rm -f "${asset}" cosign_checksums.txt
-# Resolve -> verify -> pull each control-plane image, and write the digest lockfile.
+# Resolve -> verify -> pull each control-plane image, write the digest lockfile,
+# then extract etcdctl/etcdutl from the verified etcd image into /tools. In the same
+# RUN (one layer), normalize the bundle to root:root, directory 0755, files 0644,
+# and fail the build unless /images holds exactly that: flat, regular files only.
 COPY build/bundle-images.sh /usr/local/bin/bundle-images.sh
-RUN KUBERNETES_VERSION="${KUBERNETES_VERSION}" OUT_DIR=/images \
-      sh /usr/local/bin/bundle-images.sh
+RUN set -eu; \
+    KUBERNETES_VERSION="${KUBERNETES_VERSION}" TARGETARCH="${TARGETARCH}" \
+      OUT_DIR=/images TOOLS_DIR=/tools \
+      sh /usr/local/bin/bundle-images.sh; \
+    bad="$(find /images -mindepth 1 ! -type f)"; \
+    if [ -n "${bad}" ]; then echo "FATAL: /images must hold only regular files; found: ${bad}" >&2; exit 1; fi; \
+    chown -R 0:0 /images; \
+    chmod 0755 /images; \
+    find /images -mindepth 1 -maxdepth 1 -type f -exec chmod 0644 {} +; \
+    got="$(stat -c '%F|%u|%g|%a' /images)"; \
+    if [ "${got}" != "directory|0|0|755" ]; then echo "FATAL: /images is ${got}, want directory|0|0|755" >&2; exit 1; fi; \
+    bad="$(find /images -mindepth 1 ! \( -type f -user 0 -group 0 -perm 0644 \))"; \
+    if [ -n "${bad}" ]; then echo "FATAL: /images entries not root:root 0644 regular files: ${bad}" >&2; exit 1; fi; \
+    echo "bundle layout: /images root:root 0755, $(find /images -mindepth 1 -type f | wc -l) root:root 0644 files"
 
 # ----------------------------------------------------------------------------
 # Final stage: a Kairos image with everything wired up.
@@ -288,11 +375,14 @@ ARG KUBERNETES_VERSION
 
 # --- Kubernetes binaries -----------------------------------------------------
 # kubeadm/kubectl/crictl are the verified official static binaries; kubelet is
-# built static from source (musl base).
+# built static from source (musl base). etcdctl/etcdutl are the static binaries
+# from the cosign-verified etcd image kubeadm pins for this release (ADR-12-A1).
 COPY --from=k8s-binaries  /bin/kubeadm  /usr/bin/kubeadm
 COPY --from=kubelet-build  /bin/kubelet  /usr/bin/kubelet
 COPY --from=k8s-binaries  /bin/kubectl  /usr/bin/kubectl
 COPY --from=k8s-binaries  /bin/crictl   /usr/bin/crictl
+COPY --from=image-bundler /tools/etcdctl /usr/bin/etcdctl
+COPY --from=image-bundler /tools/etcdutl /usr/bin/etcdutl
 
 # --- Container runtime -------------------------------------------------------
 # containerd + shim are built static from source; runc and CNI are verified
@@ -307,23 +397,194 @@ COPY --from=runtime-binaries /bin/cni/            /opt/cni/bin/
 COPY --from=provider-builder /out/agent-provider-kubernetes /system/providers/agent-provider-kubernetes
 
 # --- Static configuration ---------------------------------------------------
-COPY containerd/config.toml                 /etc/containerd/config.toml
-COPY systemd/containerd.service             /etc/systemd/system/containerd.service
-COPY systemd/kubelet.service                /etc/systemd/system/kubelet.service
-COPY systemd/kubelet.service.d/10-kubeadm.conf /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-COPY sysctl/k8s.conf                        /etc/sysctl.d/k8s.conf
-COPY modules-load/k8s.conf                  /etc/modules-load.d/k8s.conf
-COPY systemd/provider-kubernetes-image-import.service /etc/systemd/system/provider-kubernetes-image-import.service
+# COPY from the build context keeps each file's mode from the checkout, which
+# depends on the umask it was made with (0664 under umask 002), so set 0644.
+#
+# --chmod also lands on any PARENT DIRECTORY the COPY has to create, and whether it
+# does is builder-dependent: on Docker 26.1 with BuildKit v0.32 the directories come
+# out 0755, while on Docker 29.6 with the containerd image store the same Dockerfile
+# leaves them 0644 (reported against f5e0ad0, reproduced there on BuildKit v0.31 and
+# v0.32 and on the docker-container driver; the layer tar itself records
+# drw-r--r--). A 0644 directory is not traversable by anything but root, and the
+# image's own gate rejects it. Create every directory these COPYs would otherwise
+# create, with an explicit mode, so the result cannot depend on the builder.
+RUN set -eux; \
+    for d in /etc/containerd; do \
+      mkdir -p "${d}"; chown 0:0 "${d}"; chmod 0755 "${d}"; \
+    done
 
-# --- Pre-bundled control-plane images (ADR-16) ------------------------------
-# Embed the control-plane image tarballs (fetched by the image-bundler stage)
-# read-only in the OS image; the import oneshot loads them into containerd at boot
-# so a first boot converges with no registry access (air-gap).
-COPY --from=image-bundler /images /opt/provider-kubernetes/images
+COPY --chmod=0644 containerd/config.toml                 /etc/containerd/config.toml
+COPY --chmod=0644 sysctl/k8s.conf                        /etc/sysctl.d/k8s.conf
+COPY --chmod=0644 modules-load/k8s.conf                  /etc/modules-load.d/k8s.conf
+
+# Fail the build, on whatever builder runs it, if any directory holding the files
+# above is not a root:root 0755 directory. scripts/verify-image-files.sh asserts the
+# same on the shipped image; this catches it in the build that caused it, before an
+# image reaches the release gate.
+RUN set -eu; \
+    bad=""; \
+    for d in /etc/containerd /etc/sysctl.d /etc/modules-load.d; do \
+      got="$(stat -c '%F|%u|%g|%a' "${d}")"; \
+      [ "${got}" = "directory|0|0|755" ] || bad="${bad} ${d} is ${got},"; \
+    done; \
+    if [ -n "${bad}" ]; then echo "FATAL: want root:root 0755 directories;${bad%,} want directory|0|0|755" >&2; exit 1; fi; \
+    echo "static configuration directories: root:root 0755"
+
+# --- systemd units (ADR-19 U2, F-UNITPATH) -----------------------------------
+# Every unit this provider owns lives in /usr/lib/systemd/system, which is part of
+# the booted image and is replaced wholesale by each A/B upgrade. NOT in
+# /etc/systemd/system: on Kairos that is a persistent bind immucore refreshes with
+# `rsync -aquAX` (update-only, no --delete), which means a copy there is replaced
+# only when the new build's mtime happens to be newer, survives a rollback to an
+# older OS, can never be removed by an upgrade, and makes `systemctl mask` fail.
+# Moving the units here makes unit content a property of the booted image;
+# provider-kubernetes-unit-migrate.service removes the copies earlier releases
+# left behind on existing nodes.
+#
+# None of these units has an [Install] section, so `systemctl is-enabled` reports
+# "static" and exits 0 (systemd v260.2 src/shared/install.c:62-69,3197-3203 and
+# src/systemctl/systemctl-is-enabled.c:140-154), which is what kubeadm's preflight
+# ServiceCheck reads, and `systemctl disable` cannot leave an invisible persistent
+# override behind. They are enabled by the relative links created below.
+#
+# The directories are created explicitly with owner and mode instead of being left
+# to the COPYs: --chmod also lands on any parent directory a COPY has to create,
+# and whether it does is builder-dependent (0755 on Docker 26.1 with BuildKit v0.32,
+# 0644 on Docker 29.6 with the containerd image store), and a 0644 directory is
+# traversable only by root -- systemd would not be able to read the units.
+RUN set -eux; \
+    for d in /usr/lib/systemd/system \
+             /usr/lib/systemd/system/kubelet.service.d \
+             /usr/lib/systemd/system/multi-user.target.wants; do \
+      mkdir -p "${d}"; chown 0:0 "${d}"; chmod 0755 "${d}"; \
+    done
+
+COPY --chmod=0644 usr-lib-systemd/containerd.service                       /usr/lib/systemd/system/containerd.service
+COPY --chmod=0644 usr-lib-systemd/kubelet.service                          /usr/lib/systemd/system/kubelet.service
+COPY --chmod=0644 usr-lib-systemd/provider-kubernetes-image-import.service /usr/lib/systemd/system/provider-kubernetes-image-import.service
+COPY --chmod=0644 usr-lib-systemd/provider-kubernetes-unit-migrate.service /usr/lib/systemd/system/provider-kubernetes-unit-migrate.service
+COPY --chmod=0644 usr-lib-systemd/kubelet.service.d/10-kubeadm.conf        /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf
+
+# Enable the four units the only way an image can, and the way systemd documents:
+# a symlink in multi-user.target.wants NAMED after the unit. systemd adds the
+# dependency from the ENTRY name and reads the target only to compare basenames
+# (v260.2 src/core/load-dropin.c:62-73,75-98,100), so the target is deliberately
+# RELATIVE (`../<unit>`): it stays correct inside an image, a sysext hierarchy or a
+# chroot, and it can never point into a persistent directory. `ln -sfn` keeps the
+# step idempotent if a base image ever ships one of these names.
+RUN set -eux; \
+    for u in containerd.service kubelet.service \
+             provider-kubernetes-image-import.service \
+             provider-kubernetes-unit-migrate.service; do \
+      ln -sfn "../${u}" "/usr/lib/systemd/system/multi-user.target.wants/${u}"; \
+    done
+
+# Fail the build if the layout above is not exactly what U2 promises: root:root
+# 0755 directories, no [Install] section in any unit (which would make
+# `systemctl is-enabled` report "disabled" and `systemctl disable` stick a
+# persistent override into /etc), a relative `../<unit>` symlink for each unit, and
+# no provider-owned name anywhere under /etc/systemd. scripts/verify-image-files.sh
+# asserts the same on the shipped image, for the release image and the e2e node
+# image (S19-11); this catches it in the build that caused it.
+RUN set -eu; \
+    bad=""; \
+    for d in /usr/lib/systemd/system /usr/lib/systemd/system/kubelet.service.d \
+             /usr/lib/systemd/system/multi-user.target.wants; do \
+      got="$(stat -c '%F|%u|%g|%a' "${d}")"; \
+      [ "${got}" = "directory|0|0|755" ] || bad="${bad} ${d} is ${got},"; \
+    done; \
+    for u in containerd.service kubelet.service \
+             provider-kubernetes-image-import.service \
+             provider-kubernetes-unit-migrate.service; do \
+      l="/usr/lib/systemd/system/multi-user.target.wants/${u}"; \
+      got="$(stat -c '%F' "${l}" 2>/dev/null || echo missing)"; \
+      [ "${got}" = "symbolic link" ] || bad="${bad} ${l} is ${got}, want a symbolic link,"; \
+      got="$(readlink "${l}" 2>/dev/null || echo missing)"; \
+      [ "${got}" = "../${u}" ] || bad="${bad} ${l} points at ${got} not ../${u},"; \
+      if grep -q '^\[Install\]' "/usr/lib/systemd/system/${u}"; then \
+        bad="${bad} /usr/lib/systemd/system/${u} still has an [Install] section,"; \
+      fi; \
+    done; \
+    if [ -d /etc/systemd ]; then \
+      stray="$(find /etc/systemd -maxdepth 4 \
+        \( -name containerd.service -o -name kubelet.service \
+           -o -name 'provider-kubernetes-*.service' -o -name kubelet.service.d \) -print)"; \
+      if [ -n "${stray}" ]; then \
+        printf '%s\n' "${stray}" >&2; \
+        bad="${bad} the paths above are provider-owned names under /etc/systemd,"; \
+      fi; \
+    fi; \
+    if [ -n "${bad}" ]; then echo "FATAL: image-owned unit layout (ADR-19 U2);${bad%,}" >&2; exit 1; fi; \
+    echo "image-owned units: /usr/lib/systemd/system, static, linked with ../<unit>, nothing under /etc/systemd"
+
+# --- Daemon exec path (ADR-19 U1, F-UNITPATH) --------------------------------
+# Image-only drop-ins that give containerd and the kubelet -- and every helper,
+# shim and CNI plugin they start -- a PATH that stays inside the read-only image
+# (internal/hostexec.ChildPATH). They go under /usr/lib, NOT /etc/systemd: /etc is
+# a persistent bind on Kairos refreshed with `rsync --update`, so an /etc copy
+# would only reach an upgraded node when the new build's mtime happens to be newer,
+# whereas systemd collects drop-ins from every unit search directory (so these
+# apply even to a stale /etc fragment) and /usr/lib is replaced wholesale by every
+# A/B upgrade. --chmod=0644 because COPY would otherwise keep the checkout's mode
+# (0664 under umask 002); COPY's default owner is 0:0. The two <unit>.d directories
+# are created here rather than by the COPYs: --chmod also lands on a parent directory
+# the COPY creates, and whether it does is builder-dependent (0755 on Docker 26.1 with
+# BuildKit v0.32, 0644 on Docker 29.6 with the containerd image store -- QA report
+# against f5e0ad0), and a 0644 directory is traversable only by root.
+RUN set -eux; \
+    for d in /usr/lib/systemd/system/containerd.service.d \
+             /usr/lib/systemd/system/kubelet.service.d; do \
+      mkdir -p "${d}"; chown 0:0 "${d}"; chmod 0755 "${d}"; \
+    done
+
+COPY --chmod=0644 usr-lib-systemd/containerd.service.d/50-provider-kubernetes-exec-path.conf /usr/lib/systemd/system/containerd.service.d/50-provider-kubernetes-exec-path.conf
+COPY --chmod=0644 usr-lib-systemd/kubelet.service.d/50-provider-kubernetes-exec-path.conf    /usr/lib/systemd/system/kubelet.service.d/50-provider-kubernetes-exec-path.conf
+
+# Image-only replacements for the two containerd directories that default into the
+# persistent /opt and whose contents containerd EXECUTES as root: the image-verifier
+# bin_dir (run on every pull) and the NRI plugin_path (launched at every daemon
+# start). containerd/config.toml points both here; see the comments there for the
+# plugin IDs and the upstream defaults. They ship empty, which is the same "nothing
+# to run" state a stock node has, except that this one lives on the read-only image.
+# Modes are set explicitly per directory rather than via mkdir's umask (PR #37).
+RUN set -eux; \
+    for d in /usr/lib/containerd /usr/lib/containerd/image-verifier \
+             /usr/lib/containerd/image-verifier/bin /usr/lib/nri /usr/lib/nri/plugins; do \
+      mkdir -p "$d"; chown 0:0 "$d"; chmod 0755 "$d"; \
+    done
+
+# Same check for the directories this block adds: the drop-in directories above and
+# the two containerd executes from. A 0644 directory here would make systemd unable
+# to read the drop-in as anything but root, which is how the /etc ones were caught.
+RUN set -eu; \
+    bad=""; \
+    for d in /usr/lib/systemd/system/containerd.service.d /usr/lib/systemd/system/kubelet.service.d \
+             /usr/lib/containerd /usr/lib/containerd/image-verifier \
+             /usr/lib/containerd/image-verifier/bin /usr/lib/nri /usr/lib/nri/plugins; do \
+      got="$(stat -c '%F|%u|%g|%a' "${d}")"; \
+      [ "${got}" = "directory|0|0|755" ] || bad="${bad} ${d} is ${got},"; \
+    done; \
+    if [ -n "${bad}" ]; then echo "FATAL: want root:root 0755 directories;${bad%,} want directory|0|0|755" >&2; exit 1; fi; \
+    echo "daemon exec-path directories: root:root 0755"
+
+# --- Pre-bundled control-plane images (ADR-16, ADR-16-A2) -------------------
+# Embed the control-plane image tarballs and images.lock (fetched, verified and
+# named by the image-bundler stage) in /system/provider-kubernetes/images: part of
+# the read-only OS image, on the same filesystem as the provider binary above, in
+# no systemd-sysext hierarchy, and NOT under /opt (persistent on Kairos, so a copy
+# there could be changed on the node and would outlive an image upgrade). The
+# import oneshot runs `agent-provider-kubernetes import-images`, which imports only
+# the images.lock entries after checking owner, mode, file type, filesystem and
+# tarball structure, so a first boot converges with no registry access (air-gap).
+# No chmod/chown here: the image-bundler stage already set root:root 0755/0644, and
+# COPY creates /system/provider-kubernetes and the images directory as root 0755
+# (verified on BuildKit v0.13.2 and v0.32.2). scripts/verify-bundle-refs.sh asserts
+# the owner and mode of the whole path on the shipped image.
+COPY --from=image-bundler /images /system/provider-kubernetes/images
 
 # Pin containerd's pod-sandbox (pause) image to the EXACT version the bundled
 # kubeadm expects for this Kubernetes minor, instead of a hardcoded tag. kubeadm
-# bumps the pause version per release (e.g. 3.10.1 in 1.34/1.35 -> 3.10.2 in 1.36);
+# bumps the pause version per release (e.g. 3.10.1 in 1.35 -> 3.10.2 in 1.36/1.37);
 # a stale tag means containerd pulls a different pause than kubeadm pre-pulled
 # (duplicate image / drift -- pitfall C4). Resolved from kubeadm at build time so
 # it always matches the bundled toolchain. kubeadm is static and runs here on musl.
@@ -336,8 +597,14 @@ RUN set -eux; \
     grep -q "sandbox_image = \"${pause}\"" /etc/containerd/config.toml; \
     echo "pinned containerd sandbox_image to ${pause}"
 
-# --- Boot-time setup: enable services; modules and sysctls load via /etc -----
-RUN systemctl enable containerd.service kubelet.service provider-kubernetes-image-import.service
+# --- Boot-time setup --------------------------------------------------------
+# There is no `systemctl enable` here any more (ADR-19 U2): it writes ABSOLUTE
+# symlinks into the persistent /etc/systemd/system (systemd v260.2
+# src/shared/install.c:572-601), which is the trap this release removes, and it
+# needs an [Install] section, which these units deliberately no longer have. The
+# units are enabled by the relative multi-user.target.wants links created with
+# them above. Modules and sysctls still load from /etc/modules-load.d and
+# /etc/sysctl.d, which are per-boot overlay content on Kairos, not persistent.
 
 # Record the bundled Kubernetes version on the image (OS_VERSION style banner
 # kept short; the provider also detects/enforces the version at runtime).

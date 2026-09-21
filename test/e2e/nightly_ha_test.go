@@ -38,6 +38,8 @@ import (
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 	k8syaml "sigs.k8s.io/yaml"
+
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 )
 
 // cpJoinConvergeTimeout bounds the cp2 control-plane join + convergence checks.
@@ -91,7 +93,7 @@ func TestNightlyControlPlaneJoinHA(t *testing.T) {
 	t.Logf("cp1 reconcile (init) output:\n%s", out)
 
 	cp1NC.waitFor(t, "cp1 apiserver /healthz ok", 120*time.Second, func() bool {
-		o, e := cp1NC.execErr("kubectl", "--kubeconfig", adminConf, "get", "--raw", "/healthz")
+		o, e := cp1NC.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf, "get", "--raw", "/healthz")
 		return e == nil && strings.TrimSpace(o) == "ok"
 	})
 
@@ -201,7 +203,7 @@ func TestNightlyControlPlaneJoinHA(t *testing.T) {
 // on the given (control-plane) container. Typed parse, not a string scrape.
 func countControlPlaneNodes(t *testing.T, nc *nodeContainer) int {
 	t.Helper()
-	out, err := nc.execErr("kubectl", "--kubeconfig", adminConf, "get", "nodes", "-o", "json")
+	out, err := nc.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf, "get", "nodes", "-o", "json")
 	if err != nil {
 		return 0
 	}
@@ -235,7 +237,7 @@ func countControlPlaneNodes(t *testing.T, nc *nodeContainer) int {
 func etcdMemberCount(t *testing.T, nc *nodeContainer) int {
 	t.Helper()
 	// Discover the etcd pod name (etcd-<nodename>) in kube-system.
-	podOut, err := nc.execErr("kubectl", "--kubeconfig", adminConf,
+	podOut, err := nc.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf,
 		"-n", "kube-system", "get", "pods",
 		"-l", "component=etcd",
 		"-o", "jsonpath={.items[0].metadata.name}")
@@ -250,7 +252,7 @@ func etcdMemberCount(t *testing.T, nc *nodeContainer) int {
 	// `etcdctl member list -w simple` prints one CSV line per member; counting
 	// non-empty lines yields the member count. We supply the static-pod cert paths
 	// and the loopback client endpoint kubeadm configures.
-	listOut, err := nc.execErr("kubectl", "--kubeconfig", adminConf,
+	listOut, err := nc.execErr(hostexec.KubectlPath, "--kubeconfig", adminConf,
 		"-n", "kube-system", "exec", etcdPod, "--",
 		"etcdctl",
 		"--endpoints=https://127.0.0.1:2379",

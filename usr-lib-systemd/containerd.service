@@ -1,0 +1,36 @@
+# Minimal containerd systemd unit aligned with the upstream containerd template.
+#
+# Installed at /usr/lib/systemd/system/containerd.service, which is part of the
+# booted image, NOT at /etc/systemd/system (a persistent bind on Kairos that
+# immucore refreshes with `rsync --update`, so a copy there would only be
+# replaced when the new build's mtime happens to be newer, would survive a
+# rollback, and could never be masked; ADR-19 U2, F-UNITPATH).
+#
+# There is deliberately no [Install] section: the unit is enabled by the
+# relative symlink ../containerd.service that the image ships in
+# /usr/lib/systemd/system/multi-user.target.wants/. systemd adds the dependency
+# by the NAME of that entry (src/core/load-dropin.c:62-73,100 at v260.2), so the
+# relative target is resolved only to check the basename matches. Without
+# [Install] rules `systemctl is-enabled` reports "static" and exits 0
+# (src/shared/install.c:62-69,3197-3203; src/systemctl/systemctl-is-enabled.c:
+# 140-154), which kubeadm's preflight accepts, and `systemctl disable` cannot
+# leave a persistent, invisible override behind. Use `systemctl mask` to stop
+# this unit; see docs/troubleshooting.md.
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target local-fs.target
+
+[Service]
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/bin/containerd
+Type=notify
+Delegate=yes
+KillMode=process
+Restart=always
+RestartSec=5
+LimitNPROC=infinity
+LimitCORE=infinity
+LimitNOFILE=1048576
+TasksMax=infinity
+OOMScoreAdjust=-999

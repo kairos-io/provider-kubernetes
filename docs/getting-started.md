@@ -12,7 +12,7 @@ This walks you from nothing to a running single-node Kubernetes control plane.
   control-plane endpoint (see [High availability](./high-availability.md)).
 
 The provider targets a rolling window of upstream Kubernetes minors (currently
-**1.34 / 1.35 / 1.36**). Pick one; the bundled `kubeadm` binary must match
+**1.35 / 1.36 / 1.37**). Pick one; the bundled `kubeadm` binary must match
 (a mismatch is a hard error - see [Lifecycle](./lifecycle.md)).
 
 ## 1. Get an image
@@ -27,8 +27,8 @@ checksum-verified.
 Tagged releases publish one image per supported Kubernetes minor:
 
 ```sh
-# choose the Kubernetes minor (1.34 / 1.35 / 1.36):
-docker pull ghcr.io/kairos-io/provider-kubernetes:v0.3.0-k8s1.34
+# choose a release tag and the Kubernetes minor (1.35 / 1.36 / 1.37):
+docker pull ghcr.io/kairos-io/provider-kubernetes:<release>-k8s1.37
 # the newest supported minor is also tagged plainly and as :latest
 docker pull ghcr.io/kairos-io/provider-kubernetes:latest
 ```
@@ -36,10 +36,10 @@ docker pull ghcr.io/kairos-io/provider-kubernetes:latest
 ### Option B - build it yourself
 
 ```sh
-make image KUBERNETES_VERSION=v1.34.0 VERSION=dev
+make image KUBERNETES_VERSION=v1.37.0 VERSION=dev
 # equivalently:
 docker build \
-  --build-arg KUBERNETES_VERSION=v1.34.0 \
+  --build-arg KUBERNETES_VERSION=v1.37.0 \
   --build-arg PROVIDER_VERSION="$(git describe --always)" \
   -t kairos-kubeadm:dev .
 ```
@@ -83,7 +83,7 @@ cluster:
     cluster_root_path: "/"
   config: |
     clusterConfiguration:
-      kubernetesVersion: v1.34.0
+      kubernetesVersion: v1.37.0
       controlPlaneEndpoint: "192.168.1.10:6443"
       networking:
         podSubnet: 10.244.0.0/16
@@ -115,3 +115,17 @@ rather than hanging - see [Troubleshooting](./troubleshooting.md).
 - [Add workers / more control planes](./creating-a-cluster.md)
 - [Stand up a multi-control-plane HA cluster](./high-availability.md)
 - [Install a CNI](./cni.md)
+
+## Other topologies
+
+Each of these is a worked sample rather than a separate mode to enable:
+
+- [`samples/air-gapped/`](../samples/air-gapped/) - no registry reachable. The
+  image carries the control-plane images and imports them at boot; you supply a
+  mirrored CNI.
+- [`samples/trusted-boot/`](../samples/trusted-boot/) - a UKI node, and why the
+  status file is the only channel you can read afterwards.
+- [`samples/custom-api-port/`](../samples/custom-api-port/) - an API server on a
+  port other than 6443.
+- [`samples/external-controlplane/`](../samples/external-controlplane/) - join a
+  control plane this provider did not bootstrap.

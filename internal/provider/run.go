@@ -34,8 +34,9 @@ type Options struct {
 	CPReachableProbe func(ctx context.Context) bool
 
 	// StatusSink is the destination for the structured reconcile status
-	// (ADR-4-S, S4). Nil defaults to a FileSink writing to both the
-	// /run and /var/log production paths. Inject a fake in tests.
+	// (ADR-4-S, S4). Nil defaults to newDefaultStatusSink: a FileSink writing to
+	// both the /run and /var/log production paths plus the Node-annotation sink.
+	// Inject a fake in tests.
 	StatusSink status.StatusSink
 
 	// --- Upgrade probes (ADR-12); nil -> production exec defaults. Injectable for
@@ -44,13 +45,26 @@ type Options struct {
 	ClusterVersionProbe func(ctx context.Context) string
 	// RunningKubeletVersionProbe reads this node's running kubelet version.
 	RunningKubeletVersionProbe func(ctx context.Context) string
-	// EncryptionConfirmed reports whether the etcd-snapshot dir is encrypted.
-	EncryptionConfirmed func(ctx context.Context) bool
+	// EncryptionConfirmed reports whether the given etcd-snapshot dir is confirmed
+	// encrypted at rest. nil -> etcdsnapshot.EncryptedAtRest (the fail-closed
+	// sysfs dm-crypt gate).
+	EncryptionConfirmed func(ctx context.Context, dir string) bool
 	// KubeletRestart restarts the kubelet after an upgrade; nil -> systemctl.
 	KubeletRestart func(ctx context.Context) error
 	// APIServerReachableProbe reports whether the LOCAL apiserver answers /healthz
-	// (ADR-12-R1); nil -> a /healthz probe to 127.0.0.1:6443.
+	// (ADR-12-R1); nil -> a /healthz probe to 127.0.0.1 on the cluster's
+	// localAPIEndpoint.bindPort (6443 when unset).
 	APIServerReachableProbe func(ctx context.Context) bool
+
+	// KubeletHealthyProbe reports local kubelet liveness (actualstate.State.
+	// KubeletHealthy), which reconcile.Plan uses to distinguish a fully
+	// converged established member from one that is already Initialized/
+	// Joined but degraded (status.PhaseDegraded, D-2). nil -> kubeletHealthyProbe():
+	// a bounded GET of the kubelet's own loopback healthz
+	// (http://127.0.0.1:10248/healthz, kubelethealth.go) -- the same check
+	// kubeadm itself waits on. Inject a fake in tests that need a healthy or
+	// degraded fixture without a real kubelet.
+	KubeletHealthyProbe func(ctx context.Context) bool
 }
 
 // Options also carries an injectable StatusSink for testing; nil -> production
@@ -67,12 +81,13 @@ type Options struct {
 // bounded to 2s per path, errors are logged and swallowed, and the real reconcile
 // exit code is never masked.
 func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error {
-	// S4+S3: construct the status sink once at the top. In production this is a
-	// MultiSink{FileSink, NodeAnnotationSink}: Layer 1 (always-written local file)
-	// plus Layer 2 (post-membership Node annotation via kubectl-argv, no-op when no
-	// kubeconfig exists). rootPath is extracted here (before NewContext) so the
-	// NodeAnnotationSink can be wired before the pctx parse error path. It uses the
-	// same ProviderOptions key as NewContext (providerOptRootPathKey / cluster_root_path).
+	// S4+S3: construct the status sink once at the top. In production this is
+	// newDefaultStatusSink's MultiSink{FileSink, NodeAnnotationSink}: Layer 1
+	// (always-written local file) plus Layer 2 (post-membership Node annotation via
+	// kubectl-argv, no-op when no kubeconfig exists). rootPath is extracted here
+	// (before NewContext) so the NodeAnnotationSink can be wired before the pctx
+	// parse error path. It uses the same ProviderOptions key as NewContext
+	// (providerOptRootPathKey / cluster_root_path).
 	// Tests may inject their own sink via opts.StatusSink.
 	sink := opts.StatusSink
 	// annotSink is the Layer-2 NodeAnnotationSink. It is declared here so it can
@@ -84,13 +99,7 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		if v := cluster.ProviderOptions[providerOptRootPathKey]; v != "" {
 			rootPath = v
 		}
-		// Construct with empty nodeName; ResolveNode will fall back to os.Hostname().
-		// After BuildInput we update ResolveNode to prefer the kubeadm node name.
-		annotSink = status.NewNodeAnnotationSink(rootPath, "")
-		sink = status.MultiSink{
-			status.NewFileSink(),
-			annotSink,
-		}
+		sink, annotSink = newDefaultStatusSink(rootPath)
 	}
 
 	bootID := readBootID()
@@ -115,6 +124,11 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		finalErr        error
 		finalState      actualstate.State
 		finalLastAction reconcile.Action
+		// finalDegraded is D-2's signal: reconcile.Plan returned VerdictDegraded
+		// (an already-established member whose kubelet is not healthy). It must
+		// only ever suppress a would-be Converged status, never mask a real
+		// error -- BuildStatus only consults it on the p.Err == nil path.
+		finalDegraded bool
 	)
 	// Defer record-then-return: runs exactly once on every exit path.
 	defer func() {
@@ -126,6 +140,7 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 			LastAction: finalLastAction,
 			Err:        finalErr,
 			Result:     finalResult,
+			Degraded:   finalDegraded,
 			Now:        time.Now().UTC().Format(time.RFC3339),
 			BootID:     bootID,
 			Version:    providerVersion,
@@ -180,20 +195,34 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	// auto-upgrade. The version probes are wired only when a target is set, so the
 	// no-upgrade path stays free of cluster/kubelet version reads.
 	target := ""
-	prober := actualstate.FileProber{RootPath: pctx.RootPath, ControlPlaneReachable: cpReachable}
+	prober := actualstate.FileProber{
+		RootPath:              pctx.RootPath,
+		ControlPlaneReachable: cpReachable,
+	}
+	// D-2: unconditional (unlike the upgrade-only probes below), since Plan's
+	// base (non-upgrade) path also needs KubeletHealthy to distinguish a
+	// converged member from a degraded one. nil -> the production default,
+	// a bounded loopback healthz probe (kubelethealth.go).
+	prober.KubeletHealthy = opts.KubeletHealthyProbe
+	if prober.KubeletHealthy == nil {
+		prober.KubeletHealthy = kubeletHealthyProbe()
+	}
 	if uc.ClusterConfiguration.KubernetesVersion != "" {
 		target = resolved
+		// One kubectl runner for both probes (ADR-1-A1): absolute path, closed
+		// environment, never PATH-resolved.
+		kubectlRunner := kubeadm.KubectlRunner()
 		prober.ClusterVersion = opts.ClusterVersionProbe
 		if prober.ClusterVersion == nil {
-			prober.ClusterVersion = clusterVersionViaKubectl(pctx.RootPath)
+			prober.ClusterVersion = clusterVersionViaKubectl(pctx.RootPath, kubectlRunner)
 		}
 		prober.RunningKubeletVersion = opts.RunningKubeletVersionProbe
 		if prober.RunningKubeletVersion == nil {
-			prober.RunningKubeletVersion = runningKubeletVersionViaKubectl(pctx.RootPath)
+			prober.RunningKubeletVersion = runningKubeletVersionViaKubectl(pctx.RootPath, kubectlRunner)
 		}
 		prober.APIServerReachable = opts.APIServerReachableProbe
 		if prober.APIServerReachable == nil {
-			prober.APIServerReachable = localAPIHealthyProbe()
+			prober.APIServerReachable = localAPIHealthyProbe(in.BindPort)
 		}
 	}
 
@@ -203,7 +232,8 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		finalErr = err
 		return err
 	}
-	actions := reconcile.Plan(role, target, state)
+	actions, verdict := reconcile.Plan(role, target, state)
+	finalDegraded = verdict == reconcile.VerdictDegraded
 
 	var join *credential.JoinMaterial
 	if role == actualstate.RoleWorker || role == actualstate.RoleControlPlane {
@@ -234,14 +264,16 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		KubeletRestart:      opts.KubeletRestart,       // nil -> systemctl (production)
 		LocalAPIReachable:   prober.APIServerReachable, // post-repair local-API wait (nil when no target)
 	}
-	// Best-effort pre-apply etcd snapshot on a control plane only (ADR-12 U5).
+	// Best-effort pre-apply etcd snapshot on a control plane only (ADR-12 U5,
+	// revised by ADR-12-A1). etcdsnapshot.Run defaults EncryptionConfirmed to its
+	// own fail-closed sysfs gate when opts.EncryptionConfirmed is nil.
 	if target != "" && (role == actualstate.RoleInit || role == actualstate.RoleControlPlane) {
-		encConfirmed := opts.EncryptionConfirmed
-		if encConfirmed == nil {
-			encConfirmed = encryptionConfirmedDefault(etcdsnapshot.DefaultDir)
-		}
-		exec.SnapshotEtcd = func(c context.Context) error {
-			return etcdsnapshot.Run(c, etcdsnapshot.Options{RootPath: pctx.RootPath, EncryptionConfirmed: encConfirmed})
+		exec.SnapshotEtcd = func(c context.Context) etcdsnapshot.Result {
+			return etcdsnapshot.Run(c, etcdsnapshot.Options{
+				RootPath:            pctx.RootPath,
+				TargetMinor:         kubeadm.Minor(target),
+				EncryptionConfirmed: opts.EncryptionConfirmed,
+			})
 		}
 	}
 
@@ -262,6 +294,20 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		return finalErr
 	}
 	return nil
+}
+
+// newDefaultStatusSink builds the production status sink Run uses when
+// Options.StatusSink is nil (ADR-4-S): Layer 1, a FileSink on the /run and
+// /var/log paths, fanned out with Layer 2, a NodeAnnotationSink that execs
+// kubectl against the kubeconfig under rootPath. The annotation sink is also
+// returned so Run can late-bind the kubeadm node name into it (Finding D).
+// Both layers act on the host, so this is a variable: the package tests replace
+// it with a guard that fails any test reaching it.
+var newDefaultStatusSink = func(rootPath string) (status.StatusSink, *status.NodeAnnotationSink) {
+	// Construct with empty nodeName; ResolveNode falls back to os.Hostname() until
+	// Run updates it with the kubeadm node name after BuildInput.
+	annot := status.NewNodeAnnotationSink(rootPath, "")
+	return status.MultiSink{status.NewFileSink(), annot}, annot
 }
 
 // recordConfigInvalid writes a ConfigInvalid status when Run exits before

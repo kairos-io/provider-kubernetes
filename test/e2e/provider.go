@@ -10,6 +10,8 @@ import (
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 	provideryaml "gopkg.in/yaml.v3"
 	k8syaml "sigs.k8s.io/yaml"
+
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 )
 
 // reconcileTimeout bounds a single reconcile exec. It sits just above the
@@ -22,15 +24,23 @@ const imagePullTimeout = 5 * time.Minute
 
 // These mirror the production contract constants exactly (kept as local copies so
 // the e2e package depends only on the public binary, not on internal/*):
-//   - providerBinaryPath: where the Kairos image installs the binary.
 //   - clusterStatePath:   the 0600 tmpfs path Provider() serializes the Cluster
 //     to and `reconcile --cluster-file` reads by default.
 //   - statusRunPath:      the 0640 tmpfs status doc every reconcile writes.
 //
 // If any of these change in internal/provider or internal/status, this harness
 // must change too -- that coupling is intentional (we test the real contract).
+//
+// The paths the provider itself resolves are the exception: the harness imports
+// internal/hostexec rather than copying them, because the E-B7 image checks must
+// cover exactly the set of binaries the provider executes (ADR-1-A1), and the
+// ADR-16-A2 checks exactly the bundle directory and provider binary the importer
+// uses, not copies that can drift:
+//   - providerBinaryPath: hostexec.ProviderBinaryPath, where the Kairos image
+//     installs the binary (also the importer's filesystem anchor).
+//   - the bundle directory: hostexec.BundleDir, used directly.
 const (
-	providerBinaryPath = "/system/providers/agent-provider-kubernetes"
+	providerBinaryPath = hostexec.ProviderBinaryPath
 	clusterStatePath   = "/run/provider-kubernetes/cluster.json"
 	statusRunPath      = "/run/provider-kubernetes/status.yaml"
 	adminConf          = "/etc/kubernetes/admin.conf"
@@ -55,8 +65,18 @@ func serializeCluster(t *testing.T, c clusterplugin.Cluster) string {
 // Returns the combined reconcile output and the exec error (nil on exit 0).
 func writeClusterAndReconcile(t *testing.T, nc *nodeContainer, c clusterplugin.Cluster) (string, error) {
 	t.Helper()
+	return writeClusterAndReconcileOpts(t, nc, c, execOptions{})
+}
+
+// writeClusterAndReconcileOpts is writeClusterAndReconcile with extra docker exec
+// flags on the reconcile exec only: KEY=VALUE variables (-e) and a working
+// directory (-w). E-B7 uses it to run reconcile with a hostile environment the
+// provider must not pass on to its children, from the working directory
+// production runs it in (ADR-1-A1).
+func writeClusterAndReconcileOpts(t *testing.T, nc *nodeContainer, c clusterplugin.Cluster, opts execOptions) (string, error) {
+	t.Helper()
 	nc.WriteFile(t, clusterStatePath, serializeCluster(t, c), "0600")
-	return nc.ExecTimeout(reconcileTimeout, providerBinaryPath, "reconcile", "--cluster-file="+clusterStatePath)
+	return nc.ExecOptsTimeout(reconcileTimeout, opts, providerBinaryPath, "reconcile", "--cluster-file="+clusterStatePath)
 }
 
 // prepullControlPlaneImages warms the kubeadm control-plane images before
@@ -67,7 +87,7 @@ func writeClusterAndReconcile(t *testing.T, nc *nodeContainer, c clusterplugin.C
 func prepullControlPlaneImages(t *testing.T, nc *nodeContainer, k8sVersion string) {
 	t.Helper()
 	out, err := nc.ExecTimeout(imagePullTimeout,
-		"kubeadm", "config", "images", "pull",
+		hostexec.KubeadmPath, "config", "images", "pull",
 		"--kubernetes-version", k8sVersion,
 		"--cri-socket", "unix:///run/containerd/containerd.sock")
 	if err != nil {
@@ -106,10 +126,11 @@ func readStatus(t *testing.T, nc *nodeContainer) statusDoc {
 }
 
 // kubectl runs kubectl inside the container against the admin kubeconfig kubeadm
-// init wrote, returning trimmed stdout. argv only.
+// init wrote, returning trimmed stdout. argv only, by absolute path (never via
+// PATH, where an E-B7 shadow shim may be planted).
 func kubectl(t *testing.T, nc *nodeContainer, args ...string) string {
 	t.Helper()
-	full := append([]string{"kubectl", "--kubeconfig", adminConf}, args...)
+	full := append([]string{hostexec.KubectlPath, "--kubeconfig", adminConf}, args...)
 	return strings.TrimSpace(nc.Exec(full...))
 }
 

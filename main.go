@@ -25,14 +25,17 @@ import (
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 	"github.com/mudler/go-pluggable"
+	yip "github.com/mudler/yip/pkg/schema"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 
+	"github.com/kairos-io/provider-kubernetes/internal/clusterconfigdir"
 	"github.com/kairos-io/provider-kubernetes/internal/imageimport"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 	"github.com/kairos-io/provider-kubernetes/internal/provider"
 	"github.com/kairos-io/provider-kubernetes/internal/reset"
+	"github.com/kairos-io/provider-kubernetes/internal/unitmigrate"
 	"github.com/kairos-io/provider-kubernetes/version"
 )
 
@@ -75,6 +78,46 @@ func handleProviderInfo(_ *pluggable.Event) pluggable.EventResponse {
 	}
 }
 
+// wrapProvider is the D-3 / F-UKIBOOT fix's seam (S-D3-1, security review
+// 2026-09-18). It composes ensure (production: clusterconfigdir.Ensure) with
+// next (production: provider.Provider) into the single
+// clusterplugin.ClusterProvider kairos-sdk@v0.5.0's ClusterPlugin.Run calls.
+// That call happens inside clusterplugin.ClusterPlugin.onBoot
+// (clusterplugin/plugin.go:50), strictly AFTER the boot payload is parsed and
+// config.Cluster is confirmed non-nil, and strictly BEFORE the SDK's own
+// OpenFile at plugin.go:59 that writes cluster.kairos.yaml with
+// O_CREATE|O_WRONLY|O_TRUNC, 0600 and no MkdirAll -- the ENOENT that is this
+// whole defect. ClusterPlugin.Run registers onBoot as the ONLY caller of the
+// Provider field (on bus.EventBoot); EventClusterReset and
+// init.provider.info are separate FactoryPlugins wired below with their own
+// handlers, so this wrapper never runs during an image-build probe and never
+// runs on a reset.
+//
+// next itself is untouched and stays side-effect-free (internal/provider.Provider's
+// documented invariant): ensure runs first and, only when it reports
+// rep.Withhold (an unsafe ancestor, an unsafe existing cloud-config
+// directory, or an unsafe token-file target -- S-D3-2/S-D3-3/S-D3-4, see
+// clusterconfigdir's package doc for the exact withhold set), the wrapper
+// substitutes the inert YipConfig for next's real one so the SDK's
+// unavoidable write carries no cluster_token and no Commands (S-D3-5). Every
+// other outcome (including a merely-missing ancestor or "nothing to
+// report") calls through to next unchanged.
+//
+// ensure is a parameter (rather than calling clusterconfigdir.Ensure
+// directly) so wrapProvider's composition logic is unit-testable with a fake
+// that returns a canned Report -- the real Ensure does Linux syscalls against
+// "/usr/local" and must never run against the real host filesystem from a
+// test (design principle 6, hardware-free testability).
+func wrapProvider(next clusterplugin.ClusterProvider, ensure func(clusterplugin.Cluster) clusterconfigdir.Report) clusterplugin.ClusterProvider {
+	return func(cluster clusterplugin.Cluster) yip.YipConfig {
+		rep := ensure(cluster)
+		if rep.Withhold {
+			return provider.InertConfig(string(rep.Reason))
+		}
+		return next(cluster)
+	}
+}
+
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 {
@@ -87,6 +130,8 @@ func main() {
 			os.Exit(runMintJoin(args[1:]))
 		case "import-images":
 			os.Exit(runImportImages(args[1:]))
+		case "migrate-units":
+			os.Exit(runMigrateUnits(args[1:]))
 		case "version", "--version", "-v":
 			fmt.Println(version.Version)
 			return
@@ -97,7 +142,7 @@ func main() {
 	}
 
 	logrus.Infof("starting agent-provider-kubernetes %s", version.Version)
-	plugin := clusterplugin.ClusterPlugin{Provider: provider.Provider}
+	plugin := clusterplugin.ClusterPlugin{Provider: wrapProvider(provider.Provider, clusterconfigdir.Ensure)}
 	if err := plugin.Run(
 		pluggable.FactoryPlugin{
 			EventType:     clusterplugin.EventClusterReset,
@@ -136,7 +181,7 @@ func runReconcile(args []string) int {
 		return 1
 	}
 
-	if err := provider.Run(context.Background(), cluster, provider.Options{Runner: kubeadm.ExecRunner{}}); err != nil {
+	if err := provider.Run(context.Background(), cluster, provider.Options{Runner: kubeadm.DefaultRunner()}); err != nil {
 		logrus.Errorf("reconcile: %v", err)
 		return 1
 	}
@@ -174,7 +219,7 @@ func runMintJoin(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	minter := credential.Minter{Runner: kubeadm.ExecRunner{}, RootPath: *rootPath}
+	minter := credential.Minter{Runner: kubeadm.DefaultRunner(), RootPath: *rootPath}
 	jm, err := minter.MintJoinMaterial(ctx, roleNorm == "controlplane", *ttl)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mint join material: %v\n", err)
@@ -252,7 +297,7 @@ func runReset(args []string) int {
 	}
 
 	if err := reset.Run(context.Background(), reset.Options{
-		Runner:    kubeadm.ExecRunner{},
+		Runner:    kubeadm.DefaultRunner(),
 		RootPath:  rootPath,
 		CRISocket: criSocket,
 	}); err != nil {
@@ -263,28 +308,79 @@ func runReset(args []string) int {
 	return 0
 }
 
-// runImportImages imports the pre-bundled control-plane image tarballs into
-// containerd's k8s.io namespace (ADR-16), so kubeadm init finds them locally and
-// a first boot converges with no registry access. Invoked at boot by the
+// parseImportImagesArgs validates import-images' argv per ADR-16-A2 decisions
+// 2 and 10: no arguments, or exactly "--verify-only". It is a pure function so
+// the CLI's usage contract is unit-testable without running Import. Any other
+// argv (including the removed "--dir" flag) is a usage error.
+func parseImportImagesArgs(args []string) (verifyOnly bool, err error) {
+	switch len(args) {
+	case 0:
+		return false, nil
+	case 1:
+		if args[0] == "--verify-only" {
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("usage: agent-provider-kubernetes import-images [--verify-only]")
+}
+
+// runImportImages imports the pre-bundled control-plane image tarballs listed
+// in images.lock into containerd's k8s.io namespace (ADR-16, revised by
+// ADR-16-A2), so kubeadm init finds them locally and a first boot converges
+// with no registry access. Invoked at boot by the
 // provider-kubernetes-image-import.service oneshot, ordered before kubelet.
 func runImportImages(args []string) int {
-	fs := flag.NewFlagSet("import-images", flag.ContinueOnError)
-	dir := fs.String("dir", imageimport.DefaultDir, "directory of *.tar control-plane images to import")
-	if err := fs.Parse(args); err != nil {
+	verifyOnly, err := parseImportImagesArgs(args)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		printUsage(os.Stderr)
 		return 2
 	}
 	// Bounded so the boot path can never hang (#4099-1); importing local tarballs
 	// is fast, this is generous headroom for many/large images on slow disks.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	logrus.Infof("provider-kubernetes import-images %s: importing from %s", version.Version, *dir)
-	if err := imageimport.Import(ctx, *dir, kubeadm.ExecRunner{Path: "ctr"}); err != nil {
-		logrus.Errorf("import-images: %v", err)
-		return 1
+	logrus.Infof("provider-kubernetes import-images %s: verifyOnly=%t", version.Version, verifyOnly)
+	// Import's summary line carries the outcome and must stay the last line this
+	// command logs (CI, the release gate and the e2e tests read it as such).
+	res := imageimport.Import(ctx, kubeadm.CtrRunner(), verifyOnly)
+	return imageimport.ExitCode(res.Outcome)
+}
+
+// parseMigrateUnitsArgs validates migrate-units' argv per ADR-19 U2 / S19-8:
+// no arguments at all (the migrate unit must not read cloud-config, env, the
+// bus or the network before or through this command). It is a pure function
+// so the CLI's usage contract is unit-testable without running Migrate. Any
+// argument is a usage error.
+func parseMigrateUnitsArgs(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: agent-provider-kubernetes migrate-units")
 	}
-	logrus.Info("provider-kubernetes import-images: done")
-	return 0
+	return nil
+}
+
+// runMigrateUnits removes the stale /etc/systemd/system copies of
+// containerd.service, kubelet.service, provider-kubernetes-image-import.service
+// and the kubelet 10-kubeadm.conf drop-in (ADR-19 U2 decision 3), but only
+// when each is byte-identical to a blob this project has ever shipped at that
+// path, and reloads systemd if a fragment or drop-in was removed. Invoked at
+// boot by the image-only provider-kubernetes-unit-migrate.service oneshot,
+// ordered before containerd, the image-import unit and kubelet.
+func runMigrateUnits(args []string) int {
+	if err := parseMigrateUnitsArgs(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		printUsage(os.Stderr)
+		return 2
+	}
+	// Bounded so the boot path can never hang (#4099-1); ADR-19 S19-7's overall
+	// deadline is 20s.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	logrus.Infof("provider-kubernetes migrate-units %s", version.Version)
+	// Migrate's summary line carries the outcome and must stay the last line
+	// this command logs (CI and the e2e tests read it as such).
+	res := unitmigrate.Migrate(ctx, kubeadm.SystemctlRunner())
+	return unitmigrate.ExitCode(res.Outcome)
 }
 
 func printUsage(w *os.File) {
@@ -295,6 +391,9 @@ Usage:
   agent-provider-kubernetes reconcile [...] run one bounded reconcile pass for a serialized Cluster
   agent-provider-kubernetes reset [...]     run a bounded cluster reset from a serialized Cluster
   agent-provider-kubernetes mint-join [...] mint join material on a CP and print a join cloud-config
+  agent-provider-kubernetes import-images [--verify-only]
+                                           import (or verify) the bundled control-plane image tarballs
+  agent-provider-kubernetes migrate-units   remove stale /etc/systemd/system unit copies (ADR-19 U2)
   agent-provider-kubernetes version         print the build version
 
 mint-join flags:

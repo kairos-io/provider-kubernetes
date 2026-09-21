@@ -9,12 +9,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/kairos-io/provider-kubernetes/internal/etcdsnapshot"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
@@ -60,11 +60,13 @@ type KubeadmExecutor struct {
 	KubeletRestart func(ctx context.Context) error
 	// LocalAPIReachable reports whether the LOCAL apiserver answers; used after a
 	// kubelet-config repair (ADR-12-R1). nil uses an HTTPS /healthz probe to
-	// 127.0.0.1:6443. Injectable for tests.
+	// 127.0.0.1 on Input.BindPort (6443 when unset). Injectable for tests.
 	LocalAPIReachable func(ctx context.Context) bool
 	// SnapshotEtcd, when set, is invoked best-effort before `upgrade apply` on a
-	// control plane (ADR-12 U5). nil skips it. It must never block (bounded by ctx).
-	SnapshotEtcd func(ctx context.Context) error
+	// control plane (ADR-12 U5, revised by ADR-12-A1). nil skips it. It must never
+	// block (bounded by ctx) and never returns an error: every outcome (including
+	// refusal/failure) is a Result the caller logs and then proceeds past.
+	SnapshotEtcd func(ctx context.Context) etcdsnapshot.Result
 }
 
 // Execute runs a single planned action. The reconcile.Reconciler bounds ctx.
@@ -284,15 +286,14 @@ func (e *KubeadmExecutor) runUpgradeApply(ctx context.Context) error {
 			return e.runUpgradeNode(ctx)
 		}
 	}
-	// U5: best-effort etcd snapshot before the destructive apply (bounded; never
-	// blocks the upgrade -- failures are logged below). On a bounded retry of apply
-	// this runs again; that is harmless (the snapshot is single-retained and the
-	// pre-apply re-check above degrades a retry to upgrade-node once the cluster has
-	// actually flipped).
+	// U5/ADR-12-A1: best-effort etcd snapshot before the destructive apply (bounded;
+	// never blocks the upgrade). etcdsnapshot.Run is idempotent once per
+	// (cluster, target): a bounded retry of apply (e.g. after a lost-race
+	// re-check that still lands here) observes the same target and does not
+	// re-take or prune the already-verified pre-upgrade snapshot for it. Apply
+	// proceeds regardless of the outcome (skip/refuse/fail all fall through).
 	if e.SnapshotEtcd != nil {
-		if err := e.SnapshotEtcd(ctx); err != nil {
-			logrus.Warnf("provider-kubernetes: pre-upgrade etcd snapshot did not complete: %v (continuing)", err)
-		}
+		logSnapshotOutcome(e.SnapshotEtcd(ctx))
 	}
 	if _, err := e.Runner.Run(ctx, "upgrade", "apply", e.TargetVersion, "--yes", "--certificate-renewal=true"); err != nil {
 		return fmt.Errorf("kubeadm upgrade apply %s: %w", e.TargetVersion, err)
@@ -349,8 +350,12 @@ func (e *KubeadmExecutor) waitForLocalAPIHealthy(ctx context.Context) error {
 	reachable := e.LocalAPIReachable
 	if reachable == nil {
 		client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsInsecure()}}
+		// The cluster's own localAPIEndpoint.bindPort, not a fixed 6443: that
+		// is the port kubeadm gave the apiserver, so it is the only one that
+		// answers /healthz on this node.
+		healthz := kubeadmconfig.LocalAPIHealthzURL(e.Input.BindPort)
 		reachable = func(context.Context) bool {
-			resp, err := client.Get("https://127.0.0.1:6443/healthz") //nolint:noctx // bounded by the loop below
+			resp, err := client.Get(healthz) //nolint:noctx // bounded by the loop below
 			if err != nil {
 				return false
 			}
@@ -411,15 +416,43 @@ func (e *KubeadmExecutor) restartKubelet(ctx context.Context) error {
 }
 
 // defaultKubeletRestart runs `systemctl daemon-reload` then `systemctl restart
-// kubelet` via argv (no shell). Bounded by ctx.
+// kubelet` through kubeadm.SystemctlRunner() (ADR-1-A1: absolute path, closed
+// environment, no shell). Bounded by ctx.
 func defaultKubeletRestart(ctx context.Context) error {
+	return restartKubeletVia(ctx, kubeadm.SystemctlRunner())
+}
+
+// restartKubeletVia runs `daemon-reload` then `restart kubelet` through r,
+// stopping at the first error.
+func restartKubeletVia(ctx context.Context, r kubeadm.Runner) error {
 	for _, args := range [][]string{{"daemon-reload"}, {"restart", "kubelet"}} {
-		out, err := exec.CommandContext(ctx, "systemctl", args...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("systemctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		if _, err := r.Run(ctx, args...); err != nil {
+			return fmt.Errorf("systemctl %s: %w", strings.Join(args, " "), err)
 		}
 	}
 	return nil
+}
+
+// logSnapshotOutcome emits exactly one structured log line for a SnapshotEtcd
+// result, always containing the literal "etcd-snapshot outcome=" substring so it
+// is easy to grep for. taken/skipped-already-taken (a snapshot exists and covers
+// this target) log at Info; every other outcome (a refusal, a skip, or a
+// failure) logs at Warn so an operator notices without the upgrade being
+// blocked.
+func logSnapshotOutcome(res etcdsnapshot.Result) {
+	msg := fmt.Sprintf("provider-kubernetes: etcd-snapshot outcome=%s", res.Outcome)
+	if res.Path != "" {
+		msg += fmt.Sprintf(" path=%s", res.Path)
+	}
+	if res.Detail != "" {
+		msg += fmt.Sprintf(" detail=%s", res.Detail)
+	}
+	switch res.Outcome {
+	case etcdsnapshot.OutcomeTaken, etcdsnapshot.OutcomeAlreadyTaken:
+		logrus.Info(msg)
+	default:
+		logrus.Warn(msg)
+	}
 }
 
 // sameMinor reports whether two versions share a major.minor (e.g. "v1.34.8" and

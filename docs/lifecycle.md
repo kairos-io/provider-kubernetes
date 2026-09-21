@@ -13,7 +13,11 @@ The provider runs one bounded **reconcile** pass on each boot (from the
 
 If the node is already a converged, healthy member, the plan is empty and
 reconcile is a fast no-op. The provider does not re-bootstrap or re-join an
-already-converged node.
+already-converged node - including when that member's kubelet is unhealthy
+(masked, crashed, or every control-plane container exited): the action stays a
+no-op either way, but the status the node reports differs. A healthy member
+reports `phase: Converged`; an unhealthy one reports `phase: Degraded` so the
+outage is never silently hidden as a success. See [Node status](./status.md).
 
 ## Bounded, fail-loud, never hang
 
@@ -42,8 +46,9 @@ removal runbook in [High availability](./high-availability.md#removing-a-control
 ## Supported version window
 
 The provider targets the latest three in-support upstream Kubernetes minors,
-rolling forward (currently **1.34 / 1.35 / 1.36**). It uses the **v1beta4** kubeadm
-config API only (v1beta3 is EOL and deliberately unsupported).
+rolling forward (currently **1.35 / 1.36 / 1.37**; releases up to v0.3.0 shipped
+1.34 / 1.35 / 1.36). It uses the **v1beta4** kubeadm config API only (v1beta3 is
+EOL and deliberately unsupported).
 
 - The target minor can be pinned via `clusterConfiguration.kubernetesVersion`.
 - A pin that does not match the `kubeadm` binary bundled in the image is a **hard
@@ -61,5 +66,5 @@ cluster on the next reconcile (control plane via `kubeadm upgrade apply`, follow
 and workers via `kubeadm upgrade node`, one minor at a time). A newer image without
 a pin bump does not auto-upgrade, and downgrade / skip-level / out-of-window
 targets are refused. See [Upgrades](./upgrades.md) for the full operator runbook
-(single-node and HA), the automatic kubelet-config repair, etcd snapshots, and
+(single-node and HA), the automatic kubelet-config repair, etcd backups, and
 rollback.

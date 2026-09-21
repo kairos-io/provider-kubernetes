@@ -1,0 +1,93 @@
+#cloud-config
+# Worker joining a control plane that provider-kubernetes did NOT bootstrap
+# (kairos-io/kairos#4099, item 5).
+#
+# STATUS: early public release; adapt to your environment, not yet certified for production.
+#
+# You have a cluster somewhere else: plain kubeadm, a managed control plane, or
+# anything that can issue a bootstrap token. You do not have `mint-join` there,
+# and you may not want to compute an SPKI pin by hand. Supply the CA in PEM form
+# under ca_certs and the provider derives the pin itself.
+#
+# Three ways to anchor trust, in descending order of convenience:
+#   1. ca_certs (PEM) + a bootstrap token           <- what this file shows
+#   2. explicit caCertHashes ("sha256:...") + token
+#   3. a CA-embedded discovery file
+#      (joinConfiguration.discovery.file.kubeConfigPath)
+# Supply both 1 and 2 and they are cross-validated; a mismatch is a hard error.
+# CA pinning is mandatory in every case, and unsafeSkipCAVerification is never
+# set.
+#
+# On the external control plane:
+#   kubeadm token create --ttl 1h
+#   cat /etc/kubernetes/pki/ca.crt          # paste below, indented, as-is
+#
+# Read samples/external-controlplane/README.md before using this.
+
+install:
+  device: "auto"
+  auto: true
+  reboot: true
+
+users:
+  # Kairos 3.3+ requires at least one user in the 'admin' group for
+  # kairos-agent install to proceed (or set install.nousers: true).
+  - name: kairos
+    groups: ["admin", "sudo"]
+    passwd: kairos
+
+hostname: worker-external
+
+cluster:
+  # A correlation value. The external control plane does not need to know it,
+  # but every provider-managed node in the same cluster should share it.
+  cluster_token: "CHANGE-ME-to-a-long-high-entropy-cluster-correlation-string"
+
+  # The external control plane's API endpoint.
+  control_plane_host: "10.0.0.5:6443"
+
+  role: worker
+
+  providerConfig:
+    cluster_root_path: "/"
+
+  # The external cluster's CA certificate, verbatim. The provider computes the
+  # SPKI pin from it, so you do not precompute a hash.
+  #
+  # REPLACE THIS. The certificate below is a throwaway self-signed CA generated
+  # for this sample (subject CN=EXAMPLE-CA-DO-NOT-USE); nobody holds its private
+  # key and it anchors nothing. Left in place, the join fails at CA verification
+  # because the pin will not match the real cluster CA.
+  ca_certs:
+    - |
+      -----BEGIN CERTIFICATE-----
+      MIIDIzCCAgugAwIBAgIUBgacq9jRDfo9AyDTIC5FYoTx+tEwDQYJKoZIhvcNAQEL
+      BQAwIDEeMBwGA1UEAwwVRVhBTVBMRS1DQS1ETy1OT1QtVVNFMCAXDTI2MDkyMTEx
+      Mzc1N1oYDzIxMjYwODI4MTEzNzU3WjAgMR4wHAYDVQQDDBVFWEFNUExFLUNBLURP
+      LU5PVC1VU0UwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCvZWUxGuQS
+      FJgQxwrsgUP9EdjxbetyaehSWKvoHwhMHguSNNqfXlXJR2QcqJBav8vbVGUbpfL9
+      Vhs14YOQMiz7tCDZRUNdiu2OwyiuTy/zR1J8LRrketDv7/tNk3D17N+xdukTFvY+
+      tjPtgbEZZEaUWjDXoit/YZwiCpWWufdA41Kdr6mPKSBVcKMn1CEWHr92QrdMmDEE
+      n8k5NuJfAlZTKpSzMray0mJ1sbmOpAj/lAXAT57Hxd+MR47VWFut+oV0rBZ6YN6g
+      FLahu+ktItiWZmcCHSsc6+bZwDdDFs+4iNc5iWPL8IasO3anYKQOtGybv9A5PoYh
+      I1t+d+H8GW2nAgMBAAGjUzBRMB0GA1UdDgQWBBR+g5b+pT0IgQni3bPkUmokrpFW
+      TTAfBgNVHSMEGDAWgBR+g5b+pT0IgQni3bPkUmokrpFWTTAPBgNVHRMBAf8EBTAD
+      AQH/MA0GCSqGSIb3DQEBCwUAA4IBAQA5J+YtWWo3Rnk0YmnRdg/67JHUQrghoCzx
+      5VByNjkpqNutbWu+dGVcPnrr3ZzWhA5et5nOqRMED7hydrx5HhUYo9I/x4mfnhnE
+      l5yxcF4eN5qdHWfR+Y+p8bObbwu49JqcZw6lQMXcl+26dWEIFFgOJE6xHeMDlYow
+      CbiD1QYAUPF1xas4Et6TjKpamZu5fKJIYvaC20f0AhfouXl5TQtly/pXq1iFfucm
+      4MSyfezqmZ3SNePp5EdwV+ulKZANp40tKzJ5FPYt1Bik8TVaqy0hjKpb+WASphZq
+      n+AfuUMHJsBWkDhhr7az3PEXOnn1yTX7pE6QxiXz0hWnkNEsLFcN
+      -----END CERTIFICATE-----
+
+  config: |
+    joinConfiguration:
+      discovery:
+        bootstrapToken:
+          # From `kubeadm token create --ttl 1h` on the external control plane.
+          token: "abcdef.0123456789abcdef"
+          apiServerEndpoint: "10.0.0.5:6443"
+          # Omitted on purpose: the pin is derived from ca_certs above. Set it
+          # as well if you already have it, and the two are cross-validated.
+          # caCertHashes:
+          #   - "sha256:REPLACE-WITH-CA-SPKI-PIN"

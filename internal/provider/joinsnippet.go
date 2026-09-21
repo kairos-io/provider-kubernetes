@@ -65,8 +65,9 @@ const clusterTokenPlaceholder = "CHANGE-ME-to-match-the-control-plane-cluster_to
 
 // RenderJoinCloudConfig renders a Kairos cloud-config snippet for a joining node.
 // It fails loud (never emits a config) when the join material lacks a trust anchor
-// or, for a control-plane join, a certificate key — the same secure-by-default
-// posture the runtime join path enforces (ADR-2: never UnsafeSkipCAVerification).
+// or, for a control-plane join, a certificate key. That is the same
+// secure-by-default posture the runtime join path enforces (ADR-2: never
+// UnsafeSkipCAVerification).
 func RenderJoinCloudConfig(s JoinSnippet) (string, error) {
 	role := strings.ToLower(strings.TrimSpace(s.Role))
 	switch role {

@@ -8,12 +8,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
+
+	"github.com/kairos-io/provider-kubernetes/internal/etcdsnapshot"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile"
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile/actualstate"
 )
+
+// captureLogs installs a fresh logrus test hook on the package-level standard
+// logger (which logrus.Infof/Warnf/etc. write through) and restores the prior
+// hook set on test cleanup, so log-assertion tests never leak state into other
+// tests.
+func captureLogs(t *testing.T) *logrustest.Hook {
+	t.Helper()
+	logger := logrus.StandardLogger()
+	saved := logger.ReplaceHooks(make(logrus.LevelHooks))
+	t.Cleanup(func() { logger.ReplaceHooks(saved) })
+	return logrustest.NewLocal(logger)
+}
 
 type fakeRunner struct {
 	calls   [][]string
@@ -255,14 +271,20 @@ func TestUpgradeApply(t *testing.T) {
 
 func TestUpgradeApplyPreApplyRecheckDegradesToNode(t *testing.T) {
 	// If the cluster already reached the target (another CP applied first), the
-	// pre-apply re-check must run `upgrade node` instead of a second apply.
+	// pre-apply re-check must run `upgrade node` instead of a second apply, and
+	// must NOT invoke SnapshotEtcd (no destructive apply is about to happen).
 	r := &fakeRunner{}
+	snapshotCalls := 0
 	e := &KubeadmExecutor{
 		Runner:              r,
 		Role:                actualstate.RoleControlPlane,
 		TargetVersion:       "v1.35.0",
 		ClusterVersionProbe: func(context.Context) string { return "v1.35.4" },
 		KubeletRestart:      func(context.Context) error { return nil },
+		SnapshotEtcd: func(context.Context) etcdsnapshot.Result {
+			snapshotCalls++
+			return etcdsnapshot.Result{Outcome: etcdsnapshot.OutcomeTaken}
+		},
 	}
 	if err := e.Execute(context.Background(), reconcile.ActionUpgradeApply); err != nil {
 		t.Fatalf("apply: %v", err)
@@ -272,6 +294,111 @@ func TestUpgradeApplyPreApplyRecheckDegradesToNode(t *testing.T) {
 	}
 	if hasFlag(r.calls, "apply") {
 		t.Fatalf("must not apply when cluster already at target: %v", r.calls)
+	}
+	if snapshotCalls != 0 {
+		t.Fatalf("SnapshotEtcd must not be called when the pre-apply re-check degrades to upgrade node, called %d times", snapshotCalls)
+	}
+}
+
+// ADR-12-A1: every SnapshotEtcd outcome must (a) never block `upgrade apply`
+// (the argv is unchanged regardless of outcome) and (b) produce exactly one
+// "etcd-snapshot outcome=" log line, at Info for taken/already-taken and Warn
+// for everything else.
+func TestUpgradeApply_SnapshotOutcomeLogging(t *testing.T) {
+	cases := []struct {
+		outcome   etcdsnapshot.Outcome
+		wantLevel logrus.Level
+	}{
+		{etcdsnapshot.OutcomeTaken, logrus.InfoLevel},
+		{etcdsnapshot.OutcomeAlreadyTaken, logrus.InfoLevel},
+		{etcdsnapshot.OutcomeExternalEtcd, logrus.WarnLevel},
+		{etcdsnapshot.OutcomeEncryptionUnconfirmed, logrus.WarnLevel},
+		{etcdsnapshot.OutcomeEtcdctlMissing, logrus.WarnLevel},
+		{etcdsnapshot.OutcomeInsufficientSpace, logrus.WarnLevel},
+		{etcdsnapshot.OutcomeFailed, logrus.WarnLevel},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.outcome), func(t *testing.T) {
+			hook := captureLogs(t)
+
+			r := &fakeRunner{}
+			restarted := false
+			e := &KubeadmExecutor{
+				Runner:         r,
+				Role:           actualstate.RoleControlPlane,
+				TargetVersion:  "v1.35.0",
+				ClusterVersion: "v1.34.8",
+				KubeletRestart: func(context.Context) error { restarted = true; return nil },
+				SnapshotEtcd: func(context.Context) etcdsnapshot.Result {
+					return etcdsnapshot.Result{Outcome: tc.outcome, Path: "/some/path", Detail: "some detail"}
+				},
+			}
+			if err := e.Execute(context.Background(), reconcile.ActionUpgradeApply); err != nil {
+				t.Fatalf("upgrade apply: %v", err)
+			}
+
+			// Apply must ALWAYS proceed with the exact existing argv, regardless of
+			// the snapshot outcome.
+			if len(r.calls) != 1 || strings.Join(r.calls[0], " ") != "upgrade apply v1.35.0 --yes --certificate-renewal=true" {
+				t.Fatalf("unexpected argv for outcome %s: %v", tc.outcome, r.calls)
+			}
+			if !restarted {
+				t.Fatalf("expected kubelet restart after apply for outcome %s", tc.outcome)
+			}
+
+			var matches []*logrus.Entry
+			for _, e := range hook.AllEntries() {
+				if strings.Contains(e.Message, "etcd-snapshot outcome=") {
+					matches = append(matches, e)
+				}
+			}
+			if len(matches) != 1 {
+				t.Fatalf("expected exactly 1 'etcd-snapshot outcome=' log entry, got %d: %v", len(matches), hook.AllEntries())
+			}
+			if !strings.Contains(matches[0].Message, "outcome="+string(tc.outcome)) {
+				t.Fatalf("log entry does not name the outcome: %q", matches[0].Message)
+			}
+			if matches[0].Level != tc.wantLevel {
+				t.Fatalf("outcome %s logged at %s, want %s", tc.outcome, matches[0].Level, tc.wantLevel)
+			}
+		})
+	}
+}
+
+// ADR-1-A1/E-B5: defaultKubeletRestart runs through kubeadm.SystemctlRunner(),
+// daemon-reload then restart kubelet, in order, stopping at the first error.
+func TestRestartKubeletVia_OrderAndArgv(t *testing.T) {
+	r := &fakeRunner{}
+	if err := restartKubeletVia(context.Background(), r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := [][]string{{"daemon-reload"}, {"restart", "kubelet"}}
+	if len(r.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", r.calls, want)
+	}
+	for i, args := range want {
+		if strings.Join(r.calls[i], " ") != strings.Join(args, " ") {
+			t.Fatalf("call %d = %v, want %v", i, r.calls[i], args)
+		}
+	}
+}
+
+func TestRestartKubeletVia_StopsOnFirstError(t *testing.T) {
+	r := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if args[0] == "daemon-reload" {
+			return kubeadm.Result{}, errors.New("daemon-reload failed")
+		}
+		return kubeadm.Result{}, nil
+	}}
+	err := restartKubeletVia(context.Background(), r)
+	if err == nil {
+		t.Fatal("expected an error when daemon-reload fails")
+	}
+	if !strings.Contains(err.Error(), "daemon-reload") {
+		t.Fatalf("error does not name the failing command: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected exactly 1 call (stop on first error), got %v", r.calls)
 	}
 }
 

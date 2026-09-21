@@ -147,6 +147,15 @@ jobs:
             BASE_IMAGE=kairos-kubeadm:${{ steps.lower.outputs.k8s }} \
             E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:${{ steps.lower.outputs.k8s }}
 
+      - name: Verify the e2e node image still owns its units (ADR-19 U2, S19-11)
+        run: |
+          set -euo pipefail
+          # Same gate as the CI e2e job: the derived node image must not put any
+          # provider-owned unit name back into a persistent systemd search
+          # directory (it used to re-run `systemctl enable ... || true`).
+          bash scripts/verify-image-files.sh \
+            "kairos-kubeadm-e2e-node:${{ steps.lower.outputs.k8s }}" --units-only
+
       - name: Run nightly e2e suite (e2e + nightly)
         run: |
           E2E_NODE_IMAGE=kairos-kubeadm-e2e-node:${{ steps.lower.outputs.k8s }} \

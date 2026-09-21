@@ -2,10 +2,11 @@
 // provider-kubernetes: it translates a Cluster definition into a yip
 // configuration.
 //
-// STATUS (foundation slice): inputs are parsed and validated, but bootstrap
-// stages are not yet emitted. That lands with the kubeadm-flow and credential
-// layers. Provider must always return promptly and never hang or panic (a
-// provider that blocks stalls every later Kairos boot stage, issue #4099-1).
+// Provider validates the Cluster, then emits one network.after stage with three
+// steps in order: write the serialized Cluster to tmpfs, import the pre-bundled
+// control-plane images, run the bounded reconcile pass. Provider must always
+// return promptly and never hang or panic (a provider that blocks stalls every
+// later Kairos boot stage, issue #4099-1).
 package provider
 
 import (
@@ -13,11 +14,16 @@ import (
 	yip "github.com/mudler/yip/pkg/schema"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
+
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 )
 
 // ProviderBinaryPath is where the Kairos image installs the provider binary
 // (Kairos discovery convention: agent-provider-* under /system/providers/).
-const ProviderBinaryPath = "/system/providers/agent-provider-kubernetes"
+// It is an alias of hostexec.ProviderBinaryPath (ADR-16-A2): hostexec is the
+// single source of truth for this path, since it also anchors the bundle
+// walk's device check.
+const ProviderBinaryPath = hostexec.ProviderBinaryPath
 
 // reconcileStageKey is the yip stage we emit into. We pick network.after so
 // the bounded reconcile runs once the network is up (kubeadm join needs CP
@@ -30,6 +36,22 @@ const reconcileStageKey = "network.after"
 // reconciles the node to the desired role. Provider itself is side-effect-free
 // and returns promptly (#4099-1); the actual reconciliation runs later, inside
 // the reconcile subcommand the emitted stage invokes.
+// InertConfig returns the same inert, no-Stages configuration-error shape
+// Provider itself falls back to on validation failure (see the
+// "configuration error" / "serialization error" returns below), extended
+// with a reason string. It carries no Stages and therefore no Commands and
+// no cluster_token (S-D3-5, the D-3 / F-UKIBOOT security review, 2026-09-18):
+// the main.go wrapper composed around Provider returns this instead of the
+// real config when internal/clusterconfigdir finds the
+// /usr/local/cloud-config write target unsafe, so the kairos-sdk clusterplugin's
+// unavoidable O_CREATE|O_TRUNC write at that path carries nothing worth
+// stealing. reason must be one of clusterconfigdir's closed Reason tokens --
+// never raw cluster config, a token, or a path taken from an operator
+// override.
+func InertConfig(reason string) yip.YipConfig {
+	return yip.YipConfig{Name: "provider-kubernetes (configuration error): " + reason}
+}
+
 func Provider(cluster clusterplugin.Cluster) yip.YipConfig {
 	// Validate input early so an invalid cluster never reaches the boot stage.
 	pctx, err := NewContext(cluster)

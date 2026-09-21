@@ -11,10 +11,10 @@ import (
 
 // SupportedMinors is the rolling window of supported Kubernetes minors (ADR-3:
 // latest three in-support upstream minors). Update as the window rolls forward.
-var SupportedMinors = []string{"1.34", "1.35", "1.36"}
+var SupportedMinors = []string{"1.35", "1.36", "1.37"}
 
 // DetectVersion runs `kubeadm version -o short` and returns the parsed version
-// (e.g. "v1.34.2"). The caller is responsible for bounding ctx.
+// (e.g. "v1.35.2"). The caller is responsible for bounding ctx.
 func DetectVersion(ctx context.Context, r Runner) (string, error) {
 	res, err := r.Run(ctx, "version", "-o", "short")
 	if err != nil {
@@ -27,7 +27,7 @@ func DetectVersion(ctx context.Context, r Runner) (string, error) {
 	return v, nil
 }
 
-// Minor returns the "major.minor" of a semver version, e.g. "1.34" for "v1.34.2".
+// Minor returns the "major.minor" of a semver version, e.g. "1.35" for "v1.35.2".
 func Minor(version string) string {
 	return strings.TrimPrefix(semver.MajorMinor(version), "v")
 }
@@ -123,7 +123,7 @@ func UpgradePath(clusterVersion, targetVersion string) (UpgradeDecision, error) 
 	}
 }
 
-// minorNum extracts the integer minor component, e.g. 34 from "v1.34.2".
+// minorNum extracts the integer minor component, e.g. 35 from "v1.35.2".
 func minorNum(version string) (int, bool) {
 	parts := strings.SplitN(Minor(version), ".", 2)
 	if len(parts) != 2 {

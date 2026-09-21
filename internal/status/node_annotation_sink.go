@@ -20,7 +20,8 @@
 //	not enforce any annotation allowlist or reserved-prefix rules on annotations.
 //	The own-Node annotation write is authorized purely by the Node authorizer at
 //	the resource level, and is left unconstrained on annotations by NodeRestriction.
-//	Verified against release-1.34/1.35/1.36 NodeRestriction source. The admin.conf
+//	Verified against NodeRestriction source from release-1.34 through v1.37.0
+//	(admitNode unchanged across that range). The admin.conf
 //	identity (system:masters equivalent) trivially has the same permission.
 //
 //	No secret on argv: the only arguments passed to kubectl are the kubeconfig
@@ -107,8 +108,8 @@ type KubeconfigResolver func() string
 // but the closed-enum fields above carry all machine-readable signal. An
 // operator who needs the full message reads the Layer-1 file.
 type NodeAnnotationSink struct {
-	// Runner executes kubectl. In production this is a kubeadm.ExecRunner whose
-	// Path is set to "kubectl". Tests inject a fake that records calls.
+	// Runner executes kubectl. In production this is kubeadm.KubectlRunner().
+	// Tests inject a fake that records calls.
 	Runner KubectlRunner
 	// ResolveNode returns the name of this node as the Kubernetes API knows it.
 	// Returning an error causes the sink to no-op for this Record call.
@@ -128,7 +129,7 @@ type NodeAnnotationSink struct {
 // kubeconfig exists at Record time the sink no-ops.
 func NewNodeAnnotationSink(rootPath, nodeName string) *NodeAnnotationSink {
 	return &NodeAnnotationSink{
-		Runner:            &kubeadm.ExecRunner{Path: "kubectl"},
+		Runner:            kubeadm.KubectlRunner(),
 		ResolveNode:       MakeNodeResolver(nodeName),
 		ResolveKubeconfig: func() string { return resolveKubeconfig(rootPath) },
 	}

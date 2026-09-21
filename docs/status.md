@@ -16,8 +16,10 @@ Every reconcile pass and every reset writes a small YAML status document to:
   reboot, for post-mortem after a failed boot.
 
 Both are written atomically (temp file + rename, so a reader never sees a partial
-doc) with mode **0640, owner root, group adm** (group-readable by an `adm`-group
-monitoring agent; world-unreadable). This is the only channel that works when a
+doc) with mode **0640, owner root**. The group is set to `adm` when that group
+resolves on the node, so an `adm`-group monitoring agent can read it; if the
+lookup fails the file stays root:root. Either way it is world-unreadable. This
+is the only channel that works when a
 node never joined the cluster - the very failure you most need to debug.
 
 The document carries **no secrets by construction**: every field except `message`
@@ -41,14 +43,14 @@ budget:
   maxAttempts: 3
 updatedAt: "2026-06-03T12:00:00Z"
 bootID: 7c9e6679-7425-40de-944b-e07fc1f90ae7
-version: v0.3.0
+version: v0.4.0
 ```
 
 ### Fields
 
 | Field | Meaning |
 |-------|---------|
-| `phase` | `Reconciling` (in progress), `Converged` (success), `Failed`, or `Reset`. |
+| `phase` | `Reconciling` (in progress), `Converged` (success), `Degraded`, `Failed`, or `Reset`. |
 | `role` | The node's declared role: `init`, `controlplane`, or `worker`. |
 | `membership` | `uninitialized`, `initialized`, or `joined` (probed actual state). |
 | `outcome` | `success` or `failure`. |
@@ -72,7 +74,31 @@ version: v0.3.0
 | `BudgetExhausted` | The bounded retry budget ran out. |
 | `KubeadmError` | A kubeadm action failed. |
 | `ConfigInvalid` | The supplied cluster config was invalid (e.g. empty/short `cluster_token`). |
+| `KubeletUnhealthy` | See `phase: Degraded` below. |
 | `ResetFailed` / `ResetOK` | The outcome of an `EventClusterReset`. |
+
+### `phase: Degraded`
+
+The node is already a cluster member (`membership: initialized` or `joined`),
+but its kubelet is not healthy. **What is actually checked:** a plain HTTP GET
+of the kubelet's own loopback healthz endpoint,
+`http://127.0.0.1:10248/healthz` - the same endpoint kubeadm itself waits on
+before considering a kubelet up. Healthy is exactly an HTTP 200 response
+within 2 seconds; a dial error (including "connection refused", which is
+exactly what a masked or stopped kubelet looks like), a timeout, a non-200
+status, or an unreadable body are all "not healthy". This is a narrower
+signal than "the kubelet unit is running" or "every control-plane container is
+up" - it only asks the kubelet's own liveness endpoint, on this node, right
+now.
+
+The provider deliberately does **not** re-run `kubeadm init`/`join` on its own:
+recovering an established member is an explicit operator action (see
+[Lifecycle and reset](./lifecycle.md)), never an automatic re-bootstrap. Before
+this phase existed, this situation was silently reported as `phase: Converged`
+- masking a real outage. `outcome` is `failure` (something is genuinely wrong)
+but `terminal` is `false`: a later boot, or an explicit reset, may still
+converge cleanly, so this is not treated as fatal anywhere else in the
+provider or its tests.
 
 ## Layer 2 - Node annotations (when the node is a cluster member)
 
@@ -105,6 +131,10 @@ Notes:
   or, after a reboot, the `/var/log` mirror. `phase: Failed` + `reason` + `message`
   tells you what to fix; `terminal: true` means the next boot won't retry on its
   own.
+- A node reports `phase: Degraded`? It is already a cluster member but its
+  kubelet is not healthy right now. Check `journalctl -u kubelet` and
+  `crictl ps -a` first (see [Troubleshooting](./troubleshooting.md)); a reset is
+  the supported recovery path if the kubelet cannot be revived in place.
 - Watching a fleet? Scrape the Node annotations with `kubectl`.
 
 See also [Lifecycle and reset](./lifecycle.md) and

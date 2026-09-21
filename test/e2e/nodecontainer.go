@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 )
 
 // labelKey/labelValue tag every container the harness starts so a label-scoped
@@ -32,9 +34,51 @@ const (
 	labelValue = "1"
 )
 
+// Absolute paths of the userland tools the harness itself runs inside the node
+// container. The harness never resolves an in-container tool by name (ADR-1-A1,
+// E-B7): the image PATH puts /usr/local first, and TestSingleNodeInitConverges
+// plants shadow shims there, so a by-name harness exec would run a shim, break
+// the harness, and pollute the shadow-hit marker that proves the provider never
+// resolves via PATH. The binaries the provider executes (kubeadm, kubectl, ctr,
+// systemctl, etcdctl) come from internal/hostexec instead; these are the
+// harness-only tools (GNU coreutils, findutils, busybox tar, crictl on Hadron's
+// merged /usr).
+const (
+	binCat        = "/usr/bin/cat"
+	binChmod      = "/usr/bin/chmod"
+	binChown      = "/usr/bin/chown"
+	binCp         = "/usr/bin/cp"
+	binCrictl     = "/usr/bin/crictl"
+	binEnv        = "/usr/bin/env"
+	binFind       = "/usr/bin/find"
+	binJournalctl = "/usr/bin/journalctl"
+	binLn         = "/usr/bin/ln"
+	binMkdir      = "/usr/bin/mkdir"
+	binMkfifo     = "/usr/bin/mkfifo"
+	binMount      = "/usr/bin/mount"
+	binReadlink   = "/usr/bin/readlink"
+	binRm         = "/usr/bin/rm"
+	binSha256sum  = "/usr/bin/sha256sum"
+	binStat       = "/usr/bin/stat"
+	binSystemdRun = "/usr/bin/systemd-run"
+	binTar        = "/usr/bin/tar"
+	binTee        = "/usr/bin/tee"
+	binTest       = "/usr/bin/test"
+	binUmount     = "/usr/bin/umount"
+)
+
+// criEndpoint is containerd's CRI socket, passed to crictl explicitly for both
+// the runtime and the image service so no crictl.yaml or default can redirect it.
+const criEndpoint = "unix:///run/containerd/containerd.sock"
+
 // dockerTimeout bounds every individual docker CLI call so a wedged daemon can
 // never hang the suite (design principle 4 / #4099-1).
 const dockerTimeout = 90 * time.Second
+
+// execWaitDelay bounds how long a docker CLI call may keep running once its
+// context has ended or the docker process has exited while a stray child still
+// holds its output pipes, so the harness fails fast instead of hanging.
+const execWaitDelay = 10 * time.Second
 
 // nodeContainer is a running privileged systemd node container.
 type nodeContainer struct {
@@ -62,6 +106,7 @@ func dockerErr(args ...string) (string, error) {
 	defer cancel()
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.WaitDelay = execWaitDelay
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	err := cmd.Run()
@@ -171,15 +216,15 @@ func (nc *nodeContainer) waitReady(t *testing.T) {
 	t.Helper()
 	// systemd must be PID 1.
 	nc.waitFor(t, "systemd is PID 1", 60*time.Second, func() bool {
-		out, err := nc.execErr("cat", "/proc/1/comm")
+		out, err := nc.execErr(binCat, "/proc/1/comm")
 		return err == nil && strings.TrimSpace(out) == "systemd"
 	})
 	// containerd's admin API socket must answer (proves containerd is up).
 	nc.waitFor(t, "containerd admin API ready", 90*time.Second, func() bool {
-		_, err := nc.execErr("ctr", "version")
+		_, err := nc.execErr(hostexec.CtrPath, "version")
 		if err != nil {
-			// ctr may not be on PATH; fall back to socket existence.
-			_, err = nc.execErr("test", "-S", "/run/containerd/containerd.sock")
+			// ctr may be absent from the image; fall back to socket existence.
+			_, err = nc.execErr(binTest, "-S", "/run/containerd/containerd.sock")
 		}
 		return err == nil
 	})
@@ -187,7 +232,7 @@ func (nc *nodeContainer) waitReady(t *testing.T) {
 	// crictl info (CRI ImageService) so we know CRI is ready before kubeadm
 	// starts. kubeadm config images pull uses the CRI API, not the admin API.
 	nc.waitFor(t, "containerd CRI plugin ready", 120*time.Second, func() bool {
-		_, err := nc.execErr("crictl",
+		_, err := nc.execErr(binCrictl,
 			"--runtime-endpoint", "unix:///run/containerd/containerd.sock",
 			"info")
 		return err == nil
@@ -229,15 +274,52 @@ func (nc *nodeContainer) execErr(args ...string) (string, error) {
 // long-running operations (e.g. `kubeadm init` via reconcile) that exceed the
 // default per-call dockerTimeout. Bounded so it can never hang.
 func (nc *nodeContainer) ExecTimeout(timeout time.Duration, args ...string) (string, error) {
+	return nc.ExecOptsTimeout(timeout, execOptions{}, args...)
+}
+
+// ExecEnvTimeout is ExecTimeout with extra KEY=VALUE variables set on the exec
+// (`docker exec -e`), layered over the container's own environment. It exists to
+// run the provider under a deliberately hostile environment (E-B7): each value
+// is one argv element handed to docker unchanged, never parsed by a shell.
+func (nc *nodeContainer) ExecEnvTimeout(timeout time.Duration, env []string, args ...string) (string, error) {
+	return nc.ExecOptsTimeout(timeout, execOptions{Env: env}, args...)
+}
+
+// ExecOptsTimeout is ExecTimeout with extra docker exec flags (environment and
+// working directory, see execOptions). Still argv only and bounded.
+func (nc *nodeContainer) ExecOptsTimeout(timeout time.Duration, opts execOptions, args ...string) (string, error) {
+	flags, err := dockerExecFlags(opts)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	full := append(append([]string{"exec"}, flags...), nc.id)
+	full = append(full, args...)
+	var buf bytes.Buffer
+	cmd := exec.CommandContext(ctx, "docker", full...)
+	cmd.WaitDelay = execWaitDelay
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err = cmd.Run()
+	return buf.String(), err
+}
+
+// ExecStdoutTimeout runs argv inside the container and returns stdout and stderr
+// separately (docker exec without -t keeps the streams apart). It is for
+// commands whose stdout the harness parses (JSON, one name per line), where a
+// warning on stderr must not corrupt the parse. Bounded; argv only.
+func (nc *nodeContainer) ExecStdoutTimeout(timeout time.Duration, args ...string) (stdout, stderr string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	full := append([]string{"exec", nc.id}, args...)
-	var buf bytes.Buffer
+	var out, errOut bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", full...)
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	err := cmd.Run()
-	return buf.String(), err
+	cmd.WaitDelay = execWaitDelay
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err = cmd.Run()
+	return out.String(), errOut.String(), err
 }
 
 // ExecInput runs argv inside the container feeding stdin, used to drop files
@@ -248,6 +330,7 @@ func (nc *nodeContainer) ExecInput(stdin string, args ...string) (string, error)
 	full := append([]string{"exec", "-i", nc.id}, args...)
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", full...)
+	cmd.WaitDelay = execWaitDelay
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -258,27 +341,36 @@ func (nc *nodeContainer) ExecInput(stdin string, args ...string) (string, error)
 // WriteFile writes content to path inside the container with mode (octal string,
 // e.g. "0600"). It uses `tee` over stdin (no shell, no interpolation of
 // content) then chmod, mirroring how the yip File stage materializes the
-// serialized Cluster at 0600.
+// serialized Cluster at 0600. Failures stop t (not nc.t), so it is safe in a
+// subtest.
 func (nc *nodeContainer) WriteFile(t *testing.T, path, content, mode string) {
 	t.Helper()
 	dir := path[:strings.LastIndex(path, "/")]
-	nc.Exec("mkdir", "-p", dir)
-	if out, err := nc.ExecInput(content, "tee", path); err != nil {
+	if dir == "" {
+		// A file directly at the root ("/name"): the parent is "/", not "".
+		dir = "/"
+	}
+	if out, err := nc.execErr(binMkdir, "-p", dir); err != nil {
+		t.Fatalf("mkdir -p %s: %v\n%s", dir, err, out)
+	}
+	if out, err := nc.ExecInput(content, binTee, path); err != nil {
 		t.Fatalf("write %s: %v\n%s", path, err, out)
 	}
-	nc.Exec("chmod", mode, path)
+	if out, err := nc.execErr(binChmod, mode, path); err != nil {
+		t.Fatalf("chmod %s %s: %v\n%s", mode, path, err, out)
+	}
 }
 
 // ReadFile reads a file from inside the container.
 func (nc *nodeContainer) ReadFile(path string) (string, error) {
-	return nc.execErr("cat", path)
+	return nc.execErr(binCat, path)
 }
 
 // FileMode returns the octal permission bits of a file inside the container
 // (e.g. "640"), via stat -c %a.
 func (nc *nodeContainer) FileMode(t *testing.T, path string) string {
 	t.Helper()
-	return strings.TrimSpace(nc.Exec("stat", "-c", "%a", path))
+	return strings.TrimSpace(nc.Exec(binStat, "-c", "%a", path))
 }
 
 // IP returns the container's primary IP address on the default bridge.

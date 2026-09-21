@@ -45,6 +45,31 @@ const (
 	ActionRepairKubeletConfig Action = "repair-kubelet-config"
 )
 
+// Verdict augments Plan's action list with the convergence signal the status
+// layer needs, WITHOUT changing what the provider does. Security sign-off
+// finding D-2 (PROJECT_CONTEXT.md ADR-16-A2/ADR-19 U2 security sign-off,
+// 2026-09-17): an already-established member (Initialized or Joined) whose
+// kubelet is not healthy took the exact same ActionNone as a fully healthy
+// member, so a masked/crashed kubelet was silently reported as a converged
+// success. The fix is deliberately NOT a new action -- recovery of an
+// established member stays an explicit, separate reset flow, never an
+// automatic re-bootstrap -- it is a second return value the status layer
+// (internal/status) uses to distinguish the two ActionNone cases.
+type Verdict string
+
+const (
+	// VerdictOK: either the node is fully converged (a healthy established
+	// member) or Plan returned a real, forward-moving action (init/join/
+	// upgrade/refuse/wait); the caller's normal success/failure handling
+	// applies unchanged.
+	VerdictOK Verdict = "ok"
+	// VerdictDegraded: Membership is already Initialized or Joined but
+	// KubeletHealthy is false. Plan still returns []Action{ActionNone} (no
+	// automatic recovery), but the caller MUST NOT report this as a converged
+	// success.
+	VerdictDegraded Verdict = "degraded"
+)
+
 // Plan is a pure function: given the desired role, the operator-pinned upgrade
 // target (empty when no upgrade is intended), and the observed actual state, it
 // returns the ordered actions required to converge. It performs NO I/O and is
@@ -58,43 +83,60 @@ const (
 // already-healthy CP/join yields ActionNone (reboot-safe no-op); an existing
 // control plane while desired==worker/controlplane drives toward join, never init
 // (#4099-5); HA-3 refuses to init when the endpoint already serves (ADR-11 #2).
-func Plan(desired actualstate.Role, target string, s actualstate.State) []Action {
+func Plan(desired actualstate.Role, target string, s actualstate.State) ([]Action, Verdict) {
 	if acts, handled := planUpgrade(desired, target, s); handled {
-		return acts
+		// Every planUpgrade-handled branch returns a real, forward-moving action
+		// (refuse/apply/repair/wait/node) -- never a hidden ActionNone -- so the
+		// D-2 degraded distinction does not apply here.
+		return acts, VerdictOK
 	}
 
 	switch desired {
 	case actualstate.RoleInit:
 		if s.Membership == actualstate.Initialized && s.KubeletHealthy {
-			return []Action{ActionNone}
+			return []Action{ActionNone}, VerdictOK
 		}
 		if s.Membership == actualstate.Uninitialized {
 			// HA-3: if the endpoint is already serving, refuse loudly (ADR-11 #2).
 			if s.ControlPlaneReachable {
-				return []Action{ActionRefuseInit}
+				return []Action{ActionRefuseInit}, VerdictOK
 			}
-			return []Action{ActionRunInit}
+			return []Action{ActionRunInit}, VerdictOK
 		}
 		// Initialized-but-unhealthy, or already joined: do not re-init. Recovery is
-		// an explicit, separate flow (reset), not an automatic re-bootstrap.
-		return []Action{ActionNone}
+		// an explicit, separate flow (reset), not an automatic re-bootstrap. D-2:
+		// report which one this is via the Verdict, not the action.
+		return []Action{ActionNone}, degradedVerdict(s)
 
 	case actualstate.RoleControlPlane, actualstate.RoleWorker:
 		if s.Membership == actualstate.Joined && s.KubeletHealthy {
-			return []Action{ActionNone}
+			return []Action{ActionNone}, VerdictOK
 		}
 		if s.Membership == actualstate.Uninitialized {
 			if !s.ControlPlaneReachable {
-				return []Action{ActionWaitForControlPlane, ActionRunJoin}
+				return []Action{ActionWaitForControlPlane, ActionRunJoin}, VerdictOK
 			}
-			return []Action{ActionRunJoin}
+			return []Action{ActionRunJoin}, VerdictOK
 		}
 		// Initialized (this node is itself a CP) or joined-but-unhealthy: no-op.
-		return []Action{ActionNone}
+		// D-2: report which one this is via the Verdict, not the action.
+		return []Action{ActionNone}, degradedVerdict(s)
 
 	default:
-		return []Action{ActionNone}
+		return []Action{ActionNone}, VerdictOK
 	}
+}
+
+// degradedVerdict classifies the ActionNone fallback taken when the node is
+// already an established member (Initialized or Joined -- the only two
+// Memberships that reach this call, since Uninitialized always returns
+// earlier): VerdictDegraded whenever KubeletHealthy is false, so the status
+// layer never has to re-derive this from raw state (D-2).
+func degradedVerdict(s actualstate.State) Verdict {
+	if !s.KubeletHealthy {
+		return VerdictDegraded
+	}
+	return VerdictOK
 }
 
 // planUpgrade implements the ADR-12 (+R1) per-node upgrade decision. It returns

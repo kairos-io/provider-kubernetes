@@ -10,7 +10,7 @@
 # STATUS: early public release; adapt to your environment, not yet certified for production.
 
 # -----------------------------------------------------------------------------
-# Install — Kairos copies the image to disk on first (LiveCD) boot, then reboots
+# Install: Kairos copies the image to disk on first (LiveCD) boot, then reboots
 # into the installed system.
 # -----------------------------------------------------------------------------
 install:
@@ -20,7 +20,7 @@ install:
   # nousers: true         # uncomment to allow an install with no admin user
 
 # -----------------------------------------------------------------------------
-# Users — Kairos 3.3+ REQUIRES at least one user in the `admin` group
+# Users: Kairos 3.3+ REQUIRES at least one user in the `admin` group
 # (or `install.nousers: true`). The provider's cluster_token entropy check is
 # unrelated to OS users.
 # -----------------------------------------------------------------------------
@@ -38,7 +38,7 @@ users:
 hostname: cp-init
 
 # -----------------------------------------------------------------------------
-# Cluster — read by provider-kubernetes (the kairos-sdk clusterplugin contract).
+# Cluster: read by provider-kubernetes (the kairos-sdk clusterplugin contract).
 # -----------------------------------------------------------------------------
 cluster:
   # A correlation value, not key material. Must be non-empty and >= 16 chars;
@@ -56,32 +56,48 @@ cluster:
     cluster_root_path: "/"
 
   # ---------------------------------------------------------------------------
-  # The kubeadm configuration. Three documents, all v1beta4:
-  #   - ClusterConfiguration    (cluster-wide)
-  #   - InitConfiguration       (node-specific bootstrap for `kubeadm init`)
-  #   - KubeletConfiguration    (kubelet defaults)
-  # The provider parses this YAML and merges it with its own defaults; fields
-  # explicitly set here win. Bootstrap tokens, --upload-certs certificateKey,
-  # and the API server's `certSANs` for the local node are added by the
-  # provider at runtime — do NOT set them here.
+  # The kubeadm configuration, in kubeadm's own v1beta4 key names. The provider
+  # reads two documents here:
+  #   - clusterConfiguration  (cluster-wide)
+  #   - initConfiguration     (this node's bootstrap, for `kubeadm init`)
+  # A joining node uses joinConfiguration instead; see worker.yaml and
+  # controlplane.yaml.
+  #
+  # The provider reads a deliberate SUBSET of v1beta4, not the whole schema:
+  # every key shown below is read, and anything else in this block is IGNORED
+  # rather than passed through to kubeadm. In particular there is no
+  # kubeletConfiguration passthrough: the provider emits its own
+  # KubeletConfiguration, and only to pin clusterDNS when you set a custom
+  # networking.serviceSubnet.
+  #
+  # Bootstrap tokens, the --upload-certs certificateKey, and the API server
+  # certSANs for the local node are added by the provider at runtime. Do NOT
+  # set them here.
   # ---------------------------------------------------------------------------
   config: |
     clusterConfiguration:
       # Must match the bundled kubeadm binary's minor. Out-of-window or
       # mismatched is a HARD ERROR at boot (fail-fast).
-      kubernetesVersion: v1.34.0
+      kubernetesVersion: v1.37.0
 
-      # Stable endpoint name/IP every node uses. Must equal control_plane_host
-      # (with the API server port). The provider auto-derives this if you
-      # omit it.
+      # The stable endpoint every node reaches the API server through, baked
+      # into the API server serving certificate. Omit it and the provider
+      # derives it from control_plane_host (appending :6443 if no port is
+      # given). For HA this must be a VIP, load balancer, or DNS name that
+      # outlives any single node, which is usually NOT control_plane_host;
+      # see ha/README.md.
       controlPlaneEndpoint: "192.0.2.10:6443"
 
-      # Image registry. Use registry.k8s.io (the modern path); k8s.gcr.io is
-      # dead. The provider sets this if unset.
+      # Image registry. Leave it unset unless you mirror: kubeadm's own
+      # default is registry.k8s.io, and the control-plane images bundled in the
+      # OS image cover that repository only. Setting anything else makes
+      # kubeadm look for references the bundle does not carry, so the node
+      # needs registry access. (k8s.gcr.io is dead; do not use it.)
       imageRepository: "registry.k8s.io"
 
-      # Extra SANs to embed in the API server cert. The control_plane_host is
-      # added automatically; list anything else clients use to reach the API.
+      # Extra SANs to embed in the API server cert. The provider adds both the
+      # control_plane_host and the controlPlaneEndpoint host for you (ports
+      # stripped); list anything else clients use to reach the API.
       apiServer:
         certSANs:
           - "192.0.2.10"
@@ -102,6 +118,9 @@ cluster:
       # machine). Often equal to control_plane_host on a single-CP cluster.
       localAPIEndpoint:
         advertiseAddress: "192.0.2.10"
+        # kubeadm's default is 6443. If you change it, controlPlaneEndpoint,
+        # control_plane_host and every joiner's apiServerEndpoint must carry
+        # the same port; see custom-api-port/.
         bindPort: 6443
 
       nodeRegistration:
@@ -125,12 +144,11 @@ cluster:
         #   - key: node-role.kubernetes.io/control-plane
         #     effect: NoSchedule
 
-    kubeletConfiguration:
-      # Kubelet defaults the provider uses unless you override. Common knobs:
-      cgroupDriver: systemd
-      # maxPods: 250
-      # serializeImagePulls: false
-      # featureGates: {}
+    # NOTE: a kubeletConfiguration document here is IGNORED. The provider does
+    # not pass kubelet component config through from cluster.config. To change
+    # kubelet behavior, either set initConfiguration.nodeRegistration.
+    # kubeletExtraArgs above, or ship a systemd drop-in for kubelet.service in
+    # a derived image (see docs/hadron.md).
 
 # -----------------------------------------------------------------------------
 # Additional Kairos stages (optional). Useful for plumbing kubectl access,

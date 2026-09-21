@@ -29,6 +29,11 @@ you change `podSubnet`, edit Flannel's `net-conf.json` `Network` to match.
 
 ## Calico (worked example)
 
+Calico v3.32.0 is pinned here. Upstream tests it against Kubernetes 1.34,
+1.35 and 1.36, so pairing it with 1.37 is outside what the Calico project
+has validated. Check Calico's own compatibility notes before using it on the
+newest supported minor.
+
 [`samples/cni-calico/`](../samples/cni-calico/) has two approaches.
 
 ### A. Apply after the cluster is up
@@ -67,4 +72,9 @@ Whatever CNI you use, its pod network must match the `podSubnet` you set in
 
 Any standard CNI works - install it with its normal manifests/Helm chart after
 bootstrap. The provider does not interfere with `/opt/cni/bin` beyond shipping the
-upstream reference plugins the kubelet needs.
+upstream reference plugins there; `containerd` (not the kubelet) is what runs the
+plugins, and `/opt/cni/bin` is its only configured plugin directory, which is also
+where CNI installers put their own binaries by design. Note that Kairos keeps
+`/opt/cni/bin` and `/etc/cni/net.d` on the persistent partition, so what you install
+there outlives an image upgrade - and anything placed there runs as root when a pod
+sandbox is created.

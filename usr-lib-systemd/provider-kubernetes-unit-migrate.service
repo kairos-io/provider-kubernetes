@@ -1,0 +1,51 @@
+# Removes the unit copies that releases before ADR-19 U2 installed into
+# /etc/systemd/system, so the node runs the units of the image it booted.
+#
+# Until U2 the provider shipped containerd.service, kubelet.service,
+# provider-kubernetes-image-import.service and kubelet.service.d/10-kubeadm.conf
+# into /etc/systemd/system. On Kairos that directory is a persistent bind that
+# immucore refreshes with `rsync -aquAX` (update-only, no --delete), so those
+# copies outrank the image's own units for as long as they exist: an upgrade
+# replaces them only when the new build's mtime is newer, a rollback runs the
+# older OS against newer units, and nothing ever deletes them. Removing them
+# once is what makes unit content a property of the booted image.
+#
+# `migrate-units` takes NO arguments (exit 2 otherwise) and works on a FIXED
+# list of paths, never a glob. It deletes a file only when it is a root-owned
+# regular file whose bytes hash to one of the exact contents this project
+# shipped at that path; anything edited, replaced, symlinked or unexpected is
+# KEPT and reported. It ends with one
+# "unit-migrate: summary outcome=... removed=N kept=K overrides=O reloaded=..."
+# line in the journal and exits 0 for clean/migrated, 1 for kept-modified or any
+# failure. See docs/troubleshooting.md for what each outcome means.
+#
+# There is deliberately no Condition*: the binary is the single decision point,
+# exactly as for the import unit, so "nothing to do" is a logged clean run rather
+# than a silent skip.
+#
+# Ordering: Before= the three units whose fragments it removes. When it does
+# remove one it runs `systemctl daemon-reload` itself, so the jobs already queued
+# for those units start from the /usr/lib definitions on this same boot instead
+# of from the stale copies (ADR-19 decision 3, S19-10 and S19-12). It is Wanted
+# by nothing and Required by nothing: a failure is visible in `systemctl --failed`
+# and never blocks the boot or a later Kairos stage (#4099-1).
+#
+# Installed under /usr/lib with no [Install] section and enabled by the relative
+# ../provider-kubernetes-unit-migrate.service link this image ships in
+# /usr/lib/systemd/system/multi-user.target.wants/: see the header of
+# containerd.service for the systemd citations (ADR-19 U2, F-UNITPATH).
+[Unit]
+Description=provider-kubernetes: remove superseded unit copies from /etc/systemd/system
+Documentation=https://github.com/kairos-io/provider-kubernetes
+Before=containerd.service kubelet.service provider-kubernetes-image-import.service
+
+[Service]
+Type=oneshot
+# Keeps the result visible in `systemctl status` and `systemctl --failed` for the
+# whole boot, which is the only signal an operator gets that an edited copy is
+# still shadowing an image unit.
+RemainAfterExit=yes
+# Bounded so a wedged migration can never hold up containerd, the kubelet or the
+# boot (#4099-1); the subcommand itself caps its work at a 20s overall deadline.
+TimeoutStartSec=45
+ExecStart=/system/providers/agent-provider-kubernetes migrate-units

@@ -9,53 +9,143 @@ import (
 
 func TestPlan(t *testing.T) {
 	tests := []struct {
-		name    string
-		desired actualstate.Role
-		state   actualstate.State
-		want    []Action
+		name        string
+		desired     actualstate.Role
+		state       actualstate.State
+		want        []Action
+		wantVerdict Verdict
 	}{
 		{
-			name:    "init on uninitialized node",
-			desired: actualstate.RoleInit,
-			state:   actualstate.State{Membership: actualstate.Uninitialized},
-			want:    []Action{ActionRunInit},
+			name:        "init on uninitialized node",
+			desired:     actualstate.RoleInit,
+			state:       actualstate.State{Membership: actualstate.Uninitialized},
+			want:        []Action{ActionRunInit},
+			wantVerdict: VerdictOK,
 		},
 		{
-			name:    "init already converged is no-op",
-			desired: actualstate.RoleInit,
-			state:   actualstate.State{Membership: actualstate.Initialized, KubeletHealthy: true},
-			want:    []Action{ActionNone},
+			name:        "init already converged is no-op",
+			desired:     actualstate.RoleInit,
+			state:       actualstate.State{Membership: actualstate.Initialized, KubeletHealthy: true},
+			want:        []Action{ActionNone},
+			wantVerdict: VerdictOK,
 		},
 		{
-			name:    "worker join when CP reachable",
-			desired: actualstate.RoleWorker,
-			state:   actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: true},
-			want:    []Action{ActionRunJoin},
+			name:        "worker join when CP reachable",
+			desired:     actualstate.RoleWorker,
+			state:       actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: true},
+			want:        []Action{ActionRunJoin},
+			wantVerdict: VerdictOK,
 		},
 		{
-			name:    "worker waits for CP when unreachable",
-			desired: actualstate.RoleWorker,
-			state:   actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: false},
-			want:    []Action{ActionWaitForControlPlane, ActionRunJoin},
+			name:        "worker waits for CP when unreachable",
+			desired:     actualstate.RoleWorker,
+			state:       actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: false},
+			want:        []Action{ActionWaitForControlPlane, ActionRunJoin},
+			wantVerdict: VerdictOK,
 		},
 		{
-			name:    "joined healthy worker is no-op",
-			desired: actualstate.RoleWorker,
-			state:   actualstate.State{Membership: actualstate.Joined, KubeletHealthy: true},
-			want:    []Action{ActionNone},
+			name:        "joined healthy worker is no-op",
+			desired:     actualstate.RoleWorker,
+			state:       actualstate.State{Membership: actualstate.Joined, KubeletHealthy: true},
+			want:        []Action{ActionNone},
+			wantVerdict: VerdictOK,
 		},
 		{
-			name:    "controlplane join when CP reachable",
-			desired: actualstate.RoleControlPlane,
-			state:   actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: true},
-			want:    []Action{ActionRunJoin},
+			name:        "controlplane join when CP reachable",
+			desired:     actualstate.RoleControlPlane,
+			state:       actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: true},
+			want:        []Action{ActionRunJoin},
+			wantVerdict: VerdictOK,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Plan(tt.desired, "", tt.state)
+			got, verdict := Plan(tt.desired, "", tt.state)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Plan(%v, %+v) = %v, want %v", tt.desired, tt.state, got, tt.want)
+			}
+			if verdict != tt.wantVerdict {
+				t.Fatalf("Plan(%v, %+v) verdict = %q, want %q", tt.desired, tt.state, verdict, tt.wantVerdict)
+			}
+		})
+	}
+}
+
+// TestPlanDegradedVerdict is D-2: an already-established member (Initialized
+// or Joined) whose kubelet is not healthy must return the SAME ActionNone as
+// the healthy case (no automatic re-bootstrap: recovery is an explicit,
+// separate reset flow) but a DIFFERENT Verdict, so the status layer can tell
+// the two apart. Covers both the RoleInit/Initialized shape and the
+// RoleControlPlane+RoleWorker/Joined shape the security sign-off named.
+func TestPlanDegradedVerdict(t *testing.T) {
+	cases := []struct {
+		name    string
+		desired actualstate.Role
+		state   actualstate.State
+	}{
+		{
+			name:    "init role, initialized, unhealthy kubelet",
+			desired: actualstate.RoleInit,
+			state:   actualstate.State{Membership: actualstate.Initialized, KubeletHealthy: false},
+		},
+		{
+			name:    "controlplane role, joined, unhealthy kubelet",
+			desired: actualstate.RoleControlPlane,
+			state:   actualstate.State{Membership: actualstate.Joined, KubeletHealthy: false},
+		},
+		{
+			name:    "worker role, joined, unhealthy kubelet",
+			desired: actualstate.RoleWorker,
+			state:   actualstate.State{Membership: actualstate.Joined, KubeletHealthy: false},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			actions, verdict := Plan(c.desired, "", c.state)
+			if !reflect.DeepEqual(actions, []Action{ActionNone}) {
+				t.Fatalf("actions = %v, want [none] (the action must not change)", actions)
+			}
+			if verdict != VerdictDegraded {
+				t.Fatalf("verdict = %q, want degraded", verdict)
+			}
+		})
+	}
+}
+
+// TestPlanHealthyVerdictNotDegraded is the converse of
+// TestPlanDegradedVerdict: the SAME already-established-member states, but
+// with a healthy kubelet, must report VerdictOK -- proving the distinction is
+// keyed on KubeletHealthy and not, say, always degraded or always ok.
+func TestPlanHealthyVerdictNotDegraded(t *testing.T) {
+	cases := []struct {
+		name    string
+		desired actualstate.Role
+		state   actualstate.State
+	}{
+		{
+			name:    "init role, initialized, healthy kubelet",
+			desired: actualstate.RoleInit,
+			state:   actualstate.State{Membership: actualstate.Initialized, KubeletHealthy: true},
+		},
+		{
+			name:    "controlplane role, joined, healthy kubelet",
+			desired: actualstate.RoleControlPlane,
+			state:   actualstate.State{Membership: actualstate.Joined, KubeletHealthy: true},
+		},
+		{
+			name:    "worker role, joined, healthy kubelet",
+			desired: actualstate.RoleWorker,
+			state:   actualstate.State{Membership: actualstate.Joined, KubeletHealthy: true},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			actions, verdict := Plan(c.desired, "", c.state)
+			if !reflect.DeepEqual(actions, []Action{ActionNone}) {
+				t.Fatalf("actions = %v, want [none]", actions)
+			}
+			if verdict != VerdictOK {
+				t.Fatalf("verdict = %q, want ok", verdict)
 			}
 		})
 	}
@@ -72,24 +162,30 @@ func TestDefaultBudgetIsBounded(t *testing.T) {
 func TestPlanInitUninitialized_CPReachable_RefusesInit(t *testing.T) {
 	// When role=init and ControlPlaneReachable=true, Plan must refuse to init
 	// (a CP already serves at the endpoint; operator must use role=controlplane).
-	got := Plan(actualstate.RoleInit, "", actualstate.State{
+	got, verdict := Plan(actualstate.RoleInit, "", actualstate.State{
 		Membership:            actualstate.Uninitialized,
 		ControlPlaneReachable: true,
 	})
 	if len(got) != 1 || got[0] != ActionRefuseInit {
 		t.Fatalf("expected [%s] when init+uninitialized+reachable, got %v", ActionRefuseInit, got)
 	}
+	if verdict != VerdictOK {
+		t.Fatalf("verdict = %q, want ok", verdict)
+	}
 }
 
 func TestPlanInitUninitialized_CPUnreachable_RunsInit(t *testing.T) {
 	// When role=init and ControlPlaneReachable=false, Plan must proceed with init
 	// (normal single-CP bootstrap, no existing CP).
-	got := Plan(actualstate.RoleInit, "", actualstate.State{
+	got, verdict := Plan(actualstate.RoleInit, "", actualstate.State{
 		Membership:            actualstate.Uninitialized,
 		ControlPlaneReachable: false,
 	})
 	if len(got) != 1 || got[0] != ActionRunInit {
 		t.Fatalf("expected [%s] when init+uninitialized+unreachable, got %v", ActionRunInit, got)
+	}
+	if verdict != VerdictOK {
+		t.Fatalf("verdict = %q, want ok", verdict)
 	}
 }
 
@@ -146,9 +242,11 @@ func TestPlanUpgrade(t *testing.T) {
 			want:  []Action{ActionRefuseUpgrade},
 		},
 		{
-			name:    "CP refuse downgrade (manifest 1.35 -> target 1.34)",
-			desired: actualstate.RoleControlPlane, target: "v1.34.0",
-			state: actualstate.State{Membership: actualstate.Initialized, APIServerReachable: true, NodeComponentVersion: t135},
+			// Both minors are inside the window, so this is refused as a downgrade,
+			// not as an out-of-window target.
+			name:    "CP refuse downgrade (manifest 1.36 -> target 1.35)",
+			desired: actualstate.RoleControlPlane, target: t135,
+			state: actualstate.State{Membership: actualstate.Initialized, APIServerReachable: true, NodeComponentVersion: "v1.36.4"},
 			want:  []Action{ActionRefuseUpgrade},
 		},
 		{
@@ -172,9 +270,48 @@ func TestPlanUpgrade(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Plan(c.desired, c.target, c.state)
+			got, _ := Plan(c.desired, c.target, c.state)
 			if !reflect.DeepEqual(got, c.want) {
 				t.Fatalf("Plan(%v, %q, %+v) = %v, want %v", c.desired, c.target, c.state, got, c.want)
+			}
+		})
+	}
+}
+
+// TestPlanUpgradeHandledPathsAreNeverDegraded proves planUpgrade-handled
+// branches always report VerdictOK, even when the state's KubeletHealthy is
+// false: those branches return a real action (repair/apply/wait/node/refuse),
+// never a hidden ActionNone, so D-2's degraded distinction does not apply.
+func TestPlanUpgradeHandledPathsAreNeverDegraded(t *testing.T) {
+	const t135 = "v1.35.0"
+	cases := []struct {
+		name    string
+		desired actualstate.Role
+		state   actualstate.State
+	}{
+		{
+			name:    "CP API down, unhealthy manifest-old -> repair+apply, still ok",
+			desired: actualstate.RoleControlPlane,
+			state: actualstate.State{
+				Membership: actualstate.Initialized, APIServerReachable: false, NodeComponentVersion: "v1.34.8",
+			},
+		},
+		{
+			name:    "worker broken kubelet -> repair+wait+node, still ok",
+			desired: actualstate.RoleWorker,
+			state: actualstate.State{
+				Membership: actualstate.Joined, KubeletHealthy: false, ClusterVersion: t135, RunningKubeletVersion: "v1.34.8",
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			actions, verdict := Plan(c.desired, t135, c.state)
+			if len(actions) == 0 || actions[0] == ActionNone {
+				t.Fatalf("actions = %v, want a real forward-moving action, not a hidden no-op", actions)
+			}
+			if verdict != VerdictOK {
+				t.Fatalf("verdict = %q, want ok (planUpgrade never returns a hidden ActionNone)", verdict)
 			}
 		})
 	}

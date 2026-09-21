@@ -1,0 +1,59 @@
+#cloud-config
+# First control-plane node (role: init) on a network with NO registry reachable.
+#
+# STATUS: early public release; adapt to your environment, not yet certified for production.
+#
+# Nothing in the cluster block "turns on" air-gap mode. What makes this work is
+# that the OS image already carries the control-plane container images for its
+# Kubernetes minor, and a boot step imports them into containerd before
+# `kubeadm init` runs. This file is the standard init config with the two
+# settings that would break that left alone, and the checks you should run
+# before you cut the network.
+#
+# Read samples/air-gapped/README.md before using this.
+
+install:
+  device: "auto"
+  auto: true
+  reboot: true
+
+users:
+  # Kairos 3.3+ requires at least one user in the 'admin' group for
+  # kairos-agent install to proceed (or set install.nousers: true).
+  - name: kairos
+    groups: ["admin", "sudo"]
+    passwd: kairos
+
+hostname: cp-airgap
+
+cluster:
+  cluster_token: "CHANGE-ME-to-a-long-high-entropy-cluster-correlation-string"
+  control_plane_host: "192.168.1.10"
+  role: init
+
+  providerConfig:
+    cluster_root_path: "/"
+
+  config: |
+    clusterConfiguration:
+      # Must match the kubeadm binary in the image you booted. A mismatch is a
+      # hard error, and on an air-gapped node there is no registry to paper
+      # over a wrong version.
+      kubernetesVersion: v1.37.0
+      controlPlaneEndpoint: "192.168.1.10:6443"
+
+      # imageRepository is deliberately NOT set. The bundled images are stored
+      # under their registry.k8s.io references, which is kubeadm's own default.
+      # Setting a mirror here makes kubeadm look for references the bundle does
+      # not carry, and on an air-gapped node the pull then fails. If you do run
+      # a reachable internal mirror, set it here and accept that the bundle is
+      # no longer used.
+
+      networking:
+        podSubnet: "10.244.0.0/16"
+        serviceSubnet: "10.96.0.0/12"
+
+    initConfiguration:
+      localAPIEndpoint:
+        advertiseAddress: "192.168.1.10"
+        bindPort: 6443

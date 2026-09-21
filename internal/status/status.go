@@ -37,6 +37,15 @@ const (
 	PhaseFailed Phase = "Failed"
 	// PhaseReset: the node was reset via EventClusterReset.
 	PhaseReset Phase = "Reset"
+	// PhaseDegraded: the node is an already-established member (Initialized or
+	// Joined) but its kubelet health signal is not healthy (D-2, the 2026-09-17
+	// U2 security sign-off). The reconcile action is still ActionNone --
+	// recovering an established member is a deliberate, explicit reset flow,
+	// never an automatic re-bootstrap -- so this is NOT a Failed/terminal
+	// phase: the next boot (or an operator reset) may still converge cleanly.
+	// It exists so that fact is never silently reported as Converged, which
+	// would hide a real outage (e.g. every control-plane container exited).
+	PhaseDegraded Phase = "Degraded"
 )
 
 // Outcome is the explicit success/failure signal, redundant with Phase but
@@ -64,6 +73,64 @@ const (
 	ReasonConfigInvalid           Reason = "ConfigInvalid"
 	ReasonResetFailed             Reason = "ResetFailed"
 	ReasonResetOK                 Reason = "ResetOK"
+	// ReasonKubeletUnhealthy names the kubelet health signal behind
+	// PhaseDegraded (D-2): the node is already Initialized or Joined but
+	// actualstate.State.KubeletHealthy is false.
+	ReasonKubeletUnhealthy Reason = "KubeletUnhealthy"
+
+	// D-3 / F-UKIBOOT (security review 2026-09-18, S-D3-9): the closed set of
+	// reasons internal/clusterconfigdir reports when it establishes (or finds
+	// unsafe) /usr/local/cloud-config before the kairos-sdk clusterplugin
+	// writes cluster.kairos.yaml there. Written well before any reconcile pass
+	// runs, so a later Converged/Failed status overwriting one of these is
+	// expected, not a bug.
+	//
+	// ReasonClusterConfigAncestorUnsafe: an ancestor of the target directory
+	// (/usr or /usr/local) is a symlink, not a directory, or not owned by
+	// uid 0 (S-D3-2). Withholds cluster_token (S-D3-5a, security review
+	// amendment 2026-09-21): the walk verified nothing about where that
+	// component leads, and the SDK's own open resolves the full path by name
+	// straight through it.
+	ReasonClusterConfigAncestorUnsafe Reason = "ClusterConfigAncestorUnsafe"
+	// ReasonClusterConfigAncestorMissing: an ancestor of the target directory
+	// (/usr or /usr/local) is simply absent (S-D3-2). Reported, never
+	// withheld (S-D3-5a): this is not a safety refusal, the SDK's own open
+	// then fails the identical ENOENT, and no token goes anywhere either way.
+	ReasonClusterConfigAncestorMissing Reason = "ClusterConfigAncestorMissing"
+	// ReasonClusterConfigDirCreateFailed: mkdirat failed for a reason other
+	// than EEXIST (e.g. a read-only filesystem).
+	ReasonClusterConfigDirCreateFailed Reason = "ClusterConfigDirCreateFailed"
+	// ReasonClusterConfigDirUnsafe: /usr/local/cloud-config already exists and
+	// is not a root-owned directory (a symlink, FIFO, device or regular file)
+	// (S-D3-3). One of three reasons that withholds cluster_token (with
+	// ReasonClusterConfigAncestorUnsafe and ReasonClusterConfigTokenFileUnsafe).
+	ReasonClusterConfigDirUnsafe Reason = "ClusterConfigDirUnsafe"
+	// ReasonClusterConfigDirWritable: /usr/local/cloud-config exists, is a
+	// root-owned directory, but is OTHER-writable (narrowed from
+	// group-or-other by the 2026-09-21 VM run). Reported, never refused
+	// (S-D3-3): the platform's own 10_accounting.yaml widens it to 0770
+	// root:admin ~130ms after we create it, on every boot from the second
+	// onward -- that expected, non-attacker state is group-writable, not
+	// other-writable, so a group-or-other check would have reported it on
+	// every single boot.
+	ReasonClusterConfigDirWritable Reason = "ClusterConfigDirWritable"
+	// ReasonClusterConfigTokenFileUnsafe: the token-file target (normally
+	// cluster.kairos.yaml) is anything other than absent (ENOENT) or an
+	// intact, root-owned, mode-0600-or-tighter, nlink-1 regular file -- an
+	// allowlist, not an enumerated unsafe set (S-D3-4, amended S-D3-4a,
+	// security review 2026-09-21). One of three reasons that withholds
+	// cluster_token.
+	ReasonClusterConfigTokenFileUnsafe Reason = "ClusterConfigTokenFileUnsafe"
+	// ReasonClusterConfigOverrideRejected: cluster_config_path was set but its
+	// directory is not exactly /usr/local/cloud-config (or the path is
+	// relative or contains ".." after Clean). Nothing is created; the operator
+	// owns pre-creating their own override directory (S-D3-7).
+	ReasonClusterConfigOverrideRejected Reason = "ClusterConfigOverrideRejected"
+	// ReasonClusterConfigNotPersistent: /usr/local's device is the same as
+	// /'s, i.e. COS_PERSISTENT is not actually mounted there. Reported, never
+	// refused: the token is about to be written to ephemeral storage and the
+	// node will not survive a reboot converged (S-D3-8).
+	ReasonClusterConfigNotPersistent Reason = "ClusterConfigNotPersistent"
 )
 
 // Budget captures how many attempts were consumed for the last/failing action.
@@ -132,6 +199,12 @@ type BuildParams struct {
 	Err error
 	// Result carries attempt counts from the driver (S4).
 	Result reconcile.RunResult
+	// Degraded is D-2's signal: reconcile.Plan returned VerdictDegraded (the
+	// node is already Initialized or Joined but its kubelet is not healthy).
+	// Only consulted when Err is nil (a real failure already has its own
+	// phase/reason via the failure path below); forces PhaseDegraded instead
+	// of PhaseConverged so this is never silently reported as success.
+	Degraded bool
 	// Now is an RFC3339 timestamp for UpdatedAt. Inject in tests for
 	// determinism; in production callers pass time.Now().UTC().Format(time.RFC3339).
 	Now string
@@ -199,6 +272,21 @@ func BuildStatus(p BuildParams) Status {
 
 	// Normal reconcile path.
 	if p.Err == nil {
+		// D-2: an established member (Initialized/Joined) whose kubelet is not
+		// healthy must not report Converged/success, even though the reconcile
+		// action was (deliberately) ActionNone. Membership is left as the
+		// probed value (s.Membership, set above) -- no action ran, so there is
+		// no post-action membership to derive as the switch below does.
+		if p.Degraded {
+			s.Phase = PhaseDegraded
+			s.Outcome = OutcomeFailure
+			s.Reason = ReasonKubeletUnhealthy
+			s.Terminal = false
+			s.Budget = Budget{Attempts: 0, MaxAttempts: 0}
+			s.Message = sanitize("kubelet health check is failing on an already-" + s.Membership +
+				" node; recovery is an explicit reset, not automatic")
+			return s
+		}
 		s.Phase = PhaseConverged
 		s.Outcome = OutcomeSuccess
 		s.Reason = ReasonNone
@@ -231,6 +319,42 @@ func BuildStatus(p BuildParams) Status {
 	}
 	s.Reason = deriveReason(p.LastAction, p.Err, p.Result)
 	s.Message = sanitize(actionMessage(p.LastAction, p.Err))
+	return s
+}
+
+// MergeReportOnly builds a Status for a report-only finding that MUST NOT
+// move an existing reconcile verdict backwards (S-D3-9a, security review
+// 2026-09-21: the D-3/F-UKIBOOT VM run found the ensure path driving a
+// converged GRUB node's status from Converged to Failed while the boot
+// converged fine -- a diagnostic that downgrades a healthy node is a
+// security-relevant defect in its own right, since it trains operators to
+// ignore Failed).
+//
+// Phase, Outcome, Membership, Role, LastAction, Budget and Terminal are
+// copied through from prev UNCHANGED when existing is true (the caller
+// already read the most recent Status, e.g. via ReadLatest); only Reason,
+// Message, UpdatedAt, BootID and Version are set fresh. This is a pure
+// function (design principle 6): the read is the caller's job, so this
+// stays hardware-free testable, exactly like BuildStatus.
+//
+// When existing is false (ReadLatest found nothing parseable at any
+// configured path -- a truly fresh install, or a fresh boot before this
+// boot's own reconcile has run and no persistent mirror survives from
+// before), the returned Status starts at PhaseReconciling with an empty
+// Outcome: the reconcile has not run yet this boot, which is an honest
+// "in progress", never a false "failed". PhaseReconciling already existed
+// for exactly this "written at start, replaced on completion" case.
+func MergeReportOnly(prev Status, existing bool, reason Reason, message, bootID, version, now string) Status {
+	s := prev
+	if !existing {
+		s = Status{Phase: PhaseReconciling}
+	}
+	s.APIVersion = APIVersion
+	s.Reason = reason
+	s.Message = message
+	s.UpdatedAt = now
+	s.BootID = bootID
+	s.Version = version
 	return s
 }
 

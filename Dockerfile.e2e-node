@@ -3,17 +3,19 @@
 #
 # It FROM-derives a built kairos-kubeadm image so it REUSES the
 # checksum-verified toolchain (kubeadm / kubelet / kubectl / containerd / runc /
-# CNI) already baked there -- nothing is re-downloaded here. We only add the
+# CNI) already baked there -- nothing is re-downloaded here. That includes the
+# static etcdctl / etcdutl at /usr/bin, extracted from the cosign-verified etcd
+# image by the base build (ADR-12-A1), which the e2e suite execs. We only add the
 # tweaks a real kubeadm+kubelet+containerd need to run inside a privileged
 # container on cgroup v2 with the systemd cgroup driver, mirroring the
 # upstream-blessed kind node-image pattern.
 #
 # Build (via the Makefile, which sets BASE_IMAGE for you):
-#   make e2e-node-image KUBERNETES_VERSION=v1.34.0
+#   make e2e-node-image KUBERNETES_VERSION=v1.37.0
 # or directly:
 #   docker build \
-#     --build-arg BASE_IMAGE=kairos-kubeadm:v1.34.0 \
-#     -f Dockerfile.e2e-node -t kairos-kubeadm-e2e-node:v1.34.0 .
+#     --build-arg BASE_IMAGE=kairos-kubeadm:v1.37.0 \
+#     -f Dockerfile.e2e-node -t kairos-kubeadm-e2e-node:v1.37.0 .
 #
 # Run (the harness does this for you; recorded here for reference):
 #   docker run -d --privileged \
@@ -21,9 +23,9 @@
 #     --tmpfs /run --tmpfs /tmp \
 #     -v /var/lib/containerd -v /var/lib/kubelet -v /var/lib/etcd \
 #     --entrypoint /sbin/init \
-#     kairos-kubeadm-e2e-node:v1.34.0
+#     kairos-kubeadm-e2e-node:v1.37.0
 
-ARG BASE_IMAGE=kairos-kubeadm:v1.34.0
+ARG BASE_IMAGE=kairos-kubeadm:v1.37.0
 FROM ${BASE_IMAGE}
 
 # kubeadm refuses to run with swap on by default; a container has no swap, but be
@@ -36,8 +38,13 @@ ENV container=docker
 #    same set kind masks in its node image entrypoint.
 # 2. Ensure the journal goes to a writable location and systemd does not try to
 #    set up a separate cgroup hierarchy (we run cgroup v2 unified, delegated).
-# 3. Enable containerd + kubelet so systemd brings them up at boot (the base
-#    image already `systemctl enable`s them, but we re-assert idempotently).
+#
+# Nothing here enables containerd or the kubelet. The base image ships them in
+# /usr/lib/systemd/system with relative multi-user.target.wants links and no
+# [Install] section (ADR-19 U2), so `systemctl enable` would fail; the
+# `|| true` it used to carry would have hidden exactly the regression this
+# derived image has to prove absent, which is why S19-11 has the e2e node image
+# checked by scripts/verify-image-files.sh too.
 RUN set -eux; \
     # Units that must not run in a container.
     for unit in \
@@ -52,12 +59,10 @@ RUN set -eux; \
         systemctl mask "$unit" || true; \
     done; \
     # Do not let getty/console units spin.
-    systemctl mask getty.target console-getty.service || true; \
-    # Make sure containerd + kubelet start under systemd.
-    systemctl enable containerd.service kubelet.service || true
+    systemctl mask getty.target console-getty.service || true
 
 # The kubelet must not be gated on swap; kind passes failSwapOn=false via the
-# kubelet config. kubeadm 1.34 defaults to handling swap, but a privileged
+# kubelet config. kubeadm in the supported window handles swap by default, but a privileged
 # container can momentarily see host swap, so we belt-and-braces the flag through
 # the kubeadm extra-args drop-in the unit already sources (/etc/default/kubelet).
 RUN set -eux; \

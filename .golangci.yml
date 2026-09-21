@@ -3,7 +3,9 @@ version: "2"
 linters:
   default: none
   enable:
+    - depguard
     - errcheck
+    - forbidigo
     - govet
     - ineffassign
     - misspell
@@ -12,12 +14,45 @@ linters:
   settings:
     misspell:
       locale: US
+    # ADR-1-A1: every privileged exec uses an absolute path and a closed
+    # environment, built exclusively by internal/kubeadm's runner constructors
+    # (DefaultRunner/KubectlRunner/CtrRunner/SystemctlRunner) or
+    # internal/etcdsnapshot.SaveCommand. Nothing else may import os/exec.
+    depguard:
+      rules:
+        no-os-exec:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/kubeadm/runner.go"
+            - "!**/internal/etcdsnapshot/snapshot.go"
+            - "!**/test/e2e/**"
+          deny:
+            - pkg: os/exec
+              desc: "ADR-1-A1: exec only via kubeadm.{Default,Kubectl,Ctr,Systemctl}Runner or etcdsnapshot.SaveCommand"
+    # ADR-1-A1: no process spawning or process-wide environment mutation
+    # outside the runner (a bare os.Setenv etc. would leak into every
+    # subsequent os/exec call in-process).
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^os\.(StartProcess|Setenv|Unsetenv|Clearenv)$'
+          msg: "ADR-1-A1: no process spawning or process-wide env mutation"
+        - pattern: '^syscall\.(Exec|ForkExec|StartProcess|Setenv|Unsetenv|Clearenv)$'
+          msg: "ADR-1-A1"
+        - pattern: '^unix\.(Exec|Setenv|Unsetenv|Clearenv)$'
+          msg: "ADR-1-A1"
   exclusions:
     rules:
       # Test files are allowed to skip error checks for brevity.
       - path: _test\.go
         linters:
           - errcheck
+      # Tests use t.Setenv and helper-process spawning; only non-test code is
+      # constrained by ADR-1-A1.
+      - path: '(_test\.go|^test/e2e/)'
+        linters:
+          - forbidigo
 
 formatters:
   enable:

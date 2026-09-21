@@ -1,24 +1,24 @@
 # Flannel CNI example
 
 provider-kubernetes bootstraps the control plane and joins nodes, but it installs
-**no CNI** — pod networking is the operator's choice (Flannel, Calico, Cilium,
-...). Until a CNI is installed, nodes stay `NotReady` and CoreDNS stays `Pending`.
-**This is by design** (kubeadm ships no CNI; the provider stays CNI-agnostic —
-principle #3, no vendor lock-in), not a bug.
+no CNI: pod networking is the operator's choice (Flannel, Calico, Cilium, ...).
+Until a CNI is installed, nodes stay `NotReady` and CoreDNS stays `Pending`. That
+is by design, not a bug. kubeadm ships no CNI either, and staying CNI-agnostic is
+how the provider avoids vendor lock-in.
 
-This directory installs **Flannel v0.28.5** — the simplest, most neutral option: a
-single upstream manifest, no operator, no CRDs. Flannel's default pod network is
-`10.244.0.0/16`, which already matches the `podSubnet` used across these samples,
-so for the common lab / single-node case it is the least-friction way to get a
-`Ready` cluster. (For network policy / eBPF / HA-oriented deployments, see
-[`../cni-calico`](../cni-calico). Pick the CNI that fits your cluster.)
+This directory installs **Flannel v0.28.5**: a single upstream manifest, no
+operator, no CRDs. Flannel's default pod network is `10.244.0.0/16`, which
+already matches the `podSubnet` used across these samples, so for a lab or
+single-node cluster it is the shortest path to a `Ready` node. For network
+policy, eBPF, or HA-oriented deployments, see
+[`../cni-calico`](../cni-calico).
 
 Two ways to apply it:
 
 | File | Approach | When |
 |------|----------|------|
 | (this README, "apply by hand") | `kubectl apply` the pinned manifest after the cluster is up. | Explicit/staged control of when the CNI lands, or a GitOps tool owns CNI. |
-| `cluster-with-flannel.yaml` | Bundled in the control-plane cloud-config — the node installs Flannel itself, no follow-up `kubectl`. | One declarative file that yields a `Ready` cluster unattended. |
+| `cluster-with-flannel.yaml` | Bundled in the control-plane cloud-config: the node installs Flannel itself, no follow-up `kubectl`. | One declarative file that yields a `Ready` cluster unattended. |
 
 ## Prerequisites
 
@@ -28,9 +28,9 @@ Two ways to apply it:
   the manifest) to match, or pods won't get routable IPs.
 - The provider image already loads `br_netfilter` and sets the required sysctls
   (`net.bridge.bridge-nf-call-iptables=1`, `net.ipv4.ip_forward=1`), which Flannel
-  needs — no extra host setup.
+  needs, so there is no extra host setup.
 
-## Approach A — apply after the cluster is up
+## Approach A: apply after the cluster is up
 
 Run on the control-plane node (or anywhere with the cluster's admin kubeconfig):
 
@@ -49,7 +49,7 @@ kubectl get nodes            # STATUS: Ready
 kubectl get pods -A          # coredns Running; kube-flannel-ds Running
 ```
 
-## Approach B — bundled in the cloud-config
+## Approach B: bundled in the cloud-config
 
 Boot the control-plane node with [`cluster-with-flannel.yaml`](./cluster-with-flannel.yaml).
 The provider runs `kubeadm init`, and a self-contained systemd one-shot waits for
@@ -60,6 +60,7 @@ endpoint, and `cluster_token` before use.
 
 ## Air-gap
 
-The manifest URL and Flannel images require outbound internet. For an air-gapped
-cluster, mirror `kube-flannel.yml` and the Flannel images internally (or pre-bundle
-them, cf. ADR-16) and point the apply at your local copy.
+The manifest URL and the Flannel images need outbound internet. The control-plane
+images bundled in the OS image do not cover a CNI, so on an air-gapped cluster
+mirror `kube-flannel.yml` and the Flannel images internally and point the apply at
+your local copy. See [`../air-gapped/`](../air-gapped/).

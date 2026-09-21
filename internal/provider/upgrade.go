@@ -5,11 +5,13 @@ import (
 	"crypto/tls"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
+	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
 )
 
 // This file holds the production probes the upgrade path (ADR-12 U6) wires into
@@ -35,20 +37,21 @@ var kubernetesVersionRe = regexp.MustCompile(`kubernetesVersion:\s*(v[0-9]+\.[0-
 
 // clusterVersionViaKubectl reads the cluster's current Kubernetes version from the
 // kube-system/kubeadm-config ConfigMap (the authoritative source; it flips when
-// the first control plane runs `upgrade apply`). Best-effort.
-func clusterVersionViaKubectl(rootPath string) func(ctx context.Context) string {
+// the first control plane runs `upgrade apply`). Best-effort: it parses
+// Result.Stdout only (never Stderr, ADR-1-A1) and returns "" on any error.
+func clusterVersionViaKubectl(rootPath string, r kubeadm.Runner) func(ctx context.Context) string {
 	return func(ctx context.Context) string {
 		kc := kubeconfigFor(rootPath)
 		if kc == "" {
 			return ""
 		}
-		out, err := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kc,
+		res, err := r.Run(ctx, "--kubeconfig", kc,
 			"-n", "kube-system", "get", "configmap", "kubeadm-config",
-			"-o", "jsonpath={.data.ClusterConfiguration}").CombinedOutput()
+			"-o", "jsonpath={.data.ClusterConfiguration}")
 		if err != nil {
 			return ""
 		}
-		if m := kubernetesVersionRe.FindStringSubmatch(string(out)); len(m) == 2 {
+		if m := kubernetesVersionRe.FindStringSubmatch(res.Stdout); len(m) == 2 {
 			return m[1]
 		}
 		return ""
@@ -56,8 +59,9 @@ func clusterVersionViaKubectl(rootPath string) func(ctx context.Context) string 
 }
 
 // runningKubeletVersionViaKubectl reads this node's RUNNING kubelet version from
-// its Node object (status.nodeInfo.kubeletVersion). Best-effort.
-func runningKubeletVersionViaKubectl(rootPath string) func(ctx context.Context) string {
+// its Node object (status.nodeInfo.kubeletVersion). Best-effort: it parses
+// Result.Stdout only (never Stderr, ADR-1-A1) and returns "" on any error.
+func runningKubeletVersionViaKubectl(rootPath string, r kubeadm.Runner) func(ctx context.Context) string {
 	return func(ctx context.Context) string {
 		kc := kubeconfigFor(rootPath)
 		if kc == "" {
@@ -67,26 +71,32 @@ func runningKubeletVersionViaKubectl(rootPath string) func(ctx context.Context) 
 		if err != nil || host == "" {
 			return ""
 		}
-		out, err := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kc,
+		res, err := r.Run(ctx, "--kubeconfig", kc,
 			"get", "node", strings.ToLower(host),
-			"-o", "jsonpath={.status.nodeInfo.kubeletVersion}").CombinedOutput()
+			"-o", "jsonpath={.status.nodeInfo.kubeletVersion}")
 		if err != nil {
 			return ""
 		}
-		return strings.TrimSpace(string(out))
+		return strings.TrimSpace(res.Stdout)
 	}
 }
 
 // localAPIHealthyProbe reports whether the LOCAL apiserver answers /healthz
 // (ADR-12-R1). Liveness only (InsecureSkipVerify); used to decide whether the
 // kubelet config needs repair after an A/B image swap and to gate upgrade apply.
-func localAPIHealthyProbe() func(ctx context.Context) bool {
+//
+// bindPort is the cluster's localAPIEndpoint.bindPort, which kubeadm renders
+// as the apiserver's --secure-port. It has to be threaded in: a cluster that
+// pins a non-default port serves /healthz only there, and probing 6443 would
+// report a healthy control plane as down on every pass.
+func localAPIHealthyProbe(bindPort int32) func(ctx context.Context) bool {
 	client := &http.Client{
 		Timeout:   5 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // liveness probe only
 	}
+	healthz := kubeadmconfig.LocalAPIHealthzURL(bindPort)
 	return func(ctx context.Context) bool {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://127.0.0.1:6443/healthz", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthz, nil)
 		if err != nil {
 			return false
 		}
@@ -96,38 +106,5 @@ func localAPIHealthyProbe() func(ctx context.Context) bool {
 		}
 		defer func() { _ = resp.Body.Close() }()
 		return resp.StatusCode == http.StatusOK
-	}
-}
-
-// encryptionConfirmedDefault reports whether dir's backing block device is part of
-// an encrypted (LUKS/crypt) stack, by walking the device dependency tree. It is
-// conservative: any error or an absent crypt layer yields false, so the etcd
-// snapshot is refused rather than writing plaintext (ADR-12 U5 security). A false
-// negative is safe (snapshot skipped); a false positive would be dangerous but
-// requires the resolved source device to genuinely carry a dm-crypt node.
-//
-// Precondition (documented, like RunDir-must-be-tmpfs): the snapshot dir must be a
-// DIRECT mount. Under an overlay/bind mount, `findmnt --target` may resolve to a
-// backing device that differs from where bytes actually land, so the check is only
-// trustworthy for a plain mount of the persistent partition.
-func encryptionConfirmedDefault(dir string) func(ctx context.Context) bool {
-	return func(ctx context.Context) bool {
-		src, err := exec.CommandContext(ctx, "findmnt", "-no", "SOURCE", "--target", dir).CombinedOutput()
-		dev := strings.TrimSpace(string(src))
-		if err != nil || dev == "" {
-			return false
-		}
-		// -s walks down the dependency tree to the physical devices; any "crypt"
-		// node means the data at rest is encrypted.
-		out, err := exec.CommandContext(ctx, "lsblk", "-rno", "TYPE", "-s", dev).CombinedOutput()
-		if err != nil {
-			return false
-		}
-		for _, line := range strings.Fields(string(out)) {
-			if line == "crypt" {
-				return true
-			}
-		}
-		return false
 	}
 }

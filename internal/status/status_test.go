@@ -328,6 +328,86 @@ func TestBuildStatusConfigInvalidWithoutErrIsIgnored(t *testing.T) {
 	}
 }
 
+// TestBuildStatusDegraded is D-2: an established member (Initialized or
+// Joined) whose reconcile.Plan verdict was degraded must report
+// PhaseDegraded/OutcomeFailure/ReasonKubeletUnhealthy, non-terminal, and must
+// NEVER be reported as PhaseConverged.
+func TestBuildStatusDegraded(t *testing.T) {
+	tests := []struct {
+		name       string
+		membership actualstate.Membership
+	}{
+		{name: "initialized member", membership: actualstate.Initialized},
+		{name: "joined member", membership: actualstate.Joined},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := baseParams()
+			p.Membership = tc.membership
+			p.LastAction = reconcile.ActionNone
+			p.Err = nil
+			p.Degraded = true
+
+			s := BuildStatus(p)
+
+			if s.Phase == PhaseConverged {
+				t.Fatalf("phase = %q, must never be Converged when Degraded is set", s.Phase)
+			}
+			if s.Phase != PhaseDegraded {
+				t.Errorf("phase = %q, want Degraded", s.Phase)
+			}
+			if s.Outcome != OutcomeFailure {
+				t.Errorf("outcome = %q, want failure (a real problem, even though non-terminal)", s.Outcome)
+			}
+			if s.Reason != ReasonKubeletUnhealthy {
+				t.Errorf("reason = %q, want KubeletUnhealthy", s.Reason)
+			}
+			if s.Terminal {
+				t.Error("degraded must be non-terminal: a later boot or an explicit reset may still converge")
+			}
+			if s.Membership != string(tc.membership) {
+				t.Errorf("membership = %q, want %q (probed value kept: no action ran)", s.Membership, tc.membership)
+			}
+			if s.Budget.Attempts != 0 || s.Budget.MaxAttempts != 0 {
+				t.Errorf("budget = %+v, want {0,0}", s.Budget)
+			}
+		})
+	}
+}
+
+// TestBuildStatusDegradedFalseIsInertWithoutErr is the converse of
+// TestBuildStatusDegraded: Degraded defaults to false (its zero value), so
+// every existing success-path caller that does not set it is unaffected.
+func TestBuildStatusDegradedFalseIsInertWithoutErr(t *testing.T) {
+	p := baseParams()
+	p.Membership = actualstate.Initialized
+	p.LastAction = reconcile.ActionNone
+	p.Err = nil
+	// p.Degraded left at its zero value (false).
+
+	s := BuildStatus(p)
+	if s.Phase != PhaseConverged {
+		t.Errorf("phase = %q, want Converged (Degraded defaults to false)", s.Phase)
+	}
+}
+
+// TestBuildStatusDegradedIgnoredWhenErrSet: Degraded must never override a
+// real failure's phase/reason -- it is only consulted on the Err == nil path.
+func TestBuildStatusDegradedIgnoredWhenErrSet(t *testing.T) {
+	p := baseParams()
+	p.LastAction = reconcile.ActionRunJoin
+	p.Err = errors.New("connection refused")
+	p.Degraded = true // must be inert here
+
+	s := BuildStatus(p)
+	if s.Phase != PhaseFailed {
+		t.Errorf("phase = %q, want Failed (Degraded must not mask a real error)", s.Phase)
+	}
+	if s.Reason != ReasonJoinTimeout {
+		t.Errorf("reason = %q, want JoinTimeout (deriveReason's normal mapping, untouched by Degraded)", s.Reason)
+	}
+}
+
 // TestBuildStatusIsDeterministic verifies BuildStatus is pure: same inputs ->
 // identical outputs regardless of how many times it is called.
 func TestBuildStatusIsDeterministic(t *testing.T) {
@@ -603,4 +683,82 @@ func contains(s, sub string) bool {
 			}
 			return false
 		}())
+}
+
+// TestMergeReportOnlyPreservesExistingFields is S-D3-9a's pure-function
+// contract: Phase, Outcome, Membership, Role, LastAction, Budget and
+// Terminal must pass through prev unchanged when existing is true; only
+// Reason, Message, UpdatedAt, BootID and Version move.
+func TestMergeReportOnlyPreservesExistingFields(t *testing.T) {
+	prev := Status{
+		APIVersion: APIVersion,
+		Phase:      PhaseConverged,
+		Role:       "controlplane",
+		Membership: "initialized",
+		Outcome:    OutcomeSuccess,
+		Reason:     ReasonNone,
+		Terminal:   false,
+		LastAction: "run-init",
+		Message:    "converged",
+		Budget:     Budget{Attempts: 0, MaxAttempts: 0},
+		UpdatedAt:  "2026-09-20T00:00:00Z",
+		BootID:     "old-boot-id",
+		Version:    "v0.1.0",
+	}
+
+	got := MergeReportOnly(prev, true, ReasonClusterConfigNotPersistent, "not persistent", "new-boot-id", "v0.2.0", testNow)
+
+	if got.Phase != PhaseConverged {
+		t.Errorf("Phase = %q, want preserved %q", got.Phase, PhaseConverged)
+	}
+	if got.Outcome != OutcomeSuccess {
+		t.Errorf("Outcome = %q, want preserved %q", got.Outcome, OutcomeSuccess)
+	}
+	if got.Membership != "initialized" {
+		t.Errorf("Membership = %q, want preserved", got.Membership)
+	}
+	if got.Role != "controlplane" {
+		t.Errorf("Role = %q, want preserved", got.Role)
+	}
+	if got.LastAction != "run-init" {
+		t.Errorf("LastAction = %q, want preserved", got.LastAction)
+	}
+	if got.Terminal {
+		t.Error("Terminal must be preserved (false), not flipped")
+	}
+	if got.Reason != ReasonClusterConfigNotPersistent {
+		t.Errorf("Reason = %q, want the fresh value", got.Reason)
+	}
+	if got.Message != "not persistent" {
+		t.Errorf("Message = %q, want the fresh value", got.Message)
+	}
+	if got.UpdatedAt != testNow {
+		t.Errorf("UpdatedAt = %q, want the fresh value %q", got.UpdatedAt, testNow)
+	}
+	if got.BootID != "new-boot-id" || got.Version != "v0.2.0" {
+		t.Errorf("BootID/Version were not updated: %+v", got)
+	}
+}
+
+// TestMergeReportOnlyNoExistingUsesReconciling covers the no-prior-record
+// case: MergeReportOnly must start from PhaseReconciling, never PhaseFailed,
+// when existing is false.
+func TestMergeReportOnlyNoExistingUsesReconciling(t *testing.T) {
+	got := MergeReportOnly(Status{}, false, ReasonClusterConfigDirWritable, "writable", testBootID, testVersion, testNow)
+
+	if got.Phase != PhaseReconciling {
+		t.Errorf("Phase = %q, want %q", got.Phase, PhaseReconciling)
+	}
+	if got.Phase == PhaseFailed {
+		t.Error("MergeReportOnly must never fabricate PhaseFailed")
+	}
+	if got.Outcome != "" {
+		t.Errorf("Outcome = %q, want empty (nothing decided yet)", got.Outcome)
+	}
+	if got.Terminal {
+		t.Error("Terminal must be false on the fresh-boot fallback")
+	}
+	if got.Reason != ReasonClusterConfigDirWritable {
+		t.Errorf("Reason = %q, want the fresh value", got.Reason)
+	}
 }

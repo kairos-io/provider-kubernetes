@@ -5,8 +5,8 @@ Usage documentation for **provider-kubernetes**, the Go-native
 **kubeadm-based Kubernetes clusters**. The provider binary is
 `agent-provider-kubernetes` (Kairos discovers `agent-provider-*` binaries).
 
-> This is an early public release. The supported Kubernetes window is 1.34 / 1.35
-> / 1.36. Configuration and behavior may still change between minor releases, so
+> This is an early public release. The supported Kubernetes window is 1.35 / 1.36
+> / 1.37. Configuration and behavior may still change between minor releases, so
 > pin a released image tag. It is not yet certified for production use.
 >
 > Not to be confused with `provider-kairos` (the k3s/k0s provider); this is the
@@ -28,7 +28,7 @@ Usage documentation for **provider-kubernetes**, the Go-native
 | [Creating a cluster](./creating-a-cluster.md) | Single control plane, adding workers, the join-material flow. |
 | [High availability](./high-availability.md) | Multi-control-plane (stacked etcd): stable endpoint, one-at-a-time bring-up, failover. |
 | [mint-join reference](./mint-join.md) | The `agent-provider-kubernetes mint-join` subcommand. |
-| [Upgrades](./upgrades.md) | Upgrading between Kubernetes minors (`kubeadm upgrade`): pin + image, single-node and HA, kubelet-config repair, etcd snapshots, rollback. |
+| [Upgrades](./upgrades.md) | Upgrading between Kubernetes minors (`kubeadm upgrade`): pin + image, single-node and HA, kubelet-config repair, etcd backups, rollback. |
 | [CNI](./cni.md) | Installing a CNI (the provider installs none). |
 | [Running on Hadron](./hadron.md) | Building a provider image on the Kairos Hadron (musl) base: static runtime, supply-chain pinning. |
 | [Security model](./security.md) | `cluster_token`, certificate-key blast radius, CA pinning, at-rest encryption, the trust boundary. |
@@ -39,20 +39,26 @@ Usage documentation for **provider-kubernetes**, the Go-native
 
 ## How it works in one paragraph
 
-You boot a Kairos node from an image that bundles this provider plus the kubeadm
-toolchain. Kairos passes your `cluster` cloud-config to the provider, which emits
-a single boot-time stage (`network.after`) that runs one bounded reconcile pass:
-it reads the node's desired role, probes the node's actual state, and converges
-the difference by driving the `kubeadm` binary over typed `os/exec` argv (never a
-shell). A `role: init` node runs `kubeadm init`; `worker` / `controlplane` nodes
-run `kubeadm join` against operator-delivered join material with mandatory CA
-pinning. Every external action is bounded by a deadline with capped retries, so a
-failure surfaces loudly and never blocks later Kairos boot stages.
+You boot a Kairos node from an image that bundles this provider, the kubeadm
+toolchain, and the control-plane container images for its Kubernetes minor.
+Kairos passes your `cluster` cloud-config to the provider, which emits one
+boot-time stage (`network.after`): import the bundled images into containerd,
+then run one bounded reconcile pass. The reconcile reads the node's desired
+role, probes the node's actual state, and converges the difference by driving
+the `kubeadm` binary over typed `os/exec` argv (never a shell). A `role: init`
+node runs `kubeadm init`; `worker` and `controlplane` nodes run `kubeadm join`
+against operator-delivered join material with mandatory CA pinning. Every
+external action is bounded by a deadline with capped retries, so a failure
+surfaces loudly and never blocks later Kairos boot stages.
 
 ## See also
 
 - [`samples/`](../samples/) - ready-to-edit cloud-configs and an end-to-end walkthrough.
 - [`samples/ha/`](../samples/ha/) - the multi-control-plane walkthrough.
+- [`samples/air-gapped/`](../samples/air-gapped/) - bootstrap with no registry reachable.
+- [`samples/trusted-boot/`](../samples/trusted-boot/) - a UKI node.
+- [`samples/custom-api-port/`](../samples/custom-api-port/) - an API server off 6443.
+- [`samples/external-controlplane/`](../samples/external-controlplane/) - join a control plane the provider did not bootstrap.
 - [`samples/cni-flannel/`](../samples/cni-flannel/) - Flannel CNI examples.
 - [`samples/cni-calico/`](../samples/cni-calico/) - Calico CNI examples.
 - Root [`README.md`](../README.md) - project overview and status.
