@@ -1,24 +1,23 @@
 # provider-kubernetes
 
-A [Kairos](https://kairos.io) cluster provider that bootstraps **upstream
-Kubernetes** using `kubeadm`, while remaining native to the Kairos ecosystem
-(the `clusterplugin` / `yip` contract).
+A [Kairos](https://kairos.io) cluster provider that creates and manages
+kubeadm-based Kubernetes clusters. It drives upstream `kubeadm` from Go and
+plugs into the Kairos `clusterplugin` / `yip` contract.
 
 ## What this is
 
-`provider-kubernetes` gives Kairos users a first-class way to **create and
-manage kubeadm-based Kubernetes clusters**, that plugs into the Kairos
-cluster lifecycle.
+Declare a node's role in its Kairos cloud-config; on each boot the provider
+runs one bounded reconcile pass that converges the node toward that role. There
+is no central controller and no shell script orchestrating the bootstrap.
 
 Its design takes the feedback in
 [kairos-io/kairos#4099](https://github.com/kairos-io/kairos/issues/4099) as a
 starting point, notably:
 
-- **Externally-managed control planes** are a supported topology, not an
-  afterthought.
+- **Externally-managed control planes** are a supported topology.
 - **Tracks upstream Kubernetes (N, N-1, N-2).** The provider supports the three
   most recent in-support upstream Kubernetes minors (currently 1.35 / 1.36 /
-  1.37), rolling the window forward as new minors ship — matching upstream's
+  1.37), rolling the window forward as new minors ship, matching upstream's
   support policy.
 
 ## What works today
@@ -46,11 +45,23 @@ starting point, notably:
   version-matched `etcdctl`/`etcdutl` for your own backups. See
   [`docs/upgrades.md`](./docs/upgrades.md).
 - **CNI is the operator's choice.** The provider installs no CNI by design (no
-  vendor lock-in). Two worked examples ship in `samples/` —
+  vendor lock-in). Two worked examples ship in `samples/`:
   [`samples/cni-flannel/`](./samples/cni-flannel/) and
-  [`samples/cni-calico/`](./samples/cni-calico/) — each showing both ways to
+  [`samples/cni-calico/`](./samples/cni-calico/). Each shows both ways to
   install one: apply it after the cluster is up, or bundle it in the
   control-plane cloud-config.
+- **Air-gapped bootstrap.** Each image carries the control-plane images for its
+  Kubernetes minor, cosign-verified at build time and recorded in an
+  `images.lock`. A boot-time step imports them into containerd under the exact
+  references kubeadm looks up, so `kubeadm init`/`join` needs no registry. See
+  [`samples/air-gapped/`](./samples/air-gapped/).
+- **Trusted boot (UKI).** A UKI node creates its own cluster-config directory on
+  first boot, so it bootstraps without a manual step. See
+  [`samples/trusted-boot/`](./samples/trusted-boot/).
+- **Machine-readable node status.** Every reconcile pass writes a closed-schema
+  status document, and mirrors it to the node's own Node annotations once the
+  node is a member. A member whose kubelet healthz is failing reports
+  `phase: Degraded` rather than success. See [`docs/status.md`](./docs/status.md).
 - **Built on Hadron (musl).** Images are built on the Kairos **Hadron** minimal,
   musl-based immutable OS. containerd and kubelet are built static from pinned
   source; the remaining binaries are verified static downloads. See
@@ -120,7 +131,7 @@ checksum. This is an early public release; the current Kubernetes window is
 1.35 / 1.36 / 1.37 (releases up to v0.3.0 shipped 1.34 / 1.35 / 1.36). See
 [`docs/testing.md`](./docs/testing.md) for the coverage
 boundary. It is not yet certified for production use, and configuration and
-behavior may still change between minor releases — pin a released image tag.
+behavior may still change between minor releases, so pin a released image tag.
 
 Every image and release binary is signed with keyless SLSA build-provenance and
 CycloneDX SBOM attestations. To verify them (and for the release process), see
@@ -136,9 +147,14 @@ and its [README](./samples/README.md) walks through the end-to-end flow:
 | [`samples/master.yaml`](./samples/master.yaml) | first control-plane (`role: init`) |
 | [`samples/controlplane.yaml`](./samples/controlplane.yaml) | additional control-plane join |
 | [`samples/worker.yaml`](./samples/worker.yaml) | worker join |
-| [`samples/cluster.yaml`](./samples/cluster.yaml) | annotated reference covering the full kubeadm v1beta4 surface |
+| [`samples/cluster.yaml`](./samples/cluster.yaml) | annotated reference for the kubeadm v1beta4 keys the provider reads |
+| [`samples/ha/`](./samples/ha/) | multi-control-plane (stacked etcd) walkthrough |
 | [`samples/cni-flannel/`](./samples/cni-flannel/) | Flannel CNI (simplest), post-hoc or bundled in the cloud-config |
 | [`samples/cni-calico/`](./samples/cni-calico/) | Calico CNI, post-hoc or bundled in the cloud-config |
+| [`samples/air-gapped/`](./samples/air-gapped/) | bootstrap with no registry reachable, from the bundled images |
+| [`samples/trusted-boot/`](./samples/trusted-boot/) | a UKI (trusted-boot) node |
+| [`samples/custom-api-port/`](./samples/custom-api-port/) | an API server on a port other than 6443 |
+| [`samples/external-controlplane/`](./samples/external-controlplane/) | join a control plane the provider did not bootstrap |
 
 The flow: boot the first control-plane node from a sample; once it is up, mint
 join material with `agent-provider-kubernetes mint-join` and drop it into the

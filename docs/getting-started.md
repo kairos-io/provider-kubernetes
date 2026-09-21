@@ -115,3 +115,17 @@ rather than hanging - see [Troubleshooting](./troubleshooting.md).
 - [Add workers / more control planes](./creating-a-cluster.md)
 - [Stand up a multi-control-plane HA cluster](./high-availability.md)
 - [Install a CNI](./cni.md)
+
+## Other topologies
+
+Each of these is a worked sample rather than a separate mode to enable:
+
+- [`samples/air-gapped/`](../samples/air-gapped/) - no registry reachable. The
+  image carries the control-plane images and imports them at boot; you supply a
+  mirrored CNI.
+- [`samples/trusted-boot/`](../samples/trusted-boot/) - a UKI node, and why the
+  status file is the only channel you can read afterwards.
+- [`samples/custom-api-port/`](../samples/custom-api-port/) - an API server on a
+  port other than 6443.
+- [`samples/external-controlplane/`](../samples/external-controlplane/) - join a
+  control plane this provider did not bootstrap.

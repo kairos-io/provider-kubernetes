@@ -1,0 +1,54 @@
+#cloud-config
+# First control-plane node (role: init) with the API server on 7443 instead of
+# kubeadm's default 6443.
+#
+# STATUS: early public release; adapt to your environment, not yet certified for production.
+#
+# The port appears in four places and they must all agree:
+#   1. initConfiguration.localAPIEndpoint.bindPort  -> the apiserver's --secure-port
+#   2. clusterConfiguration.controlPlaneEndpoint    -> what every node dials
+#   3. cluster.control_plane_host                   -> the provider's reachability probe
+#   4. every joiner's joinConfiguration.discovery.bootstrapToken.apiServerEndpoint
+# A bare control_plane_host with no port gets :6443 appended, which on this
+# cluster would probe a port nothing listens on.
+#
+# Read samples/custom-api-port/README.md before using this.
+
+install:
+  device: "auto"
+  auto: true
+  reboot: true
+
+users:
+  # Kairos 3.3+ requires at least one user in the 'admin' group for
+  # kairos-agent install to proceed (or set install.nousers: true).
+  - name: kairos
+    groups: ["admin", "sudo"]
+    passwd: kairos
+
+hostname: cp-7443
+
+cluster:
+  cluster_token: "CHANGE-ME-to-a-long-high-entropy-cluster-correlation-string"
+
+  # Carries the port explicitly. Without it the provider would append :6443.
+  control_plane_host: "192.168.1.10:7443"
+
+  role: init
+
+  providerConfig:
+    cluster_root_path: "/"
+
+  config: |
+    clusterConfiguration:
+      kubernetesVersion: v1.37.0
+      controlPlaneEndpoint: "192.168.1.10:7443"
+      networking:
+        podSubnet: "10.244.0.0/16"
+        serviceSubnet: "10.96.0.0/12"
+    initConfiguration:
+      localAPIEndpoint:
+        advertiseAddress: "192.168.1.10"
+        # kubeadm renders this as the apiserver's --secure-port, and the
+        # provider probes /healthz on this port rather than a fixed 6443.
+        bindPort: 7443

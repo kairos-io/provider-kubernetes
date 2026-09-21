@@ -2,10 +2,11 @@
 // provider-kubernetes: it translates a Cluster definition into a yip
 // configuration.
 //
-// STATUS (foundation slice): inputs are parsed and validated, but bootstrap
-// stages are not yet emitted. That lands with the kubeadm-flow and credential
-// layers. Provider must always return promptly and never hang or panic (a
-// provider that blocks stalls every later Kairos boot stage, issue #4099-1).
+// Provider validates the Cluster, then emits one network.after stage with three
+// steps in order: write the serialized Cluster to tmpfs, import the pre-bundled
+// control-plane images, run the bounded reconcile pass. Provider must always
+// return promptly and never hang or panic (a provider that blocks stalls every
+// later Kairos boot stage, issue #4099-1).
 package provider
 
 import (

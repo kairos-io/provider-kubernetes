@@ -1,4 +1,4 @@
-# provider-kubernetes — build & quality targets.
+# provider-kubernetes: build and quality targets.
 # The provider binary is named agent-provider-kubernetes (Kairos convention:
 # kairos-agent discovers binaries prefixed with "agent-provider-").
 

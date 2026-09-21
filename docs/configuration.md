@@ -107,6 +107,15 @@ Notes:
   in (or pass `--advertise-address`).
 - Token discovery **requires** `caCertHashes`; the provider refuses to emit a
   join config without a CA anchor and never sets `unsafeSkipCAVerification`.
+- `bindPort` defaults to kubeadm's 6443. If you move it, `controlPlaneEndpoint`,
+  `control_plane_host` and every joiner's `apiServerEndpoint` have to carry the
+  same port: the provider's local-API health probe follows `bindPort`, and its
+  control-plane reachability probe dials `control_plane_host` literally. See
+  [`samples/custom-api-port/`](../samples/custom-api-port/).
+- Keys the provider does not read are ignored, not passed through to kubeadm.
+  The block above is the read surface. In particular a `kubeletConfiguration`
+  document here has no effect: the provider emits its own, and only to pin
+  `clusterDNS` when you set a custom `serviceSubnet`.
 
 ## Externally-managed control planes
 
@@ -120,9 +129,11 @@ anchor explicitly, in any of these ways:
   `sha256:...` SPKI pins).
 - a CA-embedded discovery file (`discovery.file.kubeConfigPath`).
 
-If you supply both `ca_certs` and explicit `caCertHashes`, they are
+`ca_certs` is a key of the `cluster:` block itself, not of the inner `config:`
+string. If you supply both `ca_certs` and explicit `caCertHashes`, they are
 cross-validated and a mismatch fails loud. CA pinning is mandatory in every case;
-`unsafeSkipCAVerification` is never set.
+`unsafeSkipCAVerification` is never set. A worked example is in
+[`samples/external-controlplane/`](../samples/external-controlplane/).
 
 This path is exercised end-to-end in CI: an e2e scenario stands up a control plane
 with plain `kubeadm init` (the provider never touches it), then joins a worker
@@ -145,8 +156,20 @@ proxies for containerd and the kubelet through their systemd units.
 
 ## What the provider emits
 
-The `Provider` function is a side-effect-free emitter: it produces a single yip
-stage at **`network.after`** that writes the serialized `Cluster` to a `0600`
-tmpfs file (`/run/provider-kubernetes/cluster.json`) and invokes the provider's
-`reconcile` subcommand against it. All actual work happens in that bounded
-reconcile pass.
+The `Provider` function is a side-effect-free emitter. It produces one yip stage
+at `network.after` with three steps, which yip runs in order:
+
+1. Write the serialized `Cluster` to a `0600` tmpfs file
+   (`/run/provider-kubernetes/cluster.json`).
+2. Run `agent-provider-kubernetes import-images`, which imports the
+   control-plane images bundled in the OS image into containerd, logging to
+   `/var/log/provider-kubernetes-image-import.log`. It is a no-op when nothing
+   is bundled, and a failure here does not abort the boot.
+3. Run `agent-provider-kubernetes reconcile` against the file from step 1,
+   logging to `/var/log/provider-kubernetes-reconcile.log`.
+
+All actual work happens in that bounded reconcile pass. The import runs as a
+stage step rather than relying on `provider-kubernetes-image-import.service`
+alone, because the systemd oneshot races this stage and cannot be relied on for
+ordering; the images have to be in containerd before `kubeadm init`/`join`
+runs.

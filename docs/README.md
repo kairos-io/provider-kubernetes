@@ -39,20 +39,26 @@ Usage documentation for **provider-kubernetes**, the Go-native
 
 ## How it works in one paragraph
 
-You boot a Kairos node from an image that bundles this provider plus the kubeadm
-toolchain. Kairos passes your `cluster` cloud-config to the provider, which emits
-a single boot-time stage (`network.after`) that runs one bounded reconcile pass:
-it reads the node's desired role, probes the node's actual state, and converges
-the difference by driving the `kubeadm` binary over typed `os/exec` argv (never a
-shell). A `role: init` node runs `kubeadm init`; `worker` / `controlplane` nodes
-run `kubeadm join` against operator-delivered join material with mandatory CA
-pinning. Every external action is bounded by a deadline with capped retries, so a
-failure surfaces loudly and never blocks later Kairos boot stages.
+You boot a Kairos node from an image that bundles this provider, the kubeadm
+toolchain, and the control-plane container images for its Kubernetes minor.
+Kairos passes your `cluster` cloud-config to the provider, which emits one
+boot-time stage (`network.after`): import the bundled images into containerd,
+then run one bounded reconcile pass. The reconcile reads the node's desired
+role, probes the node's actual state, and converges the difference by driving
+the `kubeadm` binary over typed `os/exec` argv (never a shell). A `role: init`
+node runs `kubeadm init`; `worker` and `controlplane` nodes run `kubeadm join`
+against operator-delivered join material with mandatory CA pinning. Every
+external action is bounded by a deadline with capped retries, so a failure
+surfaces loudly and never blocks later Kairos boot stages.
 
 ## See also
 
 - [`samples/`](../samples/) - ready-to-edit cloud-configs and an end-to-end walkthrough.
 - [`samples/ha/`](../samples/ha/) - the multi-control-plane walkthrough.
+- [`samples/air-gapped/`](../samples/air-gapped/) - bootstrap with no registry reachable.
+- [`samples/trusted-boot/`](../samples/trusted-boot/) - a UKI node.
+- [`samples/custom-api-port/`](../samples/custom-api-port/) - an API server off 6443.
+- [`samples/external-controlplane/`](../samples/external-controlplane/) - join a control plane the provider did not bootstrap.
 - [`samples/cni-flannel/`](../samples/cni-flannel/) - Flannel CNI examples.
 - [`samples/cni-calico/`](../samples/cni-calico/) - Calico CNI examples.
 - Root [`README.md`](../README.md) - project overview and status.

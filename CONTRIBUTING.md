@@ -11,6 +11,7 @@ Requires Go 1.27.1+.
 make build      # produces ./bin/agent-provider-kubernetes
 make test       # unit / behavior tests
 make vet
+make fmt-check  # gofmt -s, no diff
 make lint       # requires golangci-lint
 make e2e        # real-kubeadm end-to-end suite (Docker + privileged containers)
 ```
@@ -43,7 +44,7 @@ gh attestation verify \
 
 # Binary tarball (downloaded from the GitHub Release):
 gh attestation verify \
-  agent-provider-kubernetes_v0.3.0_linux_amd64.tar.gz \
+  agent-provider-kubernetes_v0.4.0_linux_amd64.tar.gz \
   --repo kairos-io/provider-kubernetes
 ```
 
@@ -75,5 +76,5 @@ builds + pushes the per-minor images (with attestations) and creates the GitHub
 Release:
 
 ```sh
-git tag -s v0.3.0 -m "v0.3.0" && git push origin v0.3.0
+git tag -s v0.4.0 -m "v0.4.0" && git push origin v0.4.0
 ```
