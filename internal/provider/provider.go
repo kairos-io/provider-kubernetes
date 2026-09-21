@@ -35,6 +35,22 @@ const reconcileStageKey = "network.after"
 // reconciles the node to the desired role. Provider itself is side-effect-free
 // and returns promptly (#4099-1); the actual reconciliation runs later, inside
 // the reconcile subcommand the emitted stage invokes.
+// InertConfig returns the same inert, no-Stages configuration-error shape
+// Provider itself falls back to on validation failure (see the
+// "configuration error" / "serialization error" returns below), extended
+// with a reason string. It carries no Stages and therefore no Commands and
+// no cluster_token (S-D3-5, the D-3 / F-UKIBOOT security review, 2026-09-18):
+// the main.go wrapper composed around Provider returns this instead of the
+// real config when internal/clusterconfigdir finds the
+// /usr/local/cloud-config write target unsafe, so the kairos-sdk clusterplugin's
+// unavoidable O_CREATE|O_TRUNC write at that path carries nothing worth
+// stealing. reason must be one of clusterconfigdir's closed Reason tokens --
+// never raw cluster config, a token, or a path taken from an operator
+// override.
+func InertConfig(reason string) yip.YipConfig {
+	return yip.YipConfig{Name: "provider-kubernetes (configuration error): " + reason}
+}
+
 func Provider(cluster clusterplugin.Cluster) yip.YipConfig {
 	// Validate input early so an invalid cluster never reaches the boot stage.
 	pctx, err := NewContext(cluster)

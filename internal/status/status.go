@@ -77,6 +77,56 @@ const (
 	// PhaseDegraded (D-2): the node is already Initialized or Joined but
 	// actualstate.State.KubeletHealthy is false.
 	ReasonKubeletUnhealthy Reason = "KubeletUnhealthy"
+
+	// D-3 / F-UKIBOOT (security review 2026-09-18, S-D3-9): the closed set of
+	// reasons internal/clusterconfigdir reports when it establishes (or finds
+	// unsafe) /usr/local/cloud-config before the kairos-sdk clusterplugin
+	// writes cluster.kairos.yaml there. Written well before any reconcile pass
+	// runs, so a later Converged/Failed status overwriting one of these is
+	// expected, not a bug.
+	//
+	// ReasonClusterConfigAncestorUnsafe: an ancestor of the target directory
+	// (/usr or /usr/local) is a symlink, not a directory, or not owned by
+	// uid 0 (S-D3-2). Withholds cluster_token (S-D3-5a, security review
+	// amendment 2026-09-21): the walk verified nothing about where that
+	// component leads, and the SDK's own open resolves the full path by name
+	// straight through it.
+	ReasonClusterConfigAncestorUnsafe Reason = "ClusterConfigAncestorUnsafe"
+	// ReasonClusterConfigAncestorMissing: an ancestor of the target directory
+	// (/usr or /usr/local) is simply absent (S-D3-2). Reported, never
+	// withheld (S-D3-5a): this is not a safety refusal, the SDK's own open
+	// then fails the identical ENOENT, and no token goes anywhere either way.
+	ReasonClusterConfigAncestorMissing Reason = "ClusterConfigAncestorMissing"
+	// ReasonClusterConfigDirCreateFailed: mkdirat failed for a reason other
+	// than EEXIST (e.g. a read-only filesystem).
+	ReasonClusterConfigDirCreateFailed Reason = "ClusterConfigDirCreateFailed"
+	// ReasonClusterConfigDirUnsafe: /usr/local/cloud-config already exists and
+	// is not a root-owned directory (a symlink, FIFO, device or regular file)
+	// (S-D3-3). One of three reasons that withholds cluster_token (with
+	// ReasonClusterConfigAncestorUnsafe and ReasonClusterConfigTokenFileUnsafe).
+	ReasonClusterConfigDirUnsafe Reason = "ClusterConfigDirUnsafe"
+	// ReasonClusterConfigDirWritable: /usr/local/cloud-config exists, is a
+	// root-owned directory, but is group- or other-writable. Reported, never
+	// refused (S-D3-3): the platform's own 10_accounting.yaml widens it to
+	// 0770 root:admin from the next boot's initramfs stage onward.
+	ReasonClusterConfigDirWritable Reason = "ClusterConfigDirWritable"
+	// ReasonClusterConfigTokenFileUnsafe: the token-file target (normally
+	// cluster.kairos.yaml) is anything other than absent (ENOENT) or an
+	// intact, root-owned, mode-0600-or-tighter, nlink-1 regular file -- an
+	// allowlist, not an enumerated unsafe set (S-D3-4, amended S-D3-4a,
+	// security review 2026-09-21). One of three reasons that withholds
+	// cluster_token.
+	ReasonClusterConfigTokenFileUnsafe Reason = "ClusterConfigTokenFileUnsafe"
+	// ReasonClusterConfigOverrideRejected: cluster_config_path was set but its
+	// directory is not exactly /usr/local/cloud-config (or the path is
+	// relative or contains ".." after Clean). Nothing is created; the operator
+	// owns pre-creating their own override directory (S-D3-7).
+	ReasonClusterConfigOverrideRejected Reason = "ClusterConfigOverrideRejected"
+	// ReasonClusterConfigNotPersistent: /usr/local's device is the same as
+	// /'s, i.e. COS_PERSISTENT is not actually mounted there. Reported, never
+	// refused: the token is about to be written to ephemeral storage and the
+	// node will not survive a reboot converged (S-D3-8).
+	ReasonClusterConfigNotPersistent Reason = "ClusterConfigNotPersistent"
 )
 
 // Budget captures how many attempts were consumed for the last/failing action.

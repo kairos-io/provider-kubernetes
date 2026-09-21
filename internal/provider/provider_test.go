@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -105,6 +107,56 @@ func TestProviderReturnsPromptlyAndNamed(t *testing.T) {
 	}
 	if len(bad.Stages) != 0 {
 		t.Fatal("Provider must NOT emit stages on invalid input")
+	}
+}
+
+// TestProviderTouchesNoFilesystem is the S-D3-1 invariant the D-3 /
+// F-UKIBOOT security review (2026-09-18) relies on: Provider itself must
+// stay side-effect-free, because the wrapper composed in main.go
+// (internal/clusterconfigdir.Ensure) is what is allowed to touch the
+// filesystem, and it must run BEFORE Provider, not inside it. This test
+// chdirs into a fresh, empty temp directory, calls Provider with a mix of
+// valid and invalid clusters (covering both configuration-error return
+// paths), and asserts the directory is still completely empty afterward --
+// a regression guard against a future edit accidentally adding a relative-path
+// file write inside Provider.
+func TestProviderTouchesNoFilesystem(t *testing.T) {
+	dir := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	clusters := []clusterplugin.Cluster{
+		{Role: clusterplugin.RoleInit, ClusterToken: validToken()},
+		{Role: clusterplugin.RoleWorker, ClusterToken: validToken(), ControlPlaneHost: "10.0.0.1"},
+		{Role: clusterplugin.RoleControlPlane, ClusterToken: validToken(), ControlPlaneHost: "10.0.0.1"},
+		{Role: clusterplugin.RoleInit}, // invalid: empty token
+		{},                             // invalid: empty everything
+	}
+	for _, c := range clusters {
+		_ = Provider(c)
+	}
+
+	var found []string
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path != dir {
+			found = append(found, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkDir: %v", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("Provider created filesystem entries: %v", found)
 	}
 }
 
