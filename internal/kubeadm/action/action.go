@@ -60,7 +60,7 @@ type KubeadmExecutor struct {
 	KubeletRestart func(ctx context.Context) error
 	// LocalAPIReachable reports whether the LOCAL apiserver answers; used after a
 	// kubelet-config repair (ADR-12-R1). nil uses an HTTPS /healthz probe to
-	// 127.0.0.1:6443. Injectable for tests.
+	// 127.0.0.1 on Input.BindPort (6443 when unset). Injectable for tests.
 	LocalAPIReachable func(ctx context.Context) bool
 	// SnapshotEtcd, when set, is invoked best-effort before `upgrade apply` on a
 	// control plane (ADR-12 U5, revised by ADR-12-A1). nil skips it. It must never
@@ -350,8 +350,12 @@ func (e *KubeadmExecutor) waitForLocalAPIHealthy(ctx context.Context) error {
 	reachable := e.LocalAPIReachable
 	if reachable == nil {
 		client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsInsecure()}}
+		// The cluster's own localAPIEndpoint.bindPort, not a fixed 6443: that
+		// is the port kubeadm gave the apiserver, so it is the only one that
+		// answers /healthz on this node.
+		healthz := kubeadmconfig.LocalAPIHealthzURL(e.Input.BindPort)
 		reachable = func(context.Context) bool {
-			resp, err := client.Get("https://127.0.0.1:6443/healthz") //nolint:noctx // bounded by the loop below
+			resp, err := client.Get(healthz) //nolint:noctx // bounded by the loop below
 			if err != nil {
 				return false
 			}

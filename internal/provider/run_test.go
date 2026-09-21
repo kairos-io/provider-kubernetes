@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 
@@ -382,5 +384,76 @@ func mustWrite(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Run must hand the cluster's localAPIEndpoint.bindPort to the production
+// APIServerReachable default, not probe a fixed 6443. This exercises the REAL
+// default (opts.APIServerReachableProbe = nil) against a live TLS /healthz on
+// a non-default port, the way a cluster that moves the apiserver off 6443 (for
+// example to leave 6443 to a VIP or load balancer) boots.
+//
+// With the port ignored the probe answers false, planUpgrade prepends
+// ActionRepairKubeletConfig to a control plane whose apiserver is perfectly
+// healthy, and the repair's own wait then polls the wrong port until the
+// budget runs out: the upgrade never happens.
+func TestRunProductionAPIServerProbeFollowsBindPort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot bind a loopback port in this environment: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	_ = srv.Listener.Close()
+	srv.Listener = ln
+	srv.StartTLS()
+	defer srv.Close()
+
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "etc", "kubernetes", "admin.conf"), "apiVersion: v1\n")
+	mustWrite(t, filepath.Join(root, "etc", "kubernetes", "manifests", "kube-apiserver.yaml"),
+		"spec:\n  containers:\n  - image: registry.k8s.io/kube-apiserver:v1.34.8\n")
+
+	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if args[0] == "version" {
+			return kubeadm.Result{Stdout: "v1.35.0\n"}, nil
+		}
+		return kubeadm.Result{}, nil
+	}}
+	cluster := clusterplugin.Cluster{
+		Role:             clusterplugin.RoleControlPlane,
+		ClusterToken:     validToken(),
+		ControlPlaneHost: "10.0.0.1",
+		ProviderOptions:  map[string]string{"cluster_root_path": root},
+		Options: "clusterConfiguration:\n  kubernetesVersion: v1.35.0\n" +
+			"initConfiguration:\n  localAPIEndpoint:\n    bindPort: " + strconv.Itoa(port) + "\n",
+	}
+	opts, sink := hermeticRunOptions(t, fr)
+	opts.ClusterVersionProbe = func(context.Context) string { return "v1.34.8" }
+	opts.RunningKubeletVersionProbe = func(context.Context) string { return "v1.35.0" }
+	opts.APIServerReachableProbe = nil // exercise the REAL production default
+	opts.EncryptionConfirmed = func(context.Context, string) bool { return false }
+	opts.KubeletRestart = func(context.Context) error { return nil }
+
+	// Bounded: if the probe misses the port the repair wait would otherwise sit
+	// here for the whole reconcile budget.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := Run(ctx, cluster, opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, c := range fr.calls {
+		if len(c) >= 3 && c[0] == "init" && c[1] == "phase" && c[2] == "kubelet-start" {
+			t.Fatalf("a healthy apiserver on port %d was reported down: Run planned a kubelet-config repair; calls=%v", port, fr.calls)
+		}
+	}
+	if got := sink.only(t); got.Phase != status.PhaseConverged || got.LastAction != string(reconcile.ActionUpgradeApply) {
+		t.Fatalf("recorded phase=%q lastAction=%q, want %q after %q", got.Phase, got.LastAction, status.PhaseConverged, reconcile.ActionUpgradeApply)
 	}
 }
