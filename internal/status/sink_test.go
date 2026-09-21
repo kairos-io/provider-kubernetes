@@ -201,3 +201,98 @@ func TestFileSinkCanceledContextSwallowed(t *testing.T) {
 	// Must not panic, may or may not write (race between deadline and write).
 	sink.Record(ctx, testStatus())
 }
+
+// TestReadLatestPrefersFirstParseablePath verifies ReadLatest tries paths in
+// order and returns the first one that parses, ignoring a later path that
+// would also parse.
+func TestReadLatestPrefersFirstParseablePath(t *testing.T) {
+	dir := t.TempDir()
+	p1 := filepath.Join(dir, "run.yaml")
+	p2 := filepath.Join(dir, "log.yaml")
+
+	first := testStatus()
+	first.Phase = PhaseConverged
+	second := testStatus()
+	second.Phase = PhaseFailed
+
+	if data, err := yaml.Marshal(first); err != nil {
+		t.Fatal(err)
+	} else if err := os.WriteFile(p1, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := yaml.Marshal(second); err != nil {
+		t.Fatal(err)
+	} else if err := os.WriteFile(p2, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := ReadLatest([]string{p1, p2})
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if got.Phase != PhaseConverged {
+		t.Fatalf("Phase = %q, want the first path's %q", got.Phase, PhaseConverged)
+	}
+}
+
+// TestReadLatestFallsThroughToSecondPath verifies ReadLatest tries the next
+// path when the first does not exist.
+func TestReadLatestFallsThroughToSecondPath(t *testing.T) {
+	dir := t.TempDir()
+	p1 := filepath.Join(dir, "missing.yaml")
+	p2 := filepath.Join(dir, "log.yaml")
+
+	want := testStatus()
+	want.Phase = PhaseDegraded
+	data, err := yaml.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p2, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := ReadLatest([]string{p1, p2})
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if got.Phase != PhaseDegraded {
+		t.Fatalf("Phase = %q, want %q", got.Phase, PhaseDegraded)
+	}
+}
+
+// TestReadLatestNoneParseableReturnsFalse verifies ReadLatest returns
+// ok=false (not an error, not a panic) when nothing exists or parses --
+// the normal state on a fresh boot or install.
+func TestReadLatestNoneParseableReturnsFalse(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.yaml")
+	garbage := filepath.Join(dir, "garbage.yaml")
+	if err := os.WriteFile(garbage, []byte("{not: valid: yaml: ["), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	_, ok := ReadLatest([]string{missing, garbage})
+	if ok {
+		t.Fatal("expected ok=false for missing/unparseable paths")
+	}
+}
+
+// TestReadLatestBoundedRead verifies an oversized file is refused rather
+// than read into memory unbounded.
+func TestReadLatestBoundedRead(t *testing.T) {
+	dir := t.TempDir()
+	huge := filepath.Join(dir, "huge.yaml")
+	data := make([]byte, maxStatusReadSize+2)
+	for i := range data {
+		data[i] = 'a'
+	}
+	if err := os.WriteFile(huge, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	_, ok := ReadLatest([]string{huge})
+	if ok {
+		t.Fatal("expected ok=false for an oversized file")
+	}
+}

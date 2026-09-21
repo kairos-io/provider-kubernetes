@@ -92,6 +92,76 @@ Secrets and keys that you have since deleted or rotated in the live cluster.
 load-bearing for control-plane joins, because the transient config there decrypts
 the CA key.
 
+## Cluster-config directory creation is not a security boundary (D-3 / F-UKIBOOT)
+
+kairos-sdk's `clusterplugin` writes `/usr/local/cloud-config/cluster.kairos.yaml`
+(cleartext `cluster_token` included) by opening it `O_CREATE|O_WRONLY|O_TRUNC,
+0600` and never creates the parent directory. On a UKI (trusted-boot) node
+that directory does not exist yet on the first boot after install, or on the
+boot right after a state reset, so that write fails and the node never
+bootstraps (see [Troubleshooting](./troubleshooting.md#first-boot-after-install-or-a-state-reset-never-bootstraps-d-3--f-ukiboot)).
+The provider works around this by creating only the directory itself -
+`/usr/local/cloud-config`, `0700`, never its ancestors - before the SDK's
+write, using an openat/mkdirat walk that refuses to follow a symlink and
+refuses an already-present entry unless it is a plain, root-owned directory.
+
+**What the `0700` mode buys, precisely, and nothing more:**
+
+- Only on the boot where the provider itself creates the directory (in
+  practice, boot 1): for the narrow window between the provider's `mkdirat`
+  and the SDK's own `open` a few milliseconds later, no non-root actor can
+  pre-place a symlink, a FIFO, or the token file itself inside it.
+- It buys **nothing on any later boot**. The directory already exists by
+  then, the provider never `chmod`s or `chown`s an existing directory, and the
+  platform itself widens the mode to `0770 root:admin` starting from the very
+  next boot's `initramfs` stage. From that point a member of the `admin`
+  group can pre-place the token file (or a symlink) exactly as if this fix did
+  not exist.
+- It is **not a boundary against a root-equivalent actor, and not a boundary
+  against a hostPath-capable workload** - both already have equivalent or
+  greater access to this path and to everything else under the persistent
+  partition (see "The trust boundary in v1" above).
+- It does **not** make `cluster.kairos.yaml` itself safe once it exists: the
+  SDK's own `open` is path-based, follows a symlink, and has no
+  `O_NOFOLLOW`/`O_EXCL`. A hazard planted after the provider's own checks but
+  before the SDK's write is not something this provider can close; only an
+  upstream fix to kairos-sdk can.
+
+**Do not read the `0700` mode, or this fix in general, as protecting
+`cluster_token`.** It is a narrow reduction in the window during which the
+directory's owner and mode are decided, on the one boot that matters, nothing
+more. A future platform change may widen the freshly-created mode to `0770
+root:admin` immediately instead of from the second boot onward; that would
+not change any of the above.
+
+When an ancestor (`/usr` or `/usr/local`), the directory itself, or the
+token-file target is in a state the provider cannot verify as safe - a
+symlink, wrong owner, or wrong type, as opposed to simply not existing yet -
+it withholds `cluster_token` and every bootstrap command entirely for that
+boot: it emits an inert configuration instead of the real one, so the SDK's
+write still happens but carries nothing worth reading. A merely **missing**
+ancestor does not withhold: the SDK's own write then fails the identical
+"not found" error either way, so withholding would only replace one legible
+error with a second one. See
+[Troubleshooting](./troubleshooting.md#first-boot-after-install-or-a-state-reset-never-bootstraps-d-3--f-ukiboot)
+for the reason codes this produces and what to do about each.
+
+**Two residual risks this fix does not close** (confirmed by a 2026-09-21 VM
+run; see [Troubleshooting](./troubleshooting.md#first-boot-after-install-or-a-state-reset-never-bootstraps-d-3--f-ukiboot)
+for the full detail and recovery steps): a planted non-regular, open-blocking
+file (for example a FIFO) under `/usr/local/cloud-config` hangs
+kairos-agent's own config scan unboundedly, before this provider's code ever
+runs, and holds a shutdown inhibitor while doing so - an unreachable,
+unrebootable node. This is present with or without this fix, is not specific
+to this provider, and affects every Kairos cluster provider; recovery
+requires removing the file from recovery media. Separately, a planted
+`/usr/local/cloud-config` symlink is refused by this provider, but
+kairos-init's own `10_accounting.yaml` chmod is not O_NOFOLLOW-safe and
+follows that same symlink, corrupting whatever it points at (confirmed:
+pointing it at `/etc` breaks `sshd` and non-root `bash`). This provider's
+withhold reduces `cluster_token` disclosure only; it does not prevent, and
+cannot prevent, that denial of service.
+
 ## Never clobber an existing cluster
 
 A node configured `role: init` against an endpoint where a control plane already

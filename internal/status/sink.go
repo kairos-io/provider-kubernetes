@@ -3,6 +3,7 @@ package status
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -172,6 +173,48 @@ func writeAtomic(ctx context.Context, path string, data []byte, admGID int) erro
 	}
 	ok = true
 	return nil
+}
+
+// maxStatusReadSize bounds ReadLatest's read: generous for a Status document
+// (typically a few hundred bytes), small enough that a corrupted or
+// unexpectedly huge file cannot make a status read consume unbounded memory.
+const maxStatusReadSize = 64 * 1024
+
+// ReadLatest reads whichever of paths already holds a parseable Status
+// document, trying them in order (production callers pass
+// {StatusRunPath, StatusLogPath}: current-boot tmpfs truth before the
+// persistent mirror) and returning the first that parses. ok is false when
+// none of paths exists or parses -- the normal, unremarkable state on a
+// fresh boot or a fresh install, not something to log as an error.
+//
+// This is S-D3-9a's building block: it lets a report-only finding preserve
+// whatever Phase/Outcome/etc. is already on record (via MergeReportOnly)
+// instead of overwriting it. It reads a file only this package ever writes,
+// under a directory only this package creates at 0750 (writeAtomic, below)
+// -- unlike /usr/local/cloud-config, nothing here is attacker-writable
+// without the root-equivalent access this whole feature is already not a
+// boundary against (R-19-1), so a plain bounded os.Open + LimitReader is
+// proportionate; it does not need the O_NOFOLLOW/O_NONBLOCK discipline
+// internal/clusterconfigdir applies to the persistent,
+// operator/attacker-influenceable cloud-config path.
+func ReadLatest(paths []string) (s Status, ok bool) {
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(f, maxStatusReadSize+1))
+		_ = f.Close()
+		if readErr != nil || len(data) > maxStatusReadSize {
+			continue
+		}
+		var parsed Status
+		if err := yaml.Unmarshal(data, &parsed); err != nil {
+			continue
+		}
+		return parsed, true
+	}
+	return Status{}, false
 }
 
 // lookupAdmGID looks up the numeric GID of the "adm" group. Returns -1 when

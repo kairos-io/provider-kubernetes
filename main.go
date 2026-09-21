@@ -25,9 +25,11 @@ import (
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 	"github.com/mudler/go-pluggable"
+	yip "github.com/mudler/yip/pkg/schema"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 
+	"github.com/kairos-io/provider-kubernetes/internal/clusterconfigdir"
 	"github.com/kairos-io/provider-kubernetes/internal/imageimport"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
@@ -76,6 +78,46 @@ func handleProviderInfo(_ *pluggable.Event) pluggable.EventResponse {
 	}
 }
 
+// wrapProvider is the D-3 / F-UKIBOOT fix's seam (S-D3-1, security review
+// 2026-09-18). It composes ensure (production: clusterconfigdir.Ensure) with
+// next (production: provider.Provider) into the single
+// clusterplugin.ClusterProvider kairos-sdk@v0.5.0's ClusterPlugin.Run calls.
+// That call happens inside clusterplugin.ClusterPlugin.onBoot
+// (clusterplugin/plugin.go:50), strictly AFTER the boot payload is parsed and
+// config.Cluster is confirmed non-nil, and strictly BEFORE the SDK's own
+// OpenFile at plugin.go:59 that writes cluster.kairos.yaml with
+// O_CREATE|O_WRONLY|O_TRUNC, 0600 and no MkdirAll -- the ENOENT that is this
+// whole defect. ClusterPlugin.Run registers onBoot as the ONLY caller of the
+// Provider field (on bus.EventBoot); EventClusterReset and
+// init.provider.info are separate FactoryPlugins wired below with their own
+// handlers, so this wrapper never runs during an image-build probe and never
+// runs on a reset.
+//
+// next itself is untouched and stays side-effect-free (internal/provider.Provider's
+// documented invariant): ensure runs first and, only when it reports
+// rep.Withhold (an unsafe ancestor, an unsafe existing cloud-config
+// directory, or an unsafe token-file target -- S-D3-2/S-D3-3/S-D3-4, see
+// clusterconfigdir's package doc for the exact withhold set), the wrapper
+// substitutes the inert YipConfig for next's real one so the SDK's
+// unavoidable write carries no cluster_token and no Commands (S-D3-5). Every
+// other outcome (including a merely-missing ancestor or "nothing to
+// report") calls through to next unchanged.
+//
+// ensure is a parameter (rather than calling clusterconfigdir.Ensure
+// directly) so wrapProvider's composition logic is unit-testable with a fake
+// that returns a canned Report -- the real Ensure does Linux syscalls against
+// "/usr/local" and must never run against the real host filesystem from a
+// test (design principle 6, hardware-free testability).
+func wrapProvider(next clusterplugin.ClusterProvider, ensure func(clusterplugin.Cluster) clusterconfigdir.Report) clusterplugin.ClusterProvider {
+	return func(cluster clusterplugin.Cluster) yip.YipConfig {
+		rep := ensure(cluster)
+		if rep.Withhold {
+			return provider.InertConfig(string(rep.Reason))
+		}
+		return next(cluster)
+	}
+}
+
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 {
@@ -100,7 +142,7 @@ func main() {
 	}
 
 	logrus.Infof("starting agent-provider-kubernetes %s", version.Version)
-	plugin := clusterplugin.ClusterPlugin{Provider: provider.Provider}
+	plugin := clusterplugin.ClusterPlugin{Provider: wrapProvider(provider.Provider, clusterconfigdir.Ensure)}
 	if err := plugin.Run(
 		pluggable.FactoryPlugin{
 			EventType:     clusterplugin.EventClusterReset,
