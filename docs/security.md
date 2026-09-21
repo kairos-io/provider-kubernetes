@@ -146,6 +146,22 @@ error with a second one. See
 [Troubleshooting](./troubleshooting.md#first-boot-after-install-or-a-state-reset-never-bootstraps-d-3--f-ukiboot)
 for the reason codes this produces and what to do about each.
 
+**Two residual risks this fix does not close** (confirmed by a 2026-09-21 VM
+run; see [Troubleshooting](./troubleshooting.md#first-boot-after-install-or-a-state-reset-never-bootstraps-d-3--f-ukiboot)
+for the full detail and recovery steps): a planted non-regular, open-blocking
+file (for example a FIFO) under `/usr/local/cloud-config` hangs
+kairos-agent's own config scan unboundedly, before this provider's code ever
+runs, and holds a shutdown inhibitor while doing so - an unreachable,
+unrebootable node. This is present with or without this fix, is not specific
+to this provider, and affects every Kairos cluster provider; recovery
+requires removing the file from recovery media. Separately, a planted
+`/usr/local/cloud-config` symlink is refused by this provider, but
+kairos-init's own `10_accounting.yaml` chmod is not O_NOFOLLOW-safe and
+follows that same symlink, corrupting whatever it points at (confirmed:
+pointing it at `/etc` breaks `sshd` and non-root `bash`). This provider's
+withhold reduces `cluster_token` disclosure only; it does not prevent, and
+cannot prevent, that denial of service.
+
 ## Never clobber an existing cluster
 
 A node configured `role: init` against an endpoint where a control plane already

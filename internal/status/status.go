@@ -106,9 +106,13 @@ const (
 	// ReasonClusterConfigAncestorUnsafe and ReasonClusterConfigTokenFileUnsafe).
 	ReasonClusterConfigDirUnsafe Reason = "ClusterConfigDirUnsafe"
 	// ReasonClusterConfigDirWritable: /usr/local/cloud-config exists, is a
-	// root-owned directory, but is group- or other-writable. Reported, never
-	// refused (S-D3-3): the platform's own 10_accounting.yaml widens it to
-	// 0770 root:admin from the next boot's initramfs stage onward.
+	// root-owned directory, but is OTHER-writable (narrowed from
+	// group-or-other by the 2026-09-21 VM run). Reported, never refused
+	// (S-D3-3): the platform's own 10_accounting.yaml widens it to 0770
+	// root:admin ~130ms after we create it, on every boot from the second
+	// onward -- that expected, non-attacker state is group-writable, not
+	// other-writable, so a group-or-other check would have reported it on
+	// every single boot.
 	ReasonClusterConfigDirWritable Reason = "ClusterConfigDirWritable"
 	// ReasonClusterConfigTokenFileUnsafe: the token-file target (normally
 	// cluster.kairos.yaml) is anything other than absent (ENOENT) or an
@@ -315,6 +319,42 @@ func BuildStatus(p BuildParams) Status {
 	}
 	s.Reason = deriveReason(p.LastAction, p.Err, p.Result)
 	s.Message = sanitize(actionMessage(p.LastAction, p.Err))
+	return s
+}
+
+// MergeReportOnly builds a Status for a report-only finding that MUST NOT
+// move an existing reconcile verdict backwards (S-D3-9a, security review
+// 2026-09-21: the D-3/F-UKIBOOT VM run found the ensure path driving a
+// converged GRUB node's status from Converged to Failed while the boot
+// converged fine -- a diagnostic that downgrades a healthy node is a
+// security-relevant defect in its own right, since it trains operators to
+// ignore Failed).
+//
+// Phase, Outcome, Membership, Role, LastAction, Budget and Terminal are
+// copied through from prev UNCHANGED when existing is true (the caller
+// already read the most recent Status, e.g. via ReadLatest); only Reason,
+// Message, UpdatedAt, BootID and Version are set fresh. This is a pure
+// function (design principle 6): the read is the caller's job, so this
+// stays hardware-free testable, exactly like BuildStatus.
+//
+// When existing is false (ReadLatest found nothing parseable at any
+// configured path -- a truly fresh install, or a fresh boot before this
+// boot's own reconcile has run and no persistent mirror survives from
+// before), the returned Status starts at PhaseReconciling with an empty
+// Outcome: the reconcile has not run yet this boot, which is an honest
+// "in progress", never a false "failed". PhaseReconciling already existed
+// for exactly this "written at start, replaced on completion" case.
+func MergeReportOnly(prev Status, existing bool, reason Reason, message, bootID, version, now string) Status {
+	s := prev
+	if !existing {
+		s = Status{Phase: PhaseReconciling}
+	}
+	s.APIVersion = APIVersion
+	s.Reason = reason
+	s.Message = message
+	s.UpdatedAt = now
+	s.BootID = bootID
+	s.Version = version
 	return s
 }
 

@@ -684,3 +684,81 @@ func contains(s, sub string) bool {
 			return false
 		}())
 }
+
+// TestMergeReportOnlyPreservesExistingFields is S-D3-9a's pure-function
+// contract: Phase, Outcome, Membership, Role, LastAction, Budget and
+// Terminal must pass through prev unchanged when existing is true; only
+// Reason, Message, UpdatedAt, BootID and Version move.
+func TestMergeReportOnlyPreservesExistingFields(t *testing.T) {
+	prev := Status{
+		APIVersion: APIVersion,
+		Phase:      PhaseConverged,
+		Role:       "controlplane",
+		Membership: "initialized",
+		Outcome:    OutcomeSuccess,
+		Reason:     ReasonNone,
+		Terminal:   false,
+		LastAction: "run-init",
+		Message:    "converged",
+		Budget:     Budget{Attempts: 0, MaxAttempts: 0},
+		UpdatedAt:  "2026-09-20T00:00:00Z",
+		BootID:     "old-boot-id",
+		Version:    "v0.1.0",
+	}
+
+	got := MergeReportOnly(prev, true, ReasonClusterConfigNotPersistent, "not persistent", "new-boot-id", "v0.2.0", testNow)
+
+	if got.Phase != PhaseConverged {
+		t.Errorf("Phase = %q, want preserved %q", got.Phase, PhaseConverged)
+	}
+	if got.Outcome != OutcomeSuccess {
+		t.Errorf("Outcome = %q, want preserved %q", got.Outcome, OutcomeSuccess)
+	}
+	if got.Membership != "initialized" {
+		t.Errorf("Membership = %q, want preserved", got.Membership)
+	}
+	if got.Role != "controlplane" {
+		t.Errorf("Role = %q, want preserved", got.Role)
+	}
+	if got.LastAction != "run-init" {
+		t.Errorf("LastAction = %q, want preserved", got.LastAction)
+	}
+	if got.Terminal {
+		t.Error("Terminal must be preserved (false), not flipped")
+	}
+	if got.Reason != ReasonClusterConfigNotPersistent {
+		t.Errorf("Reason = %q, want the fresh value", got.Reason)
+	}
+	if got.Message != "not persistent" {
+		t.Errorf("Message = %q, want the fresh value", got.Message)
+	}
+	if got.UpdatedAt != testNow {
+		t.Errorf("UpdatedAt = %q, want the fresh value %q", got.UpdatedAt, testNow)
+	}
+	if got.BootID != "new-boot-id" || got.Version != "v0.2.0" {
+		t.Errorf("BootID/Version were not updated: %+v", got)
+	}
+}
+
+// TestMergeReportOnlyNoExistingUsesReconciling covers the no-prior-record
+// case: MergeReportOnly must start from PhaseReconciling, never PhaseFailed,
+// when existing is false.
+func TestMergeReportOnlyNoExistingUsesReconciling(t *testing.T) {
+	got := MergeReportOnly(Status{}, false, ReasonClusterConfigDirWritable, "writable", testBootID, testVersion, testNow)
+
+	if got.Phase != PhaseReconciling {
+		t.Errorf("Phase = %q, want %q", got.Phase, PhaseReconciling)
+	}
+	if got.Phase == PhaseFailed {
+		t.Error("MergeReportOnly must never fabricate PhaseFailed")
+	}
+	if got.Outcome != "" {
+		t.Errorf("Outcome = %q, want empty (nothing decided yet)", got.Outcome)
+	}
+	if got.Terminal {
+		t.Error("Terminal must be false on the fresh-boot fallback")
+	}
+	if got.Reason != ReasonClusterConfigDirWritable {
+		t.Errorf("Reason = %q, want the fresh value", got.Reason)
+	}
+}

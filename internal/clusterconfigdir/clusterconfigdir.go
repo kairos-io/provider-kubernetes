@@ -42,6 +42,22 @@
 // document -- never the token, the config blob, or a path taken from the
 // cluster_config_path override.
 //
+// Phase classification (S-D3-9a, security review 2026-09-21, following the
+// D-3/F-UKIBOOT VM run): the withhold set plus ReasonAncestorMissing and
+// ReasonDirCreateFailed (failurePhaseReasons, in report()) MAY set the
+// status document's Phase to Failed -- for those the SDK's own write will
+// also fail this boot, so the node genuinely will not converge, and Failed
+// is accurate. Every other reason (ReasonDirWritable, ReasonOverrideRejected,
+// ReasonNotPersistent) is report-only and MUST NOT touch an existing Phase:
+// the VM run found the original, unconditional Phase: PhaseFailed write
+// driving a converged GRUB node's status from Converged to Failed while the
+// boot converged fine. A diagnostic that downgrades a healthy node is a
+// security-relevant defect in its own right -- it trains operators to
+// ignore Failed. report()'s report-only branch reads whatever Status is
+// already on record (status.ReadLatest) and preserves it
+// (status.MergeReportOnly): Phase/Outcome/Membership/etc. pass through
+// unchanged, only Reason/Message/timestamp move.
+//
 // Honest mode claim (S-D3-6, Q2 of the review): creating this directory
 // 0700 root:root buys exactly one thing -- on the boot where we create it,
 // the window between our mkdirat and the SDK's OpenFile cannot be
@@ -56,6 +72,7 @@ package clusterconfigdir
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -107,7 +124,11 @@ const (
 	// directory. Withholds cluster_token.
 	ReasonDirUnsafe Reason = "dir-unsafe"
 	// ReasonDirWritable: S-D3-3. The EEXIST target is a root-owned directory
-	// but group- or other-writable. Reported, never refused.
+	// but OTHER-writable (narrowed from group-or-other by the 2026-09-21 VM
+	// run: kairos-init's 10_accounting.yaml chmods it 0770 root:admin ~130ms
+	// after creation, so a group-writable check trips on the platform's own
+	// expected state every boot from the second onward). Reported, never
+	// refused.
 	ReasonDirWritable Reason = "dir-writable"
 	// ReasonTokenFileUnsafe: S-D3-4, inverted to an allowlist by amendment
 	// S-D3-4a. The token-file preflight found anything other than ENOENT or
@@ -130,7 +151,7 @@ var messages = map[Reason]string{
 	ReasonAncestorMissing:  "cluster-config directory ancestor is missing",
 	ReasonDirCreateFailed:  "failed to create /usr/local/cloud-config",
 	ReasonDirUnsafe:        "an existing /usr/local/cloud-config is not a root-owned directory; withholding cluster_token",
-	ReasonDirWritable:      "/usr/local/cloud-config exists, is root-owned, but is group- or other-writable",
+	ReasonDirWritable:      "/usr/local/cloud-config exists, is root-owned, but is other-writable",
 	ReasonTokenFileUnsafe:  "an existing token-file target is unsafe; withholding cluster_token",
 	ReasonOverrideRejected: "cluster_config_path override is not directly under /usr/local/cloud-config; ignoring it",
 	ReasonNotPersistent:    "/usr/local is not a separate persistent mount; cluster_token would be written to ephemeral storage",
@@ -176,6 +197,33 @@ type Report struct {
 // real /run + /var/log paths; tests point it at a fake sink or temp-dir
 // paths so the write is verifiable without touching the host filesystem.
 var statusSink status.StatusSink = status.NewFileSink()
+
+// statusReader is report()'s S-D3-9a companion to statusSink: it reads
+// whatever Status document is already on record (production: the real
+// /run + /var/log paths, same order as statusSink writes them) so a
+// report-only finding can preserve it via status.MergeReportOnly instead of
+// overwriting it. Package-private test seam, same style as statusSink.
+var statusReader = func() (status.Status, bool) {
+	return status.ReadLatest([]string{status.StatusRunPath, status.StatusLogPath})
+}
+
+// failurePhaseReasons is the closed set of Reasons that MAY set the status
+// document's Phase to Failed (S-D3-9a, security review 2026-09-21,
+// following the VM run): the withhold set (ReasonAncestorUnsafe,
+// ReasonDirUnsafe, ReasonTokenFileUnsafe) plus the two reasons where the
+// SDK's own write will ALSO fail this boot, so the node genuinely will not
+// converge (ReasonAncestorMissing, ReasonDirCreateFailed) -- reporting
+// Failed for those is not a downgrade, it is accurate. Every other non-empty
+// Reason (ReasonDirWritable, ReasonOverrideRejected, ReasonNotPersistent) is
+// report-only and MUST NOT touch an existing Phase; see report()'s
+// report-only branch.
+var failurePhaseReasons = map[Reason]bool{
+	ReasonAncestorUnsafe:  true,
+	ReasonAncestorMissing: true,
+	ReasonDirCreateFailed: true,
+	ReasonDirUnsafe:       true,
+	ReasonTokenFileUnsafe: true,
+}
 
 // Ensure is the S-D3-1 wrapper's entrypoint. It is invoked from main.go's
 // ClusterProvider wrapper, which runs inside the SDK's onBoot path (called
@@ -249,6 +297,20 @@ func targetFileName(cluster clusterplugin.Cluster) (fileName string, rejected bo
 // codebase) and never includes anything beyond the closed reason/message
 // pair: no token, no config blob, no path taken from the cluster_config_path
 // override.
+//
+// S-D3-9a (security review 2026-09-21, following the D-3/F-UKIBOOT VM run):
+// a report-only Reason (failurePhaseReasons[rep.Reason] == false) MUST NOT
+// move an existing reconcile verdict backwards. The VM run watched this
+// exact defect: a converged GRUB node's status went from Converged to
+// Failed while the boot converged fine, because the original write always
+// set Phase: PhaseFailed unconditionally. That branch below reads whatever
+// is already on record (status.ReadLatest) and preserves it via
+// status.MergeReportOnly -- Phase/Outcome/Membership/etc. pass through
+// unchanged; only Reason/Message/timestamp move. Only the reasons in
+// failurePhaseReasons (the withhold set plus the two "the SDK's write fails
+// too" reasons) take the unconditional Phase: PhaseFailed path, because for
+// those the node genuinely will not converge this boot, so Failed is
+// accurate, not a downgrade.
 func report(cluster clusterplugin.Cluster, rep Report) {
 	if rep.Reason == ReasonNone {
 		return
@@ -257,17 +319,43 @@ func report(cluster clusterplugin.Cluster, rep Report) {
 	msg := messages[rep.Reason]
 	logrus.Errorf("provider-kubernetes: cluster-config-dir: %s (reason=%s withhold=%t)", msg, rep.Reason, rep.Withhold)
 
+	statusReason := reasonToStatus[rep.Reason]
+	now := time.Now().UTC().Format(time.RFC3339)
+	bootID := readBootID()
+
 	sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
+	if !failurePhaseReasons[rep.Reason] {
+		prev, existing := statusReader()
+		statusSink.Record(sctx, status.MergeReportOnly(prev, existing, statusReason, msg, bootID, version.Version, now))
+		return
+	}
+
 	statusSink.Record(sctx, status.Status{
 		APIVersion: status.APIVersion,
 		Phase:      status.PhaseFailed,
 		Role:       string(cluster.Role),
 		Outcome:    status.OutcomeFailure,
-		Reason:     reasonToStatus[rep.Reason],
+		Reason:     statusReason,
 		Terminal:   rep.Withhold,
 		Message:    msg,
-		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:  now,
+		BootID:     bootID,
 		Version:    version.Version,
 	})
+}
+
+// readBootID reads /proc/sys/kernel/random/boot_id best-effort. Mirrors
+// internal/provider/run.go's helper of the same name (unexported there;
+// duplicated here rather than imported to avoid a
+// provider->clusterconfigdir dependency edge, since main.go already imports
+// both independently). Returns "" if the file cannot be read (containers,
+// test environments, non-Linux) -- never treated as an error.
+func readBootID() string {
+	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }

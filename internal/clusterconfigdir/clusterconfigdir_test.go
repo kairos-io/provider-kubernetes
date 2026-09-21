@@ -31,6 +31,20 @@ func withFakeSink(t *testing.T) *fakeSink {
 	return f
 }
 
+// withFakeReader points the package's statusReader seam (S-D3-9a) at a fixed
+// (Status, ok) pair for the duration of the test, restoring the previous
+// value on cleanup. Without this, report()'s report-only branch falls
+// through to the REAL status.ReadLatest against the real /run and /var/log
+// paths -- harmless (ENOENT -> ok=false almost everywhere) but not hermetic;
+// tests that care about the report-only merge behavior use this instead of
+// relying on the host having no pre-existing status file.
+func withFakeReader(t *testing.T, s status.Status, ok bool) {
+	t.Helper()
+	old := statusReader
+	statusReader = func() (status.Status, bool) { return s, ok }
+	t.Cleanup(func() { statusReader = old })
+}
+
 // TestTargetFileNameDefault is S-D3-7: no override -> the SDK's default path.
 func TestTargetFileNameDefault(t *testing.T) {
 	name, rejected := targetFileName(clusterplugin.Cluster{})
@@ -118,9 +132,13 @@ func TestTargetFileNameEmptyBasenameRejected(t *testing.T) {
 
 // TestEnsureOverrideRejectedRecordsStatusNotWithhold verifies the S-D3-7 path
 // end to end through Ensure: nothing is withheld (only S-D3-3/S-D3-4 gate
-// withholding), but the rejection IS logged/recorded (S-D3-9).
+// withholding), but the rejection IS logged/recorded (S-D3-9). It is
+// report-only (S-D3-9a), so it goes through the phase-preserving branch;
+// withFakeReader fixes "nothing on record yet" so the assertions are
+// hermetic regardless of the host's real /run and /var/log state.
 func TestEnsureOverrideRejectedRecordsStatusNotWithhold(t *testing.T) {
 	sink := withFakeSink(t)
+	withFakeReader(t, status.Status{}, false)
 
 	rep := Ensure(clusterplugin.Cluster{ClusterConfigPath: "/etc/evil/cluster.kairos.yaml"})
 	if rep.Withhold {
@@ -139,6 +157,9 @@ func TestEnsureOverrideRejectedRecordsStatusNotWithhold(t *testing.T) {
 	if got.Terminal {
 		t.Fatal("an override rejection is not withheld, so Terminal must be false")
 	}
+	if got.Phase == status.PhaseFailed {
+		t.Fatal("a report-only reason must not set PhaseFailed (S-D3-9a)")
+	}
 }
 
 // TestEnsureOverrideRejectedNeverLogsThePath is the S-D3-9 secret-hygiene
@@ -147,6 +168,7 @@ func TestEnsureOverrideRejectedRecordsStatusNotWithhold(t *testing.T) {
 // record (only the closed reason/message may).
 func TestEnsureOverrideRejectedNeverLogsThePath(t *testing.T) {
 	sink := withFakeSink(t)
+	withFakeReader(t, status.Status{}, false)
 	secretLookingPath := "/etc/do-not-log-me/cluster.kairos.yaml"
 
 	Ensure(clusterplugin.Cluster{ClusterConfigPath: secretLookingPath})
@@ -155,6 +177,94 @@ func TestEnsureOverrideRejectedNeverLogsThePath(t *testing.T) {
 		if strings.Contains(s.Message, secretLookingPath) {
 			t.Fatalf("status message leaked the override path: %q", s.Message)
 		}
+	}
+}
+
+// TestReportOnlyReasonsNeverSetFailurePhase is S-D3-9a's headline test:
+// every report-only reason must preserve an existing Converged phase rather
+// than downgrade it to Failed. This is exactly the VM run's finding: a
+// converged GRUB node's status went from Converged to Failed while the boot
+// converged fine, which trains operators to ignore Failed.
+//
+// Mutation (ii) from the coordinator: letting a report-only reason set the
+// failure phase (i.e. routing it through the unconditional Phase: PhaseFailed
+// branch) makes this test fail -- see the mutation run recorded in the
+// implementation report.
+func TestReportOnlyReasonsNeverSetFailurePhase(t *testing.T) {
+	reportOnly := []Reason{ReasonDirWritable, ReasonOverrideRejected, ReasonNotPersistent}
+	for _, r := range reportOnly {
+		t.Run(string(r), func(t *testing.T) {
+			sink := withFakeSink(t)
+			withFakeReader(t, status.Status{Phase: status.PhaseConverged, Outcome: status.OutcomeSuccess}, true)
+
+			report(clusterplugin.Cluster{}, Report{Reason: r})
+
+			if len(sink.calls) != 1 {
+				t.Fatalf("expected exactly one status record, got %d", len(sink.calls))
+			}
+			if sink.calls[0].Phase != status.PhaseConverged {
+				t.Fatalf("reason %q: Phase = %q, want the preserved %q", r, sink.calls[0].Phase, status.PhaseConverged)
+			}
+		})
+	}
+}
+
+// TestReportOnlyReasonFreshBootUsesReconcilingNotFailed covers the
+// no-prior-record case: when nothing has ever been written (a truly fresh
+// boot or install), a report-only reason must start from PhaseReconciling,
+// never PhaseFailed -- see status.MergeReportOnly's doc comment.
+func TestReportOnlyReasonFreshBootUsesReconcilingNotFailed(t *testing.T) {
+	sink := withFakeSink(t)
+	withFakeReader(t, status.Status{}, false)
+
+	report(clusterplugin.Cluster{}, Report{Reason: ReasonDirWritable})
+
+	if len(sink.calls) != 1 {
+		t.Fatalf("expected exactly one status record, got %d", len(sink.calls))
+	}
+	if sink.calls[0].Phase != status.PhaseReconciling {
+		t.Fatalf("Phase = %q, want %q on a fresh boot with nothing on record", sink.calls[0].Phase, status.PhaseReconciling)
+	}
+	if sink.calls[0].Phase == status.PhaseFailed {
+		t.Fatal("a report-only reason must never fabricate PhaseFailed")
+	}
+}
+
+// TestFailurePhaseReasonsSetPhaseFailed is the complement: every reason in
+// failurePhaseReasons MUST set Phase: Failed regardless of what (if
+// anything) was previously on record -- these are the reasons where the
+// SDK's own write will also fail this boot, so the node genuinely will not
+// converge, and Failed is accurate, not a downgrade. Covers the four
+// reasons the coordinator named explicitly (the withhold set plus
+// ReasonAncestorMissing) plus ReasonDirCreateFailed, which this
+// implementation classifies the same way for the same reason (see
+// failurePhaseReasons' doc comment) -- flagged in the report as an
+// extension beyond the four explicitly named.
+func TestFailurePhaseReasonsSetPhaseFailed(t *testing.T) {
+	failing := []Reason{
+		ReasonAncestorUnsafe,
+		ReasonDirUnsafe,
+		ReasonTokenFileUnsafe,
+		ReasonAncestorMissing,
+		ReasonDirCreateFailed,
+	}
+	for _, r := range failing {
+		t.Run(string(r), func(t *testing.T) {
+			sink := withFakeSink(t)
+			// Even with an existing Converged record on hand, these reasons
+			// must still report Failed: the node genuinely will not
+			// converge this boot for any of them.
+			withFakeReader(t, status.Status{Phase: status.PhaseConverged}, true)
+
+			report(clusterplugin.Cluster{}, Report{Reason: r})
+
+			if len(sink.calls) != 1 {
+				t.Fatalf("expected exactly one status record, got %d", len(sink.calls))
+			}
+			if sink.calls[0].Phase != status.PhaseFailed {
+				t.Fatalf("reason %q: Phase = %q, want %q", r, sink.calls[0].Phase, status.PhaseFailed)
+			}
+		})
 	}
 }
 

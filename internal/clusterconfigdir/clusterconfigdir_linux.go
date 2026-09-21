@@ -174,9 +174,16 @@ func createOrCheckCloudConfigDir(localFd int) (Reason, bool) {
 	if int(st.Uid) != expectedOwnerUID {
 		return ReasonDirUnsafe, true
 	}
-	if st.Mode&0o022 != 0 {
-		// Root-owned directory, but group- or other-writable: report, do not
-		// refuse (S-D3-3 explicit rule).
+	if st.Mode&0o002 != 0 {
+		// Root-owned directory, but OTHER-writable specifically (S-D3-3's
+		// literal wording; narrowed from group-or-other by the VM run,
+		// 2026-09-21): report, do not refuse. kairos-init's
+		// 10_accounting.yaml chmods this directory to 0770 root:admin ~130ms
+		// after we create it, on every boot from the second onward -- a
+		// mode&0o022 check would trip on the platform's own, expected,
+		// non-attacker state every single time. Group-writable (0o020) alone
+		// is that expected state and must NOT be reported; only the
+		// other-write bit is a genuine anomaly here.
 		return ReasonDirWritable, false
 	}
 	return ReasonNone, false

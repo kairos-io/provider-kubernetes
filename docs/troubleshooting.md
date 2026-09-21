@@ -50,12 +50,21 @@ before the SDK writes to it, on every `agent.boot` event. A fresh UKI install
 or a UKI state reset should converge normally with no manual step.
 
 **If it still does not converge**, check the status document (`reason:`
-field) and the boot log for a `provider-kubernetes: cluster-config-dir: ...`
-line at `level=error`:
+field). **Do not go looking for a boot-log line.** On UKI there is no log
+channel reachable after boot: this code logs a
+`provider-kubernetes: cluster-config-dir: ...` `level=error` line, same as
+everything else in this provider, but that line lives only in a pre-pivot,
+tmpfs-backed log (immucore's own log), and a VM run (2026-09-21) confirmed it
+appears in neither `immucore.log`, `agent.log`, nor the journal afterward --
+none of those channels survive the switch-root on a UKI node. The status
+document is the only channel that does:
 
 - `/run/provider-kubernetes/status.yaml` (current boot, tmpfs) or
   `/var/log/provider-kubernetes/status.yaml` (persistent mirror). See
-  [Node status](./status.md).
+  [Node status](./status.md). **On UKI the persistent `/var/log` mirror is
+  load-bearing, not a convenience**: it is confirmed to survive the pivot,
+  and it is the only copy you can rely on if you did not (or cannot) read
+  `/run` before something else rotates or reboots the node.
 
 | `reason:` | Meaning | What to do |
 |-----------|---------|------------|
@@ -63,22 +72,63 @@ line at `level=error`:
 | `ClusterConfigAncestorMissing` | `/usr` or `/usr/local` itself is simply absent. | Reported only, not withheld: the SDK's own write then fails the identical "not found" error either way, so nothing is gained by withholding. Something is likely wrong with the persistent partition or its mount; reinstall or investigate. |
 | `ClusterConfigDirUnsafe` | Something already occupies `/usr/local/cloud-config` and is not a plain, root-owned directory (a symlink, a FIFO, a device, or a regular file). | The provider withholds `cluster_token` and emits no bootstrap commands this boot. Remove or fix the offending entry, then reboot. |
 | `ClusterConfigTokenFileUnsafe` | `cluster.kairos.yaml` (or your `cluster_config_path` override's target) already exists and is anything other than absent or an intact, root-owned 0600 regular file - a symlink, a FIFO, a device, a socket, a directory, not owned by root, group/other-writable, or hard-linked. | The provider withholds `cluster_token` and emits no bootstrap commands this boot. Remove the offending entry, then reboot. |
-| `ClusterConfigDirWritable` | `/usr/local/cloud-config` exists, is owned by root, but is group- or other-writable. Expected from the second boot onward - the platform itself widens the mode. | Reported only; the boot still converges normally. No action needed. |
+| `ClusterConfigDirWritable` | `/usr/local/cloud-config` exists, is owned by root, but is other-writable. (Group-writable alone is the platform's own expected state from the second boot onward - the platform itself widens the mode to 0770 root:admin - and is deliberately NOT reported.) | Reported only; the boot still converges normally, and any existing reconcile status (for example `Converged`) is left untouched. No action needed. |
 | `ClusterConfigOverrideRejected` | `cluster_config_path` is set to somewhere other than directly under `/usr/local/cloud-config`. | The provider creates nothing there. You own pre-creating that directory safely, or drop the override to use the default path. |
 | `ClusterConfigNotPersistent` | `/usr/local` is not actually a separate mount on this boot (same device as `/`). | The token is about to be written to ephemeral storage; it will not survive a reboot, so the node will not stay converged. Check that `COS_PERSISTENT` mounted. |
 | `ClusterConfigDirCreateFailed` | The directory could not be created for a reason other than already existing (for example a read-only filesystem). | Check `dmesg`/`journalctl` for the underlying mount error. |
 
-Three of these (`ClusterConfigAncestorUnsafe`, `ClusterConfigDirUnsafe`,
-`ClusterConfigTokenFileUnsafe`) **withhold `cluster_token` and every
-bootstrap command** for this boot rather than let the SDK write the real
-secret where it could not verify the write would land safely; every other
-reason - including a merely-**missing** ancestor - is reported only and does
-not change whether the boot converges.
+These eight reasons split three ways:
+
+- **Withhold** (`ClusterConfigAncestorUnsafe`, `ClusterConfigDirUnsafe`,
+  `ClusterConfigTokenFileUnsafe`): `cluster_token` and every bootstrap command
+  are withheld for this boot rather than let the SDK write the real secret
+  where it could not verify the write would land safely. The status document
+  reports `phase: Failed` - accurately, since nothing bootstraps this boot.
+- **Failed but not withheld** (`ClusterConfigAncestorMissing`,
+  `ClusterConfigDirCreateFailed`): the secret is not at risk (the SDK's own
+  write fails the same way regardless of what we do), but the node genuinely
+  will not converge this boot, so the status document still reports
+  `phase: Failed`.
+- **Report-only** (`ClusterConfigDirWritable`, `ClusterConfigOverrideRejected`,
+  `ClusterConfigNotPersistent`): logged and recorded, but the boot converges
+  normally and **any existing reconcile status is left exactly as it was** -
+  these reasons never set `phase: Failed` and never overwrite a `Converged`
+  phase with one. (A 2026-09-21 VM run found the pre-fix code doing exactly
+  that on a converged GRUB node - reporting `Failed` while the boot converged
+  fine - which is corrected here: a diagnostic that downgrades a healthy node
+  trains operators to ignore `Failed`, which is its own defect.)
 
 This fix closes the specific missing-parent-directory defect; it is
 **not a security boundary** - see
 [Security model](./security.md#cluster-config-directory-creation-is-not-a-security-boundary-d-3--f-ukiboot)
-for exactly what the directory's mode does and does not protect.
+for exactly what the directory's mode does and does not protect. Two residual
+risks a 2026-09-21 VM run confirmed and this fix does **not** close:
+
+- **A planted non-regular, open-blocking file can still hang the boot before
+  our binary ever runs.** kairos-agent's own config scan (`notify agent.boot`)
+  reads every file under `/usr/local/cloud-config` (and `/oem`) to build the
+  cloud-config it hands to every provider, including ours. A FIFO or similar
+  open-blocking file planted there hangs that scan unboundedly, before our
+  code gets a chance to run its own preflight, and holds a shutdown inhibitor
+  while it does - the result is an unreachable node that will not even
+  reboot cleanly. This is present with or without this fix, is not specific
+  to us, affects every Kairos cluster provider, and our S-D3-4 preflight only
+  ever covers a file planted **after** kairos-agent's scan has already run,
+  not one already in place before it. **Do not treat this as something our
+  code can prevent.** Recovery is manual: boot recovery media and remove the
+  offending file from the persistent partition.
+- **A planted `/usr/local/cloud-config` symlink is refused by us, but the
+  platform's own chmod still follows it and can corrupt the real target.**
+  kairos-init's `10_accounting.yaml` runs an unconditional `chown -R
+  root:admin` / `chmod 770` against `/usr/local/cloud-config` in the same
+  `initramfs` stage, and that chmod is **not** the O_NOFOLLOW-safe walk this
+  fix uses - a symlink there (for example, planted pointing at `/etc`) is
+  followed, and its mode/ownership are changed recursively. A VM run
+  confirmed this breaks `sshd` and non-root `bash` when the symlink points at
+  `/etc`. This provider's withhold **only reduces `cluster_token`
+  disclosure**; it does not prevent, and cannot prevent, this denial of
+  service, because the corruption happens in a different component's step
+  that runs regardless of what we refuse.
 
 ### Node is `NotReady`
 

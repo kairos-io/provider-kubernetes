@@ -227,7 +227,9 @@ func TestCreateOrCheckCloudConfigDir(t *testing.T) {
 			},
 		},
 		{
-			name: "existing writable directory is reported not refused",
+			// mode&0o002: 0o777 sets the other-write bit, so this must
+			// still be reported under the S-D3-3 VM-run narrowing.
+			name: "existing other-writable (0777) directory is reported not refused",
 			setup: func(t *testing.T, localDir string) {
 				dir := filepath.Join(localDir, "cloud-config")
 				if err := os.Mkdir(dir, 0o777); err != nil {
@@ -235,7 +237,7 @@ func TestCreateOrCheckCloudConfigDir(t *testing.T) {
 				}
 				// Mkdir's mode is masked by the process umask, so under the
 				// usual 022 the directory would come out 0755 and the very
-				// condition under test -- group/other-writable -- would not
+				// condition under test -- other-writable -- would not
 				// exist. Chmod is not masked; without it this passes only on
 				// a umask that happens to keep the bits (it passed locally
 				// under 002 and failed in CI under 022).
@@ -244,6 +246,30 @@ func TestCreateOrCheckCloudConfigDir(t *testing.T) {
 				}
 			},
 			wantReason: ReasonDirWritable,
+		},
+		{
+			// S-D3-3 VM-run finding (2026-09-21): kairos-init's
+			// 10_accounting.yaml chmods the directory 0770 root:admin about
+			// 130ms after we create it, on every boot from the second
+			// onward. That is the platform's own EXPECTED state, not an
+			// attacker's, and it is group-writable, not other-writable, so
+			// it must NOT be reported. Mutation (i): widening the check back
+			// to mode&0o022 makes this subtest fail (it would report
+			// ReasonDirWritable on the platform's normal state, on every
+			// boot from the second onward).
+			name: "existing 0770 root:admin directory (platform's normal state) is NOT reported",
+			setup: func(t *testing.T, localDir string) {
+				dir := filepath.Join(localDir, "cloud-config")
+				if err := os.Mkdir(dir, 0o770); err != nil {
+					t.Fatal(err)
+				}
+				// Same umask concern as above: chmod explicitly so the mode
+				// under test is exact regardless of the process umask.
+				if err := os.Chmod(dir, 0o770); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantReason: ReasonNone,
 		},
 		{
 			name: "symlink refused",
@@ -506,6 +532,46 @@ func TestEnsureNotPersistentReportedNotRefused(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(localDir, "cloud-config")); err != nil {
 		t.Fatalf("directory must still be created even when not persistent: %v", err)
+	}
+}
+
+// TestEnsureNotPersistentPreservesExistingConvergedPhase is S-D3-9a's
+// end-to-end test (through the real Ensure/ensureDir walk, not a synthetic
+// Report): a converged node whose "/usr/local" happens to not be a separate
+// mount this boot must keep reporting Converged, not be told it Failed. This
+// is the exact VM-run scenario: the real walk drives ReasonNotPersistent,
+// and the phase-preservation must hold end to end, not just through the
+// pure MergeReportOnly/report() unit tests in clusterconfigdir_test.go.
+func TestEnsureNotPersistentPreservesExistingConvergedPhase(t *testing.T) {
+	_, localDir := newValidRoot(t)
+
+	old := notPersistentOverride
+	notPersistentOverride = func(rootFd, localFd int) bool { return true }
+	t.Cleanup(func() { notPersistentOverride = old })
+
+	sink := &fakeSink{}
+	oldSink := statusSink
+	statusSink = sink
+	t.Cleanup(func() { statusSink = oldSink })
+
+	oldReader := statusReader
+	statusReader = func() (status.Status, bool) {
+		return status.Status{Phase: status.PhaseConverged, Outcome: status.OutcomeSuccess}, true
+	}
+	t.Cleanup(func() { statusReader = oldReader })
+
+	rep := Ensure(clusterplugin.Cluster{Role: "controlplane"})
+	if rep.Reason != ReasonNotPersistent || rep.Withhold {
+		t.Fatalf("report = %+v, want {Reason: %q, Withhold: false}", rep, ReasonNotPersistent)
+	}
+	if len(sink.calls) != 1 {
+		t.Fatalf("expected exactly one status record, got %d", len(sink.calls))
+	}
+	if sink.calls[0].Phase != status.PhaseConverged {
+		t.Fatalf("Phase = %q, want the preserved %q (S-D3-9a)", sink.calls[0].Phase, status.PhaseConverged)
+	}
+	if _, err := os.Lstat(filepath.Join(localDir, "cloud-config")); err != nil {
+		t.Fatalf("directory must still be created: %v", err)
 	}
 }
 
