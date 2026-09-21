@@ -16,8 +16,10 @@ Every reconcile pass and every reset writes a small YAML status document to:
   reboot, for post-mortem after a failed boot.
 
 Both are written atomically (temp file + rename, so a reader never sees a partial
-doc) with mode **0640, owner root, group adm** (group-readable by an `adm`-group
-monitoring agent; world-unreadable). This is the only channel that works when a
+doc) with mode **0640, owner root**. The group is set to `adm` when that group
+resolves on the node, so an `adm`-group monitoring agent can read it; if the
+lookup fails the file stays root:root. Either way it is world-unreadable. This
+is the only channel that works when a
 node never joined the cluster - the very failure you most need to debug.
 
 The document carries **no secrets by construction**: every field except `message`
