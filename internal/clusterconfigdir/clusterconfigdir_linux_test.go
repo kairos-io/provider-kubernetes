@@ -229,7 +229,17 @@ func TestCreateOrCheckCloudConfigDir(t *testing.T) {
 		{
 			name: "existing writable directory is reported not refused",
 			setup: func(t *testing.T, localDir string) {
-				if err := os.Mkdir(filepath.Join(localDir, "cloud-config"), 0o777); err != nil {
+				dir := filepath.Join(localDir, "cloud-config")
+				if err := os.Mkdir(dir, 0o777); err != nil {
+					t.Fatal(err)
+				}
+				// Mkdir's mode is masked by the process umask, so under the
+				// usual 022 the directory would come out 0755 and the very
+				// condition under test -- group/other-writable -- would not
+				// exist. Chmod is not masked; without it this passes only on
+				// a umask that happens to keep the bits (it passed locally
+				// under 002 and failed in CI under 022).
+				if err := os.Chmod(dir, 0o777); err != nil {
 					t.Fatal(err)
 				}
 			},
