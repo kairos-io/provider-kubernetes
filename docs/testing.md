@@ -205,8 +205,9 @@ gh attestation verify agent-provider-kubernetes_<tag>_linux_amd64.tar.gz \
 
 The command above checks the build-provenance attestation. The SBOM is attested
 separately as CycloneDX; to verify it specifically add
-`--predicate-type https://cyclonedx.org/bom`. See the [README](../README.md#verifying-a-release) for the
-digest-resolution one-liner.
+`--predicate-type https://cyclonedx.org/bom`. See
+[CONTRIBUTING.md](../CONTRIBUTING.md#verifying-a-release) for the
+digest-resolution one-liner and the bundled-control-plane-images attestation.
 
 ## See also
 

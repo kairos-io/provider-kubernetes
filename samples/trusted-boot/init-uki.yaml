@@ -1,0 +1,58 @@
+#cloud-config
+# First control-plane node (role: init) on a trusted-boot (UKI) Kairos node.
+#
+# STATUS: early public release; adapt to your environment, not yet certified for production.
+#
+# The cluster block below is identical to a GRUB install. UKI differs in how the
+# artifact is built and how this config reaches the node, not in what the
+# provider reads. Build and deliver the artifact the way your trusted-boot flow
+# does; see the Kairos trusted-boot documentation.
+#
+# What used to break on UKI, and no longer does: kairos-sdk writes the cluster
+# config to /usr/local/cloud-config/cluster.kairos.yaml and never creates that
+# directory. A GRUB install creates it as a side effect of the install hook; the
+# UKI install and state-reset paths have no equivalent, so on the first boot
+# after install the write failed and the node never bootstrapped. The provider
+# now creates that one directory itself, refusing to follow a symlink and
+# refusing anything already there that is not a plain root-owned directory.
+#
+# Read samples/trusted-boot/README.md before using this.
+
+install:
+  device: "auto"
+  auto: true
+  reboot: true
+
+users:
+  # Kairos 3.3+ requires at least one user in the 'admin' group for
+  # kairos-agent install to proceed (or set install.nousers: true).
+  - name: kairos
+    groups: ["admin", "sudo"]
+    passwd: kairos
+
+hostname: cp-uki
+
+cluster:
+  cluster_token: "CHANGE-ME-to-a-long-high-entropy-cluster-correlation-string"
+  control_plane_host: "192.168.1.10"
+  role: init
+
+  # Optional. The directory part must be exactly /usr/local/cloud-config;
+  # anything else is rejected and nothing is created, because the provider only
+  # ever creates that one directory and you would own creating yours safely.
+  # cluster_config_path: "/usr/local/cloud-config/cluster.kairos.yaml"
+
+  providerConfig:
+    cluster_root_path: "/"
+
+  config: |
+    clusterConfiguration:
+      kubernetesVersion: v1.37.0
+      controlPlaneEndpoint: "192.168.1.10:6443"
+      networking:
+        podSubnet: "10.244.0.0/16"
+        serviceSubnet: "10.96.0.0/12"
+    initConfiguration:
+      localAPIEndpoint:
+        advertiseAddress: "192.168.1.10"
+        bindPort: 6443

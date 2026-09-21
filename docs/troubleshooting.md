@@ -239,7 +239,7 @@ Then fix it at the source rather than by widening `PATH`:
 
 `provider-kubernetes-unit-migrate.service` runs once per boot, before containerd,
 the import unit and the kubelet, and removes the unit copies that releases before
-this one installed into the persistent `/etc/systemd/system`. It ends with one
+v0.4.0 installed into the persistent `/etc/systemd/system`. It ends with one
 summary line:
 
 ```sh
@@ -296,6 +296,8 @@ See [Upgrades](./upgrades.md#unit-files-moved-into-the-image).
 
 The image bundles the control-plane images for its Kubernetes version and imports
 them into containerd at boot, so `kubeadm init`/`join` should not need a registry.
+[`samples/air-gapped/`](../samples/air-gapped/) has the pre-flight checks to run
+while a registry is still reachable.
 Check that containerd has an image under the exact reference kubeadm looks for
 (this is the same lookup kubeadm does):
 

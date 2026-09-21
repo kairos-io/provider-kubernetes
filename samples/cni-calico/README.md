@@ -1,7 +1,7 @@
 # Calico CNI example
 
 provider-kubernetes bootstraps the control plane and joins nodes, but it
-installs **no CNI** — pod networking is the operator's choice (Calico, Cilium,
+installs no CNI: pod networking is the operator's choice (Calico, Cilium,
 Flannel, ...). Until a CNI is installed, nodes stay `NotReady` and CoreDNS stays
 `Pending`. This is by design.
 
@@ -14,9 +14,9 @@ so check it before using this sample with 1.37. Two ways to apply it:
 | File | Approach | When |
 |------|----------|------|
 | `installation.yaml` | Apply by hand after the cluster is up (`kubectl create` the operator, then `kubectl apply` this CR). | You want explicit, staged control of when the CNI lands, or a GitOps tool owns CNI. |
-| `cluster-with-calico.yaml` | Bundled in the control-plane cloud-config — the node installs Calico itself, no follow-up `kubectl`. | You want one declarative file that yields a Ready cluster unattended. |
+| `cluster-with-calico.yaml` | Bundled in the control-plane cloud-config: the node installs Calico itself, no follow-up `kubectl`. | You want one declarative file that yields a Ready cluster unattended. |
 
-## Approach A — apply after the cluster is up
+## Approach A: apply after the cluster is up
 
 Run on the control-plane node (or anywhere with the cluster's admin kubeconfig):
 
@@ -34,7 +34,7 @@ kubectl -n calico-system wait --for=condition=Ready pod --all --timeout=300s
 kubectl wait --for=condition=Ready node --all --timeout=300s
 ```
 
-## Approach B — bundled in the cloud-config (`cluster-with-calico.yaml`)
+## Approach B: bundled in the cloud-config (`cluster-with-calico.yaml`)
 
 `cluster-with-calico.yaml` is a complete `role: init` control-plane cloud-config
 that ALSO installs Calico, so a single file yields a Ready cluster with no manual

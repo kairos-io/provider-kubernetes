@@ -1,7 +1,8 @@
 # Sample cloud-configs and image build
 
-This directory contains example Kairos cloud-configs for the three node roles
-the provider supports, and points at the `Dockerfile` you build the image with.
+Example Kairos cloud-configs for the node roles the provider supports, plus the
+topologies that need more than a role change. It also points at the `Dockerfile`
+you build the image with.
 
 These are worked examples for the current release. Adapt them to your environment
 rather than using them verbatim; the project is not yet certified for production.
@@ -13,22 +14,28 @@ rather than using them verbatim; the project is not yet certified for production
 | `master.yaml`       | `init`         | First control-plane node; runs `kubeadm init`. |
 | `controlplane.yaml` | `controlplane` | Additional control-plane node; joins via token + cert key. |
 | `worker.yaml`       | `worker`       | Worker node; joins via token + CA hash. |
+| `cluster.yaml`      | `init`         | Annotated reference for the kubeadm v1beta4 keys the provider reads, and the ones it ignores. |
 | `ha/`               | HA             | Multi-control-plane (stacked-etcd) walkthrough: stable endpoint, one-at-a-time bring-up, reset/etcd-orphan runbook. |
-| `cni-flannel/`      | CNI            | Flannel CNI examples (post-hoc apply and bundled-in-cloud-config). Simplest/most neutral; ideal for lab/single-node. |
-| `cni-calico/`       | CNI            | Calico CNI examples (post-hoc apply and bundled-in-cloud-config). For network policy / eBPF / HA-oriented clusters. |
+| `air-gapped/`       | `init`         | Bootstrap with no registry reachable, from the control-plane images bundled in the OS image. |
+| `trusted-boot/`     | `init`         | A UKI (trusted-boot) node, and the status reasons to check if it does not converge. |
+| `custom-api-port/`  | `init`, `worker` | An API server on a port other than 6443. |
+| `external-controlplane/` | `worker`  | Join a control plane the provider did not bootstrap, anchored on its CA PEM. |
+| `cni-flannel/`      | CNI            | Flannel CNI examples (post-hoc apply and bundled-in-cloud-config). Simplest and most neutral; good for lab and single-node clusters. |
+| `cni-calico/`       | CNI            | Calico CNI examples (post-hoc apply and bundled-in-cloud-config). For network policy, eBPF, and HA-oriented clusters. |
 
-> The provider installs **no CNI** — a node stays `NotReady` until you apply one.
-> That is expected kubeadm behavior (the provider is CNI-agnostic by design —
-> principle #3, no vendor lock-in), not a bug. Pick the CNI that fits your cluster;
-> `cni-flannel/` and `cni-calico/` are two worked examples, not a default.
+> The provider installs **no CNI**, so a node stays `NotReady` until you apply
+> one. That is expected kubeadm behavior, not a bug: the provider stays
+> CNI-agnostic so it imposes no vendor lock-in. Pick the CNI that fits your
+> cluster; `cni-flannel/` and `cni-calico/` are two worked examples, not a
+> default.
 
 ## Build the image
 
 The root `Dockerfile` builds a Kairos image that bundles the provider plus
-kubeadm, kubelet, kubectl, containerd, runc and the CNI plugins. **Every
-external binary download is checksum-verified** against the publisher's
-HTTPS-served `.sha256` file — a deliberate fix for the unverified-`curl`
-supply-chain pitfall of the previous kubeadm provider.
+kubeadm, kubelet, kubectl, containerd, runc and the CNI plugins. Every external
+binary download is checksum-verified against the publisher's HTTPS-served
+`.sha256` file, and the control-plane container images are cosign-verified and
+baked in so a node can bootstrap without a registry.
 
 ```sh
 docker build \
@@ -71,7 +78,8 @@ config_url field, etc.).
 2. On the control-plane node, mint join material with the provider's
    `mint-join` helper. It mints a bounded-TTL bootstrap token, computes the
    cluster CA SPKI pin, derives the API endpoint from `admin.conf`, and prints
-   a ready-to-paste cloud-config — no manual `openssl`/`kubeadm token` dance:
+   a ready-to-paste cloud-config, with no manual `openssl` or `kubeadm token`
+   steps:
    ```sh
    # Worker join cloud-config (token + CA pin):
    sudo agent-provider-kubernetes mint-join \
@@ -87,7 +95,7 @@ config_url field, etc.).
    Flags: `--endpoint host:port` overrides the auto-derived endpoint (e.g. a
    load-balanced `controlPlaneEndpoint`); `--root-path` locates `admin.conf`
    and `ca.crt` when the cluster root is not `/`. The printed material is the
-   only copy — the provider persists none of it.
+   only copy; the provider persists none of it.
 3. Deliver the printed cloud-config to each joining node (the provider does not
    pull join material; the operator delivers it out-of-band per ADR-10). Tokens
    default to a 1h TTL; re-mint and redeliver if a node will boot later. The

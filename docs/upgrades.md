@@ -207,14 +207,18 @@ on a kubeadm/Kairos control plane that means:
 
 ## Unit files moved into the image
 
-Since this release the units the provider owns - `containerd.service`,
-`kubelet.service`, `provider-kubernetes-image-import.service` and the kubeadm
-drop-in `kubelet.service.d/10-kubeadm.conf` - are installed in
-`/usr/lib/systemd/system`, which is part of the image you boot. Earlier releases
-installed them into `/etc/systemd/system`, which Kairos keeps on the persistent
-partition and refreshes from the image with `rsync --update` (update-only, no
-delete). A copy there was replaced only when the new build's mtime happened to be
-newer, survived a rollback, and could never be removed by an upgrade.
+Since v0.4.0 the units the provider owns are installed in
+`/usr/lib/systemd/system`, which is part of the image you boot:
+`containerd.service`, `kubelet.service`,
+`provider-kubernetes-image-import.service`,
+`provider-kubernetes-unit-migrate.service`, the kubeadm drop-in
+`kubelet.service.d/10-kubeadm.conf`, and the two
+`50-provider-kubernetes-exec-path.conf` drop-ins. Earlier releases installed the
+first four of those into `/etc/systemd/system`, which Kairos keeps on the
+persistent partition and refreshes from the image with `rsync --update`
+(update-only, no delete). A copy there was replaced only when the new build's
+mtime happened to be newer, survived a rollback, and could never be removed by
+an upgrade.
 
 **The one-time cleanup.** The first boot of this release runs
 `provider-kubernetes-unit-migrate.service` before containerd, the import unit and
@@ -234,9 +238,13 @@ sudo systemctl show -p FragmentPath,DropInPaths kubelet.service
 sudo systemctl cat kubelet.service
 ```
 
-**Only byte-identical copies are deleted.** The cleanup knows the exact bytes this
-project shipped at each of those four paths and removes a file only if it matches
-one of them - nothing else, and never anything that is not on that fixed list. **A
+**Only byte-identical copies are deleted.** The cleanup works from a fixed list
+of seven paths: the three old fragments, the kubeadm drop-in, and the three
+`multi-user.target.wants` symlinks that enabled them. It knows the exact bytes
+this project ever shipped at each of the four content-carrying paths and removes
+a file only if it matches one of them, and a link only if it points at exactly
+the fragment it enabled. Nothing else, and never anything that is not on that
+fixed list. **A
 copy you edited is kept**, named in the journal
 (`unit-migrate: kept "/etc/systemd/system/kubelet.service" reason=modified`), and
 the unit **fails**, so `systemctl --failed` shows it. That is deliberate: the edited
