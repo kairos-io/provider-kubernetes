@@ -706,8 +706,11 @@ func TestMergeReportOnlyPreservesExistingFields(t *testing.T) {
 		Version:    "v0.1.0",
 	}
 
-	got := MergeReportOnly(prev, true, ReasonClusterConfigNotPersistent, "not persistent", "new-boot-id", "v0.2.0", testNow)
+	got, record := MergeReportOnly(prev, true, ReasonClusterConfigNotPersistent, "not persistent", "new-boot-id", "v0.2.0", testNow)
 
+	if !record {
+		t.Fatal("record = false; a converged record has no Reason, so the finding must be attached")
+	}
 	if got.Phase != PhaseConverged {
 		t.Errorf("Phase = %q, want preserved %q", got.Phase, PhaseConverged)
 	}
@@ -744,8 +747,11 @@ func TestMergeReportOnlyPreservesExistingFields(t *testing.T) {
 // case: MergeReportOnly must start from PhaseReconciling, never PhaseFailed,
 // when existing is false.
 func TestMergeReportOnlyNoExistingUsesReconciling(t *testing.T) {
-	got := MergeReportOnly(Status{}, false, ReasonClusterConfigDirWritable, "writable", testBootID, testVersion, testNow)
+	got, record := MergeReportOnly(Status{}, false, ReasonClusterConfigDirWritable, "writable", testBootID, testVersion, testNow)
 
+	if !record {
+		t.Fatal("record = false; there is nothing on record to protect, so the finding must be attached")
+	}
 	if got.Phase != PhaseReconciling {
 		t.Errorf("Phase = %q, want %q", got.Phase, PhaseReconciling)
 	}
@@ -760,5 +766,87 @@ func TestMergeReportOnlyNoExistingUsesReconciling(t *testing.T) {
 	}
 	if got.Reason != ReasonClusterConfigDirWritable {
 		t.Errorf("Reason = %q, want the fresh value", got.Reason)
+	}
+}
+
+// TestMergeReportOnlyKeepsARecordedFailure is the other half of S-D3-9a's
+// case analysis. The reviewed scenario was a CONVERGED record, whose Reason
+// is empty by contract, so passing a fresh Reason/Message through was
+// harmless. On a FAILED record it relabels the failure: Phase, Outcome,
+// Terminal, Budget and LastAction are preserved by design, so the document
+// asserts a terminal failure of prev's action with prev's attempt counts
+// under this finding's reason, and the real reason is gone from both status
+// files and from the Node annotations.
+//
+// This is reached on any boot following a failed one: statusReader consults
+// /run (tmpfs, still empty this early in the boot) before the persistent
+// /var/log mirror, so the previous boot's failure is exactly what a
+// report-only finding is handed.
+func TestMergeReportOnlyKeepsARecordedFailure(t *testing.T) {
+	prev := Status{
+		APIVersion: APIVersion,
+		Phase:      PhaseFailed,
+		Role:       "worker",
+		Membership: "uninitialized",
+		Outcome:    OutcomeFailure,
+		Reason:     ReasonControlPlaneUnreachable,
+		Terminal:   true,
+		LastAction: "wait-for-control-plane",
+		Message:    "wait-for-control-plane: dial tcp 10.0.0.1:6443: i/o timeout",
+		Budget:     Budget{Attempts: 3, MaxAttempts: 3},
+		UpdatedAt:  "2026-09-21T10:00:00Z",
+		BootID:     "boot-1",
+		Version:    "v0.4.0",
+	}
+
+	got, record := MergeReportOnly(prev, true, ReasonClusterConfigNotPersistent,
+		"/usr/local is not a separate persistent mount", "boot-2", "v0.4.0", testNow)
+
+	if record {
+		t.Error("record = true; a report-only finding must not be written over a recorded failure")
+	}
+	if got != prev {
+		t.Errorf("the recorded failure was modified:\n got %+v\nwant %+v", got, prev)
+	}
+}
+
+// TestMergeReportOnlyNeverDisplacesARecordedReason generalises the rule over
+// every Reason the schema defines: Reason is the machine-stable verdict code,
+// so a report-only diagnostic may fill an empty one and may never replace one
+// that is already there. Degraded (ReasonKubeletUnhealthy) and a failed reset
+// (ReasonResetFailed) are covered by the same rule, not by a phase list that
+// would have to be extended for each new phase.
+func TestMergeReportOnlyNeverDisplacesARecordedReason(t *testing.T) {
+	recorded := []Reason{
+		ReasonControlPlaneUnreachable,
+		ReasonJoinTimeout,
+		ReasonInitRefused,
+		ReasonUpgradeRefused,
+		ReasonBudgetExhausted,
+		ReasonKubeadmError,
+		ReasonConfigInvalid,
+		ReasonResetFailed,
+		ReasonResetOK,
+		ReasonKubeletUnhealthy,
+		ReasonClusterConfigAncestorUnsafe,
+		ReasonClusterConfigDirUnsafe,
+		ReasonClusterConfigTokenFileUnsafe,
+	}
+	for _, r := range recorded {
+		prev := Status{APIVersion: APIVersion, Phase: PhaseFailed, Outcome: OutcomeFailure, Reason: r}
+		got, record := MergeReportOnly(prev, true, ReasonClusterConfigDirWritable, "writable", testBootID, testVersion, testNow)
+		if record {
+			t.Errorf("reason %q: record = true, want false", r)
+		}
+		if got.Reason != r {
+			t.Errorf("reason %q was displaced by %q", r, got.Reason)
+		}
+	}
+
+	// The empty slot is still fillable: that is the case S-D3-9a shipped for.
+	prev := Status{APIVersion: APIVersion, Phase: PhaseConverged, Outcome: OutcomeSuccess, Reason: ReasonNone}
+	got, record := MergeReportOnly(prev, true, ReasonClusterConfigDirWritable, "writable", testBootID, testVersion, testNow)
+	if !record || got.Reason != ReasonClusterConfigDirWritable {
+		t.Errorf("an empty Reason must be fillable: record=%t reason=%q", record, got.Reason)
 	}
 }

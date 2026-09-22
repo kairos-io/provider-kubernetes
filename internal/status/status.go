@@ -330,6 +330,23 @@ func BuildStatus(p BuildParams) Status {
 // security-relevant defect in its own right, since it trains operators to
 // ignore Failed).
 //
+// record is false when the finding must not reach the status channel at all.
+// Reason is the machine-stable verdict code; a report-only diagnostic may
+// fill an empty one, but it must never displace one that is already on
+// record. Passing Reason (and Message) through on top of a recorded FAILURE
+// relabels that failure: prev's Phase, Outcome, Terminal, Budget and
+// LastAction are preserved by design, so the document ends up asserting a
+// terminal failure of prev's action, with prev's attempt counts, under this
+// finding's reason -- and the real reason is gone from both status files and
+// from the Node annotations. That is reached on any boot following a failed
+// one: statusReader consults /run (tmpfs, empty this early) before the
+// persistent /var/log mirror, so the previous boot's failure is what a
+// report-only finding is handed. It is also self-contradictory for the
+// report-only reasons the schema documents as "Reported, never refused",
+// which cannot be terminal. The finding is still logged at error level by
+// the caller, which is where a diagnostic belongs once the verdict slot is
+// taken.
+//
 // Phase, Outcome, Membership, Role, LastAction, Budget and Terminal are
 // copied through from prev UNCHANGED when existing is true (the caller
 // already read the most recent Status, e.g. via ReadLatest); only Reason,
@@ -344,8 +361,11 @@ func BuildStatus(p BuildParams) Status {
 // Outcome: the reconcile has not run yet this boot, which is an honest
 // "in progress", never a false "failed". PhaseReconciling already existed
 // for exactly this "written at start, replaced on completion" case.
-func MergeReportOnly(prev Status, existing bool, reason Reason, message, bootID, version, now string) Status {
-	s := prev
+func MergeReportOnly(prev Status, existing bool, reason Reason, message, bootID, version, now string) (s Status, record bool) {
+	if existing && prev.Reason != ReasonNone {
+		return prev, false
+	}
+	s = prev
 	if !existing {
 		s = Status{Phase: PhaseReconciling}
 	}
@@ -355,7 +375,7 @@ func MergeReportOnly(prev Status, existing bool, reason Reason, message, bootID,
 	s.UpdatedAt = now
 	s.BootID = bootID
 	s.Version = version
-	return s
+	return s, true
 }
 
 // deriveReason maps (action, error, result) to a CLOSED Reason constant. This
