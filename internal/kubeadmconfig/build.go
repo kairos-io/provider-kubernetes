@@ -34,6 +34,14 @@ type Input struct {
 	DiscoveryFilePath  string   // discovery kubeconfig path (mutually exclusive with JoinToken)
 	JoinAsControlPlane bool     // true => join as an additional control-plane node
 	CertificateKey     string   // control-plane join only
+
+	// JoinAPIServerEndpoint is the operator-supplied
+	// joinConfiguration.discovery.bootstrapToken.apiServerEndpoint ("host:port").
+	// It answers "which API server does THIS node dial to join", which is not
+	// always the cluster-wide ControlPlaneEndpoint: control_plane_host may be one
+	// reachable member while the join is meant to go through a VIP or LB. Empty
+	// falls back to ControlPlaneEndpoint.
+	JoinAPIServerEndpoint string
 }
 
 // BuildClusterConfiguration builds a ClusterConfiguration from non-credential input.
@@ -112,10 +120,14 @@ func BuildJoinConfiguration(in Input) (JoinConfiguration, error) {
 		if len(in.CACertHashes) == 0 {
 			return JoinConfiguration{}, fmt.Errorf("refusing to build join config: token discovery requires CA cert hashes (CA pinning is mandatory; UnsafeSkipCAVerification is never allowed)")
 		}
+		endpoint := in.JoinAPIServerEndpoint
+		if strings.TrimSpace(endpoint) == "" {
+			endpoint = in.ControlPlaneEndpoint
+		}
 		j.Discovery = Discovery{
 			BootstrapToken: &BootstrapTokenDiscovery{
 				Token:                    in.JoinToken,
-				APIServerEndpoint:        in.ControlPlaneEndpoint,
+				APIServerEndpoint:        endpoint,
 				CACertHashes:             in.CACertHashes,
 				UnsafeSkipCAVerification: false,
 			},

@@ -180,7 +180,27 @@ func BuildInput(ctx Context, uc UserConfig, resolvedVersion string) (kubeadmconf
 		Taints:               uc.InitConfiguration.NodeRegistration.Taints,
 		AdvertiseAddress:     advertiseAddress,
 		BindPort:             bindPort,
+
+		// The join-scoped endpoint is kubeadm's own answer to "which API server
+		// does this node dial to join", so it is carried through rather than
+		// dropped in favor of the cluster-wide endpoint. Empty means "use
+		// controlPlaneEndpoint", which is what every generated config does.
+		JoinAPIServerEndpoint: normalizeJoinEndpoint(uc.JoinConfiguration.Discovery.BootstrapToken.APIServerEndpoint),
 	}, endpointWarn, nil
+}
+
+// normalizeJoinEndpoint returns the operator-supplied join apiServerEndpoint as
+// "host:port", appending the default API server port when none was given. An
+// empty value stays empty so callers fall back to the controlPlaneEndpoint.
+func normalizeJoinEndpoint(ep string) string {
+	ep = strings.TrimSpace(ep)
+	if ep == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(ep); err == nil {
+		return ep
+	}
+	return net.JoinHostPort(ep, defaultAPIServerPort)
 }
 
 // ValidateControlPlaneEndpoint validates the controlPlaneEndpoint for HA-1

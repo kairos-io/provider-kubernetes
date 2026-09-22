@@ -101,6 +101,11 @@ Notes:
 
 - The provider auto-adds the `controlPlaneEndpoint` host (and the
   `control_plane_host`) to `certSANs` so TLS to the endpoint validates.
+- `discovery.bootstrapToken.apiServerEndpoint` is the address **this node** dials
+  to join, and it wins over `controlPlaneEndpoint` / `control_plane_host` for the
+  join (and for the pre-join reachability wait). A bare host gets `:6443`
+  appended. Leave it out and the join uses `controlPlaneEndpoint`, falling back to
+  `control_plane_host`; `mint-join` writes the same value in both places.
 - For a control-plane join, set `controlPlane.localAPIEndpoint.advertiseAddress`
   to the joining node's own routable IP, especially on multi-homed nodes. The
   minting control plane cannot know it; `mint-join` leaves a placeholder you fill
