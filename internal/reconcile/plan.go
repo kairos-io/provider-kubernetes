@@ -54,21 +54,48 @@ const (
 // success. The fix is deliberately NOT a new action -- recovery of an
 // established member stays an explicit, separate reset flow, never an
 // automatic re-bootstrap -- it is a second return value the status layer
-// (internal/status) uses to distinguish the two ActionNone cases.
+// (internal/status) uses to tell a converged member from a degraded one. A
+// live kubelet later turned out not to be enough for a control plane: a
+// failed `kubeadm init` or control-plane join leaves admin.conf behind with
+// the kubelet running, so an Initialized node is also checked for a finished
+// init and a serving local apiserver.
 type Verdict string
 
+// Every verdict other than VerdictOK accompanies []Action{ActionNone} on an
+// already-established member (Initialized or Joined). Plan takes no recovery
+// action for any of them -- recovering an established member stays an
+// explicit reset -- but the caller MUST NOT report them as a converged
+// success. They are checked in the order listed: a stopped kubelet explains
+// the other two, and an unfinished init needs a reset whatever the apiserver
+// is doing.
 const (
 	// VerdictOK: either the node is fully converged (a healthy established
 	// member) or Plan returned a real, forward-moving action (init/join/
 	// upgrade/refuse/wait); the caller's normal success/failure handling
 	// applies unchanged.
 	VerdictOK Verdict = "ok"
-	// VerdictDegraded: Membership is already Initialized or Joined but
-	// KubeletHealthy is false. Plan still returns []Action{ActionNone} (no
-	// automatic recovery), but the caller MUST NOT report this as a converged
-	// success.
-	VerdictDegraded Verdict = "degraded"
+	// VerdictKubeletUnhealthy: Membership is Initialized or Joined but
+	// KubeletHealthy is false (D-2).
+	VerdictKubeletUnhealthy Verdict = "kubelet-unhealthy"
+	// VerdictInitIncomplete: Membership is Initialized, the kubelet is up, but
+	// InitIncomplete shows this node's `kubeadm init` never finished. kubeadm
+	// writes admin.conf long before the control plane is up, so without this
+	// a failed init looked converged from the next boot on.
+	VerdictInitIncomplete Verdict = "init-incomplete"
+	// VerdictControlPlaneUnhealthy: Membership is Initialized, the kubelet is
+	// up and init finished, but the local apiserver does not answer /healthz
+	// (a crashlooping apiserver or etcd, or a control-plane join that failed
+	// after admin.conf was written). The caller may re-probe after a bounded
+	// grace period before reporting it, since after a reboot the static pods
+	// start after the kubelet.
+	VerdictControlPlaneUnhealthy Verdict = "control-plane-unhealthy"
 )
+
+// Degraded reports whether the verdict is one the caller must surface as a
+// degraded member rather than as success.
+func (v Verdict) Degraded() bool {
+	return v != VerdictOK
+}
 
 // Plan is a pure function: given the desired role, the operator-pinned upgrade
 // target (empty when no upgrade is intended), and the observed actual state, it
@@ -87,15 +114,12 @@ func Plan(desired actualstate.Role, target string, s actualstate.State) ([]Actio
 	if acts, handled := planUpgrade(desired, target, s); handled {
 		// Every planUpgrade-handled branch returns a real, forward-moving action
 		// (refuse/apply/repair/wait/node) -- never a hidden ActionNone -- so the
-		// D-2 degraded distinction does not apply here.
+		// member verdicts do not apply here.
 		return acts, VerdictOK
 	}
 
 	switch desired {
 	case actualstate.RoleInit:
-		if s.Membership == actualstate.Initialized && s.KubeletHealthy {
-			return []Action{ActionNone}, VerdictOK
-		}
 		if s.Membership == actualstate.Uninitialized {
 			// HA-3: if the endpoint is already serving, refuse loudly (ADR-11 #2).
 			if s.ControlPlaneReachable {
@@ -103,38 +127,49 @@ func Plan(desired actualstate.Role, target string, s actualstate.State) ([]Actio
 			}
 			return []Action{ActionRunInit}, VerdictOK
 		}
-		// Initialized-but-unhealthy, or already joined: do not re-init. Recovery is
-		// an explicit, separate flow (reset), not an automatic re-bootstrap. D-2:
-		// report which one this is via the Verdict, not the action.
-		return []Action{ActionNone}, degradedVerdict(s)
+		// Already Initialized or Joined: never re-init. Recovery is an explicit,
+		// separate flow (reset), not an automatic re-bootstrap; whether this
+		// member is healthy is reported through the Verdict, not the action.
+		return []Action{ActionNone}, memberVerdict(s)
 
 	case actualstate.RoleControlPlane, actualstate.RoleWorker:
-		if s.Membership == actualstate.Joined && s.KubeletHealthy {
-			return []Action{ActionNone}, VerdictOK
-		}
 		if s.Membership == actualstate.Uninitialized {
 			if !s.ControlPlaneReachable {
 				return []Action{ActionWaitForControlPlane, ActionRunJoin}, VerdictOK
 			}
 			return []Action{ActionRunJoin}, VerdictOK
 		}
-		// Initialized (this node is itself a CP) or joined-but-unhealthy: no-op.
-		// D-2: report which one this is via the Verdict, not the action.
-		return []Action{ActionNone}, degradedVerdict(s)
+		// Initialized (this node is itself a CP) or Joined: no-op, with health
+		// reported through the Verdict.
+		return []Action{ActionNone}, memberVerdict(s)
 
 	default:
 		return []Action{ActionNone}, VerdictOK
 	}
 }
 
-// degradedVerdict classifies the ActionNone fallback taken when the node is
-// already an established member (Initialized or Joined -- the only two
-// Memberships that reach this call, since Uninitialized always returns
-// earlier): VerdictDegraded whenever KubeletHealthy is false, so the status
-// layer never has to re-derive this from raw state (D-2).
-func degradedVerdict(s actualstate.State) Verdict {
+// memberVerdict classifies the ActionNone taken when the node is already an
+// established member (Initialized or Joined -- the only two Memberships that
+// reach this call, since Uninitialized always returns earlier), so the status
+// layer never has to re-derive it from raw state.
+//
+// A Joined node is a worker as far as membership goes: its health is its
+// kubelet (D-2). An Initialized node runs a control plane, and a live kubelet
+// says nothing about it -- the kubelet stays healthy while every static pod
+// it runs crashloops -- so it must also have finished init and serve its
+// local apiserver before it counts as converged.
+func memberVerdict(s actualstate.State) Verdict {
 	if !s.KubeletHealthy {
-		return VerdictDegraded
+		return VerdictKubeletUnhealthy
+	}
+	if s.Membership != actualstate.Initialized {
+		return VerdictOK
+	}
+	if s.InitIncomplete {
+		return VerdictInitIncomplete
+	}
+	if !s.APIServerReachable {
+		return VerdictControlPlaneUnhealthy
 	}
 	return VerdictOK
 }

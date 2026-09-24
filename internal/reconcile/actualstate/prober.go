@@ -15,6 +15,10 @@ import (
 //   - admin.conf present     -> Initialized (this node runs a control plane)
 //   - else kubelet.conf only -> Joined
 //   - else                   -> Uninitialized
+//
+// admin.conf is written by kubeadm's kubeconfig phase, before the control plane
+// is ever waited for, so Initialized alone does not mean init succeeded. For an
+// Initialized node the prober also reports InitIncomplete (kubeletconf.go).
 type FileProber struct {
 	// RootPath is the cluster root (ProviderOptions["cluster_root_path"], default "/").
 	RootPath string
@@ -37,6 +41,9 @@ type FileProber struct {
 // Probe reads the node's actual state. It never mutates the node.
 func (p FileProber) Probe(ctx context.Context) (State, error) {
 	s := State{Membership: p.membership()}
+	if s.Membership == Initialized {
+		s.InitIncomplete = initIncomplete(p.RootPath)
+	}
 	if p.KubeletHealthy != nil {
 		s.KubeletHealthy = p.KubeletHealthy(ctx)
 	}

@@ -38,8 +38,10 @@ const (
 	// PhaseReset: the node was reset via EventClusterReset.
 	PhaseReset Phase = "Reset"
 	// PhaseDegraded: the node is an already-established member (Initialized or
-	// Joined) but its kubelet health signal is not healthy (D-2, the 2026-09-17
-	// U2 security sign-off). The reconcile action is still ActionNone --
+	// Joined) but not healthy: its kubelet is down (D-2, the 2026-09-17 U2
+	// security sign-off), or, on a control plane, its `kubeadm init` never
+	// finished or its apiserver is not serving. The reason names which. The
+	// reconcile action is still ActionNone --
 	// recovering an established member is a deliberate, explicit reset flow,
 	// never an automatic re-bootstrap -- so this is NOT a Failed/terminal
 	// phase: the next boot (or an operator reset) may still converge cleanly.
@@ -77,6 +79,17 @@ const (
 	// PhaseDegraded (D-2): the node is already Initialized or Joined but
 	// actualstate.State.KubeletHealthy is false.
 	ReasonKubeletUnhealthy Reason = "KubeletUnhealthy"
+	// ReasonInitIncomplete: PhaseDegraded on an Initialized node whose
+	// `kubeadm init` apparently never finished (actualstate.State.
+	// InitIncomplete). The objects its later phases create -- kubeadm-config,
+	// the bootstrap-token RBAC and cluster-info -- may be missing, so joins
+	// fail. It is a finding to check, not a verdict to act on blindly: an
+	// operator who re-issued kubelet.conf by hand leaves the same files.
+	ReasonInitIncomplete Reason = "InitIncomplete"
+	// ReasonControlPlaneUnhealthy: PhaseDegraded on an Initialized node whose
+	// kubelet is up and whose init finished, but whose local apiserver did
+	// not answer /healthz, including after the boot-time grace period.
+	ReasonControlPlaneUnhealthy Reason = "ControlPlaneUnhealthy"
 
 	// D-3 / F-UKIBOOT (security review 2026-09-18, S-D3-9): the closed set of
 	// reasons internal/clusterconfigdir reports when it establishes (or finds
@@ -199,12 +212,15 @@ type BuildParams struct {
 	Err error
 	// Result carries attempt counts from the driver (S4).
 	Result reconcile.RunResult
-	// Degraded is D-2's signal: reconcile.Plan returned VerdictDegraded (the
-	// node is already Initialized or Joined but its kubelet is not healthy).
-	// Only consulted when Err is nil (a real failure already has its own
-	// phase/reason via the failure path below); forces PhaseDegraded instead
-	// of PhaseConverged so this is never silently reported as success.
-	Degraded bool
+	// Verdict is reconcile.Plan's member verdict. Any value for which
+	// Verdict.Degraded() is true (the node is already Initialized or Joined
+	// but not healthy: kubelet down, init unfinished, or control plane not
+	// serving) forces PhaseDegraded with the matching reason instead of
+	// PhaseConverged, so it is never silently reported as success. Only
+	// consulted when Err is nil (a real failure already has its own
+	// phase/reason via the failure path below). The zero value means no
+	// verdict was reached and is treated as reconcile.VerdictOK.
+	Verdict reconcile.Verdict
 	// Now is an RFC3339 timestamp for UpdatedAt. Inject in tests for
 	// determinism; in production callers pass time.Now().UTC().Format(time.RFC3339).
 	Now string
@@ -272,19 +288,17 @@ func BuildStatus(p BuildParams) Status {
 
 	// Normal reconcile path.
 	if p.Err == nil {
-		// D-2: an established member (Initialized/Joined) whose kubelet is not
-		// healthy must not report Converged/success, even though the reconcile
-		// action was (deliberately) ActionNone. Membership is left as the
-		// probed value (s.Membership, set above) -- no action ran, so there is
-		// no post-action membership to derive as the switch below does.
-		if p.Degraded {
+		// An established member (Initialized/Joined) that is not healthy must
+		// not report Converged/success, even though the reconcile action was
+		// (deliberately) ActionNone. Membership is left as the probed value
+		// (s.Membership, set above) -- no action ran, so there is no
+		// post-action membership to derive as the switch below does.
+		if p.Verdict != "" && p.Verdict.Degraded() {
 			s.Phase = PhaseDegraded
 			s.Outcome = OutcomeFailure
-			s.Reason = ReasonKubeletUnhealthy
 			s.Terminal = false
 			s.Budget = Budget{Attempts: 0, MaxAttempts: 0}
-			s.Message = sanitize("kubelet health check is failing on an already-" + s.Membership +
-				" node; recovery is an explicit reset, not automatic")
+			s.Reason, s.Message = degradedReason(p.Verdict, s.Membership)
 			return s
 		}
 		s.Phase = PhaseConverged
@@ -376,6 +390,33 @@ func MergeReportOnly(prev Status, existing bool, reason Reason, message, bootID,
 	s.BootID = bootID
 	s.Version = version
 	return s, true
+}
+
+// degradedReason maps a degraded member verdict to its closed Reason and a
+// fixed operator message. Each verdict has its own reason because each needs
+// a different response: a stopped kubelet is investigated on the node, an
+// unfinished init is reset and initialized again, and a control plane that
+// is not serving is investigated through its static pods.
+func degradedReason(v reconcile.Verdict, membership string) (Reason, string) {
+	switch v {
+	case reconcile.VerdictKubeletUnhealthy:
+		return ReasonKubeletUnhealthy, sanitize("kubelet health check is failing on an already-" + membership +
+			" node; recovery is an explicit reset, not automatic")
+	case reconcile.VerdictInitIncomplete:
+		// Deliberately not "reset": the same files are left by kubeadm's own
+		// procedure for a failed kubelet client-certificate rotation when its
+		// last step is skipped, on a perfectly healthy node, and a reset on
+		// the init node deletes the cluster's etcd data.
+		return ReasonInitIncomplete, "kubelet.conf still embeds its client certificate, so kubeadm init may not have finished " +
+			"on this node; check as docs/troubleshooting.md describes before any reset, which deletes this node's etcd data"
+	case reconcile.VerdictControlPlaneUnhealthy:
+		return ReasonControlPlaneUnhealthy, "the local kube-apiserver did not answer /healthz on this control-plane node, " +
+			"including after the boot grace period; the provider takes no automatic action"
+	default:
+		// Unreachable while Plan's verdict set is closed; kept so an unknown
+		// value can never be reported under a specific, wrong reason.
+		return ReasonKubeadmError, sanitize("degraded member with an unrecognized verdict " + string(v))
+	}
 }
 
 // deriveReason maps (action, error, result) to a CLOSED Reason constant. This
