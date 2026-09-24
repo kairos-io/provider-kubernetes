@@ -22,9 +22,13 @@ package e2e
 //   - nightly_ha_test.go       -- multi-control-plane stacked-etcd HA bring-up
 //     (ADR-11 keystone): a second control plane joins, 2 control-plane nodes, 2 etcd
 //     members.
-//   - nightly_upgrade_test.go  -- kubeadm-layer in-place minor upgrade (ADR-12): a
-//     real `kubeadm upgrade apply` flips a running cluster N -> N+1 in place (no
-//     A/B reboot; that hazard stays VM-only).
+//   - nightly_control_plane_test.go -- an initialized control plane whose own
+//     apiserver is not serving: reconcile waits out the 3 minute grace period,
+//     then reports Degraded/ControlPlaneUnhealthy, and Converged again once the
+//     apiserver is back.
+//
+// The in-place kubeadm-layer upgrade scenario was dropped from this tier; upgrades
+// are validated on the libvirt VM boundary (ADR-13-B1).
 //
 // This file contains no test functions; its presence under the nightly tag makes
 // the gating self-documenting and gives `go vet -tags "e2e nightly"` a stable

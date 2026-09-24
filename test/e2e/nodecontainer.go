@@ -49,6 +49,7 @@ const (
 	binChown      = "/usr/bin/chown"
 	binCp         = "/usr/bin/cp"
 	binCrictl     = "/usr/bin/crictl"
+	binDd         = "/usr/bin/dd"
 	binEnv        = "/usr/bin/env"
 	binFind       = "/usr/bin/find"
 	binJournalctl = "/usr/bin/journalctl"
@@ -62,7 +63,6 @@ const (
 	binStat       = "/usr/bin/stat"
 	binSystemdRun = "/usr/bin/systemd-run"
 	binTar        = "/usr/bin/tar"
-	binTee        = "/usr/bin/tee"
 	binTest       = "/usr/bin/test"
 	binUmount     = "/usr/bin/umount"
 )
@@ -339,10 +339,9 @@ func (nc *nodeContainer) ExecInput(stdin string, args ...string) (string, error)
 }
 
 // WriteFile writes content to path inside the container with mode (octal string,
-// e.g. "0600"). It uses `tee` over stdin (no shell, no interpolation of
-// content) then chmod, mirroring how the yip File stage materializes the
-// serialized Cluster at 0600. Failures stop t (not nc.t), so it is safe in a
-// subtest.
+// e.g. "0600"), via writeContent then chmod, mirroring how the yip File stage
+// materializes the serialized Cluster at 0600. Failures stop t (not nc.t), so
+// it is safe in a subtest.
 func (nc *nodeContainer) WriteFile(t *testing.T, path, content, mode string) {
 	t.Helper()
 	dir := path[:strings.LastIndex(path, "/")]
@@ -353,12 +352,21 @@ func (nc *nodeContainer) WriteFile(t *testing.T, path, content, mode string) {
 	if out, err := nc.execErr(binMkdir, "-p", dir); err != nil {
 		t.Fatalf("mkdir -p %s: %v\n%s", dir, err, out)
 	}
-	if out, err := nc.ExecInput(content, binTee, path); err != nil {
-		t.Fatalf("write %s: %v\n%s", path, err, out)
+	if stderr, err := nc.writeContent(path, content); err != nil {
+		t.Fatalf("write %s: %v\n%s", path, err, stderr)
 	}
 	if out, err := nc.execErr(binChmod, mode, path); err != nil {
 		t.Fatalf("chmod %s %s: %v\n%s", mode, path, err, out)
 	}
+}
+
+// writeContent writes content to path over stdin with `dd` (no shell, no
+// interpolation of content), and returns only what dd reports on failure.
+// Unlike `tee`, dd with status=none prints nothing on stdout, so the content,
+// which can be a cluster_token or a private key, never reaches an error
+// message or a CI log.
+func (nc *nodeContainer) writeContent(path, content string) (string, error) {
+	return nc.ExecInput(content, binDd, "of="+path, "status=none")
 }
 
 // ReadFile reads a file from inside the container.

@@ -197,6 +197,12 @@ func TestSingleNodeInitConverges(t *testing.T) {
 		t.Errorf("annotation outcome = %q, want success", got)
 	}
 
+	// 5b. What every later boot of this node reports: reconcile again on the
+	//     converged node, then on the state a failed init leaves behind, then
+	//     once more after restoring it (member_verdict.go). Here, before any
+	//     step restarts the kubelet or containerd, so the node is known healthy.
+	assertMemberVerdicts(t, nc, cluster)
+
 	// 6. F-ETCDCTL (ADR-12-A1) proof: the image's shipped /usr/bin/etcdctl, the
 	// provider's EXACT production argv/env (etcdsnapshot.SaveCommand -- the same
 	// builder the default save path uses), and kubeadm's real etcd PKI can
