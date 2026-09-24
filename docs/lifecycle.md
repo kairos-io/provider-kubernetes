@@ -7,17 +7,21 @@ The provider runs one bounded **reconcile** pass on each boot (from the
 
 1. Probe the node's authoritative state (membership from on-disk kubeadm
    artifacts under `cluster_root_path`, kubelet health, control-plane
-   reachability).
+   reachability, and on a control plane whether `kubeadm init` finished and
+   whether its own apiserver answers).
 2. Compute the actions needed to converge the declared `role` with that state.
 3. Execute them under a deadline with capped retries.
 
 If the node is already a converged, healthy member, the plan is empty and
 reconcile is a fast no-op. The provider does not re-bootstrap or re-join an
-already-converged node - including when that member's kubelet is unhealthy
-(masked, crashed, or every control-plane container exited): the action stays a
-no-op either way, but the status the node reports differs. A healthy member
-reports `phase: Converged`; an unhealthy one reports `phase: Degraded` so the
-outage is never silently hidden as a success. See [Node status](./status.md).
+existing member, healthy or not: the action stays a no-op either way, but the
+status the node reports differs. A healthy member reports `phase: Converged`.
+One whose kubelet is down, whose `kubeadm init` never finished, or whose
+control plane is not serving reports `phase: Degraded`, so the outage is never
+silently hidden as a success. On a control plane whose apiserver is not
+answering yet, for example because the static pods are still starting after a
+reboot, the pass waits up to 3 minutes for it before reporting. See
+[Node status](./status.md).
 
 ## Bounded, fail-loud, never hang
 

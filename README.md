@@ -65,7 +65,8 @@ starting point, notably:
   [`samples/trusted-boot/`](./samples/trusted-boot/).
 - **Machine-readable node status.** Every reconcile pass writes a closed-schema
   status document, and mirrors it to the node's own Node annotations once the
-  node is a member. A member whose kubelet healthz is failing reports
+  node is a member. A member that is not healthy (its kubelet is down, its
+  `kubeadm init` never finished, or its control plane is not serving) reports
   `phase: Degraded` rather than success. See [`docs/status.md`](./docs/status.md).
 - **Built on Hadron (musl).** Images are built on the Kairos **Hadron** minimal,
   musl-based immutable OS. containerd and kubelet are built static from pinned
