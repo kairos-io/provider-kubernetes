@@ -15,6 +15,7 @@ import (
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/action"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
+	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile"
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile/actualstate"
 	"github.com/kairos-io/provider-kubernetes/internal/status"
@@ -186,7 +187,7 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	// The probe is injectable via Options.CPReachableProbe for test isolation.
 	cpReachable := opts.CPReachableProbe
 	if cpReachable == nil {
-		cpReachable = makeCPReachableProbe(in.ControlPlaneEndpoint)
+		cpReachable = makeCPReachableProbe(joinDialEndpoint(role, in))
 	}
 
 	// ADR-12: an upgrade is intended only when the operator PINS kubernetesVersion
@@ -350,6 +351,21 @@ func containsUpgradeAction(actions []reconcile.Action) bool {
 		}
 	}
 	return false
+}
+
+// joinDialEndpoint returns the endpoint the reachability probe should dial, which
+// is the one kubeadm itself will dial. For a joining node that is the join-scoped
+// apiServerEndpoint when the operator set one; everywhere else it is the
+// cluster-wide controlPlaneEndpoint. Probing a different address than the join
+// uses would report a reachable control plane and then fail in kubeadm join.
+func joinDialEndpoint(role actualstate.Role, in kubeadmconfig.Input) string {
+	if role != actualstate.RoleWorker && role != actualstate.RoleControlPlane {
+		return in.ControlPlaneEndpoint
+	}
+	if in.JoinAPIServerEndpoint != "" {
+		return in.JoinAPIServerEndpoint
+	}
+	return in.ControlPlaneEndpoint
 }
 
 // makeCPReachableProbe returns a bounded TCP reachability probe for the given

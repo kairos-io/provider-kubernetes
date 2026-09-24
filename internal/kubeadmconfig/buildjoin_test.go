@@ -100,3 +100,37 @@ func TestBuildJoinConfigurationControlPlaneRequiresCertKey(t *testing.T) {
 		t.Fatal("expected error: control-plane join without certificate key")
 	}
 }
+
+// A join-scoped apiServerEndpoint must win over the cluster-wide
+// controlPlaneEndpoint: kubeadm's own key says which API server THIS node dials
+// to join, which is not always the endpoint the cluster advertises.
+func TestBuildJoinConfigurationPrefersJoinAPIServerEndpoint(t *testing.T) {
+	in := Input{
+		ControlPlaneEndpoint:  "192.168.1.10:6443",
+		JoinAPIServerEndpoint: "k8s-api.example.test:6443",
+		JoinToken:             "abcdef.0123456789abcdef",
+		CACertHashes:          []string{"sha256:deadbeef"},
+	}
+	j, err := BuildJoinConfiguration(in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := j.Discovery.BootstrapToken.APIServerEndpoint; got != "k8s-api.example.test:6443" {
+		t.Fatalf("apiServerEndpoint = %q, want the join-scoped endpoint", got)
+	}
+}
+
+func TestBuildJoinConfigurationFallsBackToControlPlaneEndpoint(t *testing.T) {
+	in := Input{
+		ControlPlaneEndpoint: "192.168.1.10:6443",
+		JoinToken:            "abcdef.0123456789abcdef",
+		CACertHashes:         []string{"sha256:deadbeef"},
+	}
+	j, err := BuildJoinConfiguration(in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := j.Discovery.BootstrapToken.APIServerEndpoint; got != "192.168.1.10:6443" {
+		t.Fatalf("apiServerEndpoint = %q, want the controlPlaneEndpoint fallback", got)
+	}
+}

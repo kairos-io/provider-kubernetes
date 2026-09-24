@@ -2,6 +2,9 @@ package provider
 
 import (
 	"testing"
+
+	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
+	"github.com/kairos-io/provider-kubernetes/internal/reconcile/actualstate"
 )
 
 // containsAll reports whether got contains all expected values.
@@ -273,5 +276,62 @@ joinConfiguration:
 	// Worker must use initConfiguration.localAPIEndpoint, not the CP join field.
 	if in.AdvertiseAddress != "10.0.0.6" {
 		t.Fatalf("worker must use initConfiguration.localAPIEndpoint, got %q", in.AdvertiseAddress)
+	}
+}
+
+// joinConfiguration.discovery.bootstrapToken.apiServerEndpoint is documented and
+// shipped in the samples, so BuildInput must carry it through instead of dropping it.
+func TestBuildInputCarriesJoinAPIServerEndpoint(t *testing.T) {
+	var uc UserConfig
+	uc.JoinConfiguration.Discovery.BootstrapToken.APIServerEndpoint = "k8s-api.example.test"
+
+	in, _, err := BuildInput(Context{ControlPlaneHost: "192.168.1.10", Role: "worker"}, uc, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if in.JoinAPIServerEndpoint != "k8s-api.example.test:6443" {
+		t.Fatalf("JoinAPIServerEndpoint = %q, want the port-normalized join endpoint", in.JoinAPIServerEndpoint)
+	}
+	if in.ControlPlaneEndpoint != "192.168.1.10:6443" {
+		t.Fatalf("ControlPlaneEndpoint = %q, want it left alone", in.ControlPlaneEndpoint)
+	}
+}
+
+func TestNormalizeJoinEndpoint(t *testing.T) {
+	cases := map[string]string{
+		"":                      "",
+		"  ":                    "",
+		"vip.example.test":      "vip.example.test:6443",
+		"vip.example.test:9443": "vip.example.test:9443",
+		"10.0.0.1":              "10.0.0.1:6443",
+		"::1":                   "[::1]:6443",
+		"[2001:db8::1]:6443":    "[2001:db8::1]:6443",
+	}
+	for in, want := range cases {
+		if got := normalizeJoinEndpoint(in); got != want {
+			t.Errorf("normalizeJoinEndpoint(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The reachability probe must dial the address kubeadm join will dial, otherwise
+// it reports a healthy control plane and the join then fails against a different one.
+func TestJoinDialEndpoint(t *testing.T) {
+	in := kubeadmconfig.Input{
+		ControlPlaneEndpoint:  "192.168.1.10:6443",
+		JoinAPIServerEndpoint: "k8s-api.example.test:6443",
+	}
+	if got := joinDialEndpoint(actualstate.RoleWorker, in); got != "k8s-api.example.test:6443" {
+		t.Errorf("worker probe target = %q, want the join endpoint", got)
+	}
+	if got := joinDialEndpoint(actualstate.RoleControlPlane, in); got != "k8s-api.example.test:6443" {
+		t.Errorf("controlplane probe target = %q, want the join endpoint", got)
+	}
+	if got := joinDialEndpoint(actualstate.RoleInit, in); got != "192.168.1.10:6443" {
+		t.Errorf("init probe target = %q, want the controlPlaneEndpoint", got)
+	}
+	in.JoinAPIServerEndpoint = ""
+	if got := joinDialEndpoint(actualstate.RoleWorker, in); got != "192.168.1.10:6443" {
+		t.Errorf("worker probe target without a join endpoint = %q, want the controlPlaneEndpoint", got)
 	}
 }
