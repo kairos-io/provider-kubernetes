@@ -56,7 +56,12 @@
 // ignore Failed. report()'s report-only branch reads whatever Status is
 // already on record (status.ReadLatest) and preserves it
 // (status.MergeReportOnly): Phase/Outcome/Membership/etc. pass through
-// unchanged, only Reason/Message/timestamp move.
+// unchanged, only Reason/Message/timestamp move -- and when the record
+// already carries a Reason, not even those move and nothing is written at
+// all. Passing them through on top of a recorded failure relabelled it: the
+// preserved Phase/Outcome/Terminal/Budget/LastAction described that failure
+// while Reason and Message named this finding, which is the same defect the
+// VM run caught, pointed the other way. See status.MergeReportOnly.
 //
 // Honest mode claim (S-D3-6, Q2 of the review): creating this directory
 // 0700 root:root buys exactly one thing -- on the boot where we create it,
@@ -328,7 +333,12 @@ func report(cluster clusterplugin.Cluster, rep Report) {
 
 	if !failurePhaseReasons[rep.Reason] {
 		prev, existing := statusReader()
-		statusSink.Record(sctx, status.MergeReportOnly(prev, existing, statusReason, msg, bootID, version.Version, now))
+		merged, record := status.MergeReportOnly(prev, existing, statusReason, msg, bootID, version.Version, now)
+		if !record {
+			logrus.Infof("provider-kubernetes: cluster-config-dir: leaving reason=%s on record; this finding stays in the log only", prev.Reason)
+			return
+		}
+		statusSink.Record(sctx, merged)
 		return
 	}
 

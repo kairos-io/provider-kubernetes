@@ -330,3 +330,60 @@ func TestWithholdReasonsAreExactlyAncestorDirAndTokenFileUnsafe(t *testing.T) {
 		}
 	}
 }
+
+// TestReportOnlyReasonsLeaveARecordedFailureAlone is the other half of
+// TestReportOnlyReasonsNeverSetFailurePhase. That test fixed a report-only
+// finding downgrading a CONVERGED record. A FAILED record needs the opposite
+// guarantee: the finding must not take over the failure's Reason and Message
+// while status.MergeReportOnly preserves its Phase, Outcome, Terminal, Budget
+// and LastAction, because the result claims a terminal failure of the
+// previous action under this finding's reason and drops the real one.
+//
+// This is the boot-after-a-failure case, not a corner: statusReader reads
+// /run (tmpfs, empty this early) before the persistent /var/log mirror, so
+// the previous boot's failure is what report() is handed.
+func TestReportOnlyReasonsLeaveARecordedFailureAlone(t *testing.T) {
+	prev := status.Status{
+		APIVersion: status.APIVersion,
+		Phase:      status.PhaseFailed,
+		Outcome:    status.OutcomeFailure,
+		Reason:     status.ReasonControlPlaneUnreachable,
+		Terminal:   true,
+		LastAction: "wait-for-control-plane",
+		Message:    "wait-for-control-plane: dial tcp 10.0.0.1:6443: i/o timeout",
+	}
+	reportOnly := []Reason{ReasonDirWritable, ReasonOverrideRejected, ReasonNotPersistent}
+	for _, r := range reportOnly {
+		t.Run(string(r), func(t *testing.T) {
+			sink := withFakeSink(t)
+			withFakeReader(t, prev, true)
+
+			report(clusterplugin.Cluster{}, Report{Reason: r})
+
+			if len(sink.calls) != 0 {
+				t.Fatalf("reason %q: wrote %d status record(s) over a recorded failure, want 0: %+v",
+					r, len(sink.calls), sink.calls)
+			}
+		})
+	}
+}
+
+// TestReportOnlyReasonsStillFillAnEmptyReason pins the behavior the guard
+// above must NOT break: a record that carries no Reason (Converged, or this
+// boot's own PhaseReconciling) still gets the finding attached.
+func TestReportOnlyReasonsStillFillAnEmptyReason(t *testing.T) {
+	sink := withFakeSink(t)
+	withFakeReader(t, status.Status{Phase: status.PhaseConverged, Outcome: status.OutcomeSuccess}, true)
+
+	report(clusterplugin.Cluster{}, Report{Reason: ReasonNotPersistent})
+
+	if len(sink.calls) != 1 {
+		t.Fatalf("expected exactly one status record, got %d", len(sink.calls))
+	}
+	if got := sink.calls[0].Reason; got != status.ReasonClusterConfigNotPersistent {
+		t.Fatalf("Reason = %q, want %q", got, status.ReasonClusterConfigNotPersistent)
+	}
+	if sink.calls[0].Phase != status.PhaseConverged {
+		t.Fatalf("Phase = %q, want the preserved %q", sink.calls[0].Phase, status.PhaseConverged)
+	}
+}

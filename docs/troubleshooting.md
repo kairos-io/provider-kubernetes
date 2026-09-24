@@ -98,6 +98,18 @@ These eight reasons split three ways:
   fine - which is corrected here: a diagnostic that downgrades a healthy node
   trains operators to ignore `Failed`, which is its own defect.)
 
+  For the same reason, a report-only finding is written to the status document
+  only when the document does not already carry a `reason`. If the status on
+  record is a failure - which on any boot after a failed one is the previous
+  boot's persistent mirror under `/var/log`, since `/run` is still empty this
+  early - the finding stays in the journal and the recorded `reason` stands.
+  Attaching it there would leave `phase`, `outcome`, `terminal`, `budget` and
+  `lastAction` describing the real failure while `reason` and `message` named
+  the diagnostic, so a cluster-config note would be reported as a terminal
+  failure of, say, `wait-for-control-plane`. Every finding is logged at error
+  level with a `cluster-config-dir:` prefix either way, so grep the boot log
+  for that prefix to see the ones the status document does not carry.
+
 This fix closes the specific missing-parent-directory defect; it is
 **not a security boundary** - see
 [Security model](./security.md#cluster-config-directory-creation-is-not-a-security-boundary-d-3--f-ukiboot)
