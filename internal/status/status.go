@@ -40,7 +40,8 @@ const (
 	// PhaseDegraded: the node is an already-established member (Initialized or
 	// Joined) but not healthy: its kubelet is down (D-2, the 2026-09-17 U2
 	// security sign-off), or, on a control plane, its `kubeadm init` never
-	// finished or its apiserver is not serving. The reason names which. The
+	// finished or its apiserver is not serving. The reason names which check
+	// failed. The
 	// reconcile action is still ActionNone --
 	// recovering an established member is a deliberate, explicit reset flow,
 	// never an automatic re-bootstrap -- so this is NOT a Failed/terminal
@@ -293,7 +294,7 @@ func BuildStatus(p BuildParams) Status {
 		// (deliberately) ActionNone. Membership is left as the probed value
 		// (s.Membership, set above) -- no action ran, so there is no
 		// post-action membership to derive as the switch below does.
-		if p.Verdict != "" && p.Verdict.Degraded() {
+		if p.Verdict.Degraded() {
 			s.Phase = PhaseDegraded
 			s.Outcome = OutcomeFailure
 			s.Terminal = false
@@ -395,8 +396,11 @@ func MergeReportOnly(prev Status, existing bool, reason Reason, message, bootID,
 // degradedReason maps a degraded member verdict to its closed Reason and a
 // fixed operator message. Each verdict has its own reason because each needs
 // a different response: a stopped kubelet is investigated on the node, an
-// unfinished init is reset and initialized again, and a control plane that
-// is not serving is investigated through its static pods.
+// apparently unfinished init is checked against the cluster before anyone
+// decides whether a reset is safe (a reset deletes the node's etcd data, and
+// a hand re-issued kubelet.conf leaves the same files on a healthy node), and
+// a control plane that is not serving is investigated through its static
+// pods.
 func degradedReason(v reconcile.Verdict, membership string) (Reason, string) {
 	switch v {
 	case reconcile.VerdictKubeletUnhealthy:

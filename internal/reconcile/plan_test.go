@@ -185,12 +185,12 @@ func TestPlanControlPlaneVerdicts(t *testing.T) {
 	}{
 		{name: "init finished, apiserver serving", state: initialized(false, true), want: VerdictOK},
 		{name: "init unfinished, apiserver serving", state: initialized(true, true), want: VerdictInitIncomplete},
-		// An unfinished init needs a reset whatever the apiserver does, so it
-		// is the verdict reported when both are true.
+		// An apparently unfinished init has to be checked against the cluster
+		// whatever the apiserver does, so it is reported when both are true.
 		{name: "init unfinished, apiserver down", state: initialized(true, false), want: VerdictInitIncomplete},
 		{name: "init finished, apiserver down", state: initialized(false, false), want: VerdictControlPlaneUnhealthy},
 		// A Joined node has no control plane of its own; neither signal is
-		// consulted for it (the prober never sets InitIncomplete for one).
+		// consulted for it (the prober sets neither for one).
 		{
 			name:  "joined node is judged on its kubelet only",
 			state: actualstate.State{Membership: actualstate.Joined, KubeletHealthy: true, InitIncomplete: true, APIServerReachable: false},
@@ -211,6 +211,23 @@ func TestPlanControlPlaneVerdicts(t *testing.T) {
 					t.Fatalf("Degraded() = %v for %q", verdict.Degraded(), verdict)
 				}
 			})
+		}
+	}
+}
+
+// TestVerdictDegraded: the zero value means no verdict was reached, which is
+// not a degraded member; only the three named verdicts are.
+func TestVerdictDegraded(t *testing.T) {
+	cases := map[Verdict]bool{
+		"":                           false,
+		VerdictOK:                    false,
+		VerdictKubeletUnhealthy:      true,
+		VerdictInitIncomplete:        true,
+		VerdictControlPlaneUnhealthy: true,
+	}
+	for v, want := range cases {
+		if got := v.Degraded(); got != want {
+			t.Errorf("Verdict(%q).Degraded() = %v, want %v", v, got, want)
 		}
 	}
 }

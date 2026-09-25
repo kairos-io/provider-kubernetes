@@ -66,8 +66,8 @@ type Verdict string
 // action for any of them -- recovering an established member stays an
 // explicit reset -- but the caller MUST NOT report them as a converged
 // success. They are checked in the order listed: a stopped kubelet explains
-// the other two, and an unfinished init needs a reset whatever the apiserver
-// is doing.
+// the other two, and an apparently unfinished init has to be checked against
+// the cluster whatever the apiserver is doing.
 const (
 	// VerdictOK: either the node is fully converged (a healthy established
 	// member) or Plan returned a real, forward-moving action (init/join/
@@ -92,9 +92,10 @@ const (
 )
 
 // Degraded reports whether the verdict is one the caller must surface as a
-// degraded member rather than as success.
+// degraded member rather than as success. The zero value means no verdict
+// was reached and is not degraded.
 func (v Verdict) Degraded() bool {
-	return v != VerdictOK
+	return v != "" && v != VerdictOK
 }
 
 // Plan is a pure function: given the desired role, the operator-pinned upgrade

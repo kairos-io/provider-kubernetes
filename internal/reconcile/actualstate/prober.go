@@ -34,7 +34,8 @@ type FileProber struct {
 	// "" (ADR-12 worker convergence signal). Injected for testability.
 	RunningKubeletVersion func(ctx context.Context) string
 	// APIServerReachable reports whether the LOCAL apiserver answers /healthz; nil
-	// yields false (ADR-12-R1: drives the kubelet-config repair decision). Injected.
+	// yields false (ADR-12-R1: drives the kubelet-config repair decision, and the
+	// member verdict). Consulted only for an Initialized node. Injected.
 	APIServerReachable func(ctx context.Context) bool
 }
 
@@ -58,7 +59,10 @@ func (p FileProber) Probe(ctx context.Context) (State, error) {
 	if p.RunningKubeletVersion != nil {
 		s.RunningKubeletVersion = p.RunningKubeletVersion(ctx)
 	}
-	if p.APIServerReachable != nil {
+	// Only a node that runs a control plane has a local apiserver to ask, and
+	// only an Initialized node's answer is ever read (the member verdict and
+	// the ADR-12-R1 repair decision), so nothing else pays for the probe.
+	if p.APIServerReachable != nil && s.Membership == Initialized {
 		s.APIServerReachable = p.APIServerReachable(ctx)
 	}
 	return s, nil
