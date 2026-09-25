@@ -75,21 +75,48 @@ version: v0.4.0
 | `KubeadmError` | A kubeadm action failed. |
 | `ConfigInvalid` | The supplied cluster config was invalid (e.g. empty/short `cluster_token`). |
 | `KubeletUnhealthy` | See `phase: Degraded` below. |
+| `InitIncomplete` | See `phase: Degraded` below. |
+| `ControlPlaneUnhealthy` | See `phase: Degraded` below. |
 | `ResetFailed` / `ResetOK` | The outcome of an `EventClusterReset`. |
 
 ### `phase: Degraded`
 
 The node is already a cluster member (`membership: initialized` or `joined`),
-but its kubelet is not healthy. **What is actually checked:** a plain HTTP GET
-of the kubelet's own loopback healthz endpoint,
-`http://127.0.0.1:10248/healthz` - the same endpoint kubeadm itself waits on
-before considering a kubelet up. Healthy is exactly an HTTP 200 response
-within 2 seconds; a dial error (including "connection refused", which is
-exactly what a masked or stopped kubelet looks like), a timeout, a non-200
-status, or an unreadable body are all "not healthy". This is a narrower
-signal than "the kubelet unit is running" or "every control-plane container is
-up" - it only asks the kubelet's own liveness endpoint, on this node, right
-now.
+but it is not healthy. Three checks run, in this order, and the first one that
+fails names the `reason`:
+
+1. **`KubeletUnhealthy`**, on every member. A plain HTTP GET of the kubelet's
+   own loopback healthz endpoint, `http://127.0.0.1:10248/healthz`, the same
+   endpoint kubeadm itself waits on before considering a kubelet up. Healthy is
+   exactly an HTTP 200 response within 2 seconds; a dial error (including
+   "connection refused", which is what a masked or stopped kubelet looks
+   like), a timeout, a non-200 status, or an unreadable body are all "not
+   healthy". A stopped kubelet also explains the other two checks failing, so
+   it is reported first.
+2. **`InitIncomplete`**, on a control plane (`membership: initialized`).
+   `kubeadm init` did not finish on this node. kubeadm writes `admin.conf`
+   before it waits for the control plane, so a failed init leaves a node that
+   looks initialized. This check reads two files and nothing else: the
+   `kubelet-finalize` phase of `kubeadm init` rewrites
+   `/etc/kubernetes/kubelet.conf` to reference the kubelet's rotated client
+   certificate instead of embedding one, and it does so whenever
+   `/var/lib/kubelet/pki/kubelet-client-current.pem` exists. An embedded
+   certificate next to that file means the phase never ran, so the phases
+   before it, which create the `kubeadm-config` ConfigMap, the bootstrap-token
+   RBAC and `cluster-info` that every join needs, may not have run either.
+   Without the rotated certificate (client certificate rotation disabled, or
+   a custom kubelet `--cert-dir`) the check cannot decide and reports nothing.
+3. **`ControlPlaneUnhealthy`**, on a control plane. The local kube-apiserver
+   does not answer `https://127.0.0.1:<bindPort>/healthz` with HTTP 200, where
+   `<bindPort>` is `localAPIEndpoint.bindPort` (6443 by default). After a
+   reboot the kubelet starts the static pods only once it is up itself, so the
+   apiserver is often still starting when reconcile runs. The provider
+   therefore polls it every 3 seconds for up to **3 minutes** before reporting
+   this; a healthy node answers well inside that, and one that already answers
+   is not polled at all.
+
+A node that joined as a worker (`membership: joined`) is judged on its kubelet
+alone.
 
 The provider deliberately does **not** re-run `kubeadm init`/`join` on its own:
 recovering an established member is an explicit operator action (see
@@ -99,6 +126,28 @@ this phase existed, this situation was silently reported as `phase: Converged`
 but `terminal` is `false`: a later boot, or an explicit reset, may still
 converge cleanly, so this is not treated as fatal anywhere else in the
 provider or its tests.
+
+The status is written by the reconcile pass, which runs once per boot. To
+re-evaluate it without a reboot, run the same pass again, but only once the
+boot's own pass has finished: nothing prevents two passes from running at the
+same time, and the boot's pass may still be initializing, joining or upgrading.
+The pass runs inside the boot stage `cos-setup-network.service`, which becomes
+active the moment the stage is over:
+
+```sh
+systemctl is-active cos-setup-network.service   # "active": finished; "activating": still running
+```
+
+Then:
+
+```sh
+sudo /system/providers/agent-provider-kubernetes reconcile --cluster-file=/run/provider-kubernetes/cluster.json
+```
+
+It is the same pass the boot runs. On a member it takes no action and only
+repeats the checks above, unless an upgrade is due: when
+`clusterConfiguration.kubernetesVersion` is pinned to a newer minor than this
+node runs, the pass performs the upgrade, exactly as a boot would.
 
 ## Layer 2 - Node annotations (when the node is a cluster member)
 
@@ -123,7 +172,10 @@ Notes:
   (`kubelet.conf`, the `system:node:<name>` identity, preferred over `admin.conf`).
   The provider creates **no** new RBAC, ServiceAccount, or token.
 - If the node is not a member, has no kubeconfig, or the API is unreachable, this
-  layer is silently skipped - Layer 1 still has the truth.
+  layer is silently skipped and the annotations keep whatever an earlier pass
+  wrote. That happens whenever a pass finishes before the apiserver is up, for
+  example on a control plane that reports `Degraded`, so an annotation can say
+  `Converged` from an earlier boot. Layer 1 always has the truth.
 
 ## How to use it
 
@@ -131,10 +183,11 @@ Notes:
   or, after a reboot, the `/var/log` mirror. `phase: Failed` + `reason` + `message`
   tells you what to fix; `terminal: true` means the next boot won't retry on its
   own.
-- A node reports `phase: Degraded`? It is already a cluster member but its
-  kubelet is not healthy right now. Check `journalctl -u kubelet` and
-  `crictl ps -a` first (see [Troubleshooting](./troubleshooting.md)); a reset is
-  the supported recovery path if the kubelet cannot be revived in place.
+- A node reports `phase: Degraded`? It is already a cluster member but not
+  healthy; `reason` names the check that failed. See
+  [Troubleshooting](./troubleshooting.md#status-reports-phase-degraded) for
+  what to look at for each reason. A reset is the supported recovery path when
+  the node cannot be repaired in place, and the only one for `InitIncomplete`.
 - Watching a fleet? Scrape the Node annotations with `kubectl`.
 
 See also [Lifecycle and reset](./lifecycle.md) and

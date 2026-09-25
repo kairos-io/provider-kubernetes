@@ -328,83 +328,118 @@ func TestBuildStatusConfigInvalidWithoutErrIsIgnored(t *testing.T) {
 	}
 }
 
-// TestBuildStatusDegraded is D-2: an established member (Initialized or
-// Joined) whose reconcile.Plan verdict was degraded must report
-// PhaseDegraded/OutcomeFailure/ReasonKubeletUnhealthy, non-terminal, and must
-// NEVER be reported as PhaseConverged.
+// TestBuildStatusDegraded: an established member (Initialized or Joined)
+// whose reconcile.Plan verdict is degraded must report PhaseDegraded and
+// OutcomeFailure with the reason for THAT verdict, non-terminal, and must
+// NEVER be reported as PhaseConverged. Each verdict has its own reason
+// because each needs a different response from the operator.
 func TestBuildStatusDegraded(t *testing.T) {
-	tests := []struct {
-		name       string
-		membership actualstate.Membership
+	verdicts := []struct {
+		verdict reconcile.Verdict
+		reason  Reason
 	}{
-		{name: "initialized member", membership: actualstate.Initialized},
-		{name: "joined member", membership: actualstate.Joined},
+		{verdict: reconcile.VerdictKubeletUnhealthy, reason: ReasonKubeletUnhealthy},
+		{verdict: reconcile.VerdictInitIncomplete, reason: ReasonInitIncomplete},
+		{verdict: reconcile.VerdictControlPlaneUnhealthy, reason: ReasonControlPlaneUnhealthy},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	memberships := []actualstate.Membership{actualstate.Initialized, actualstate.Joined}
+	for _, v := range verdicts {
+		for _, m := range memberships {
+			t.Run(string(v.verdict)+"/"+string(m), func(t *testing.T) {
+				p := baseParams()
+				p.Membership = m
+				p.LastAction = reconcile.ActionNone
+				p.Err = nil
+				p.Verdict = v.verdict
+
+				s := BuildStatus(p)
+
+				if s.Phase == PhaseConverged {
+					t.Fatalf("phase = %q, must never be Converged for verdict %q", s.Phase, v.verdict)
+				}
+				if s.Phase != PhaseDegraded {
+					t.Errorf("phase = %q, want Degraded", s.Phase)
+				}
+				if s.Outcome != OutcomeFailure {
+					t.Errorf("outcome = %q, want failure (a real problem, even though non-terminal)", s.Outcome)
+				}
+				if s.Reason != v.reason {
+					t.Errorf("reason = %q, want %q", s.Reason, v.reason)
+				}
+				if s.Message == "" || s.Message == "converged" {
+					t.Errorf("message = %q, want an explanation of the degraded state", s.Message)
+				}
+				if s.Terminal {
+					t.Error("degraded must be non-terminal: a later boot or an explicit reset may still converge")
+				}
+				if s.Membership != string(m) {
+					t.Errorf("membership = %q, want %q (probed value kept: no action ran)", s.Membership, m)
+				}
+				if s.Budget.Attempts != 0 || s.Budget.MaxAttempts != 0 {
+					t.Errorf("budget = %+v, want {0,0}", s.Budget)
+				}
+			})
+		}
+	}
+}
+
+// TestBuildStatusOKVerdictIsConverged is the converse of
+// TestBuildStatusDegraded: VerdictOK, and the zero value every caller that
+// reaches no verdict leaves in place, both report Converged.
+func TestBuildStatusOKVerdictIsConverged(t *testing.T) {
+	for _, v := range []reconcile.Verdict{reconcile.VerdictOK, ""} {
+		t.Run("verdict="+string(v), func(t *testing.T) {
 			p := baseParams()
-			p.Membership = tc.membership
+			p.Membership = actualstate.Initialized
 			p.LastAction = reconcile.ActionNone
 			p.Err = nil
-			p.Degraded = true
+			p.Verdict = v
 
 			s := BuildStatus(p)
-
-			if s.Phase == PhaseConverged {
-				t.Fatalf("phase = %q, must never be Converged when Degraded is set", s.Phase)
+			if s.Phase != PhaseConverged {
+				t.Errorf("phase = %q, want Converged", s.Phase)
 			}
-			if s.Phase != PhaseDegraded {
-				t.Errorf("phase = %q, want Degraded", s.Phase)
-			}
-			if s.Outcome != OutcomeFailure {
-				t.Errorf("outcome = %q, want failure (a real problem, even though non-terminal)", s.Outcome)
-			}
-			if s.Reason != ReasonKubeletUnhealthy {
-				t.Errorf("reason = %q, want KubeletUnhealthy", s.Reason)
-			}
-			if s.Terminal {
-				t.Error("degraded must be non-terminal: a later boot or an explicit reset may still converge")
-			}
-			if s.Membership != string(tc.membership) {
-				t.Errorf("membership = %q, want %q (probed value kept: no action ran)", s.Membership, tc.membership)
-			}
-			if s.Budget.Attempts != 0 || s.Budget.MaxAttempts != 0 {
-				t.Errorf("budget = %+v, want {0,0}", s.Budget)
+			if s.Reason != ReasonNone {
+				t.Errorf("reason = %q, want empty on success", s.Reason)
 			}
 		})
 	}
 }
 
-// TestBuildStatusDegradedFalseIsInertWithoutErr is the converse of
-// TestBuildStatusDegraded: Degraded defaults to false (its zero value), so
-// every existing success-path caller that does not set it is unaffected.
-func TestBuildStatusDegradedFalseIsInertWithoutErr(t *testing.T) {
+// TestBuildStatusUnknownVerdictNeverBorrowsASpecificReason: an unrecognized
+// degraded verdict still reports Degraded, but under the generic reason, not
+// under one that would send the operator after the wrong cause.
+func TestBuildStatusUnknownVerdictNeverBorrowsASpecificReason(t *testing.T) {
 	p := baseParams()
 	p.Membership = actualstate.Initialized
 	p.LastAction = reconcile.ActionNone
 	p.Err = nil
-	// p.Degraded left at its zero value (false).
+	p.Verdict = reconcile.Verdict("something-new")
 
 	s := BuildStatus(p)
-	if s.Phase != PhaseConverged {
-		t.Errorf("phase = %q, want Converged (Degraded defaults to false)", s.Phase)
+	if s.Phase != PhaseDegraded {
+		t.Errorf("phase = %q, want Degraded", s.Phase)
+	}
+	if s.Reason != ReasonKubeadmError {
+		t.Errorf("reason = %q, want KubeadmError", s.Reason)
 	}
 }
 
-// TestBuildStatusDegradedIgnoredWhenErrSet: Degraded must never override a
-// real failure's phase/reason -- it is only consulted on the Err == nil path.
+// TestBuildStatusDegradedIgnoredWhenErrSet: a degraded verdict must never
+// override a real failure's phase/reason -- it is only consulted on the
+// Err == nil path.
 func TestBuildStatusDegradedIgnoredWhenErrSet(t *testing.T) {
 	p := baseParams()
 	p.LastAction = reconcile.ActionRunJoin
 	p.Err = errors.New("connection refused")
-	p.Degraded = true // must be inert here
+	p.Verdict = reconcile.VerdictControlPlaneUnhealthy // must be inert here
 
 	s := BuildStatus(p)
 	if s.Phase != PhaseFailed {
-		t.Errorf("phase = %q, want Failed (Degraded must not mask a real error)", s.Phase)
+		t.Errorf("phase = %q, want Failed (a verdict must not mask a real error)", s.Phase)
 	}
 	if s.Reason != ReasonJoinTimeout {
-		t.Errorf("reason = %q, want JoinTimeout (deriveReason's normal mapping, untouched by Degraded)", s.Reason)
+		t.Errorf("reason = %q, want JoinTimeout (deriveReason's normal mapping, untouched by the verdict)", s.Reason)
 	}
 }
 

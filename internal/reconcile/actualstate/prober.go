@@ -15,6 +15,10 @@ import (
 //   - admin.conf present     -> Initialized (this node runs a control plane)
 //   - else kubelet.conf only -> Joined
 //   - else                   -> Uninitialized
+//
+// admin.conf is written by kubeadm's kubeconfig phase, before the control plane
+// is ever waited for, so Initialized alone does not mean init succeeded. For an
+// Initialized node the prober also reports InitIncomplete (kubeletconf.go).
 type FileProber struct {
 	// RootPath is the cluster root (ProviderOptions["cluster_root_path"], default "/").
 	RootPath string
@@ -30,13 +34,17 @@ type FileProber struct {
 	// "" (ADR-12 worker convergence signal). Injected for testability.
 	RunningKubeletVersion func(ctx context.Context) string
 	// APIServerReachable reports whether the LOCAL apiserver answers /healthz; nil
-	// yields false (ADR-12-R1: drives the kubelet-config repair decision). Injected.
+	// yields false (ADR-12-R1: drives the kubelet-config repair decision, and the
+	// member verdict). Consulted only for an Initialized node. Injected.
 	APIServerReachable func(ctx context.Context) bool
 }
 
 // Probe reads the node's actual state. It never mutates the node.
 func (p FileProber) Probe(ctx context.Context) (State, error) {
 	s := State{Membership: p.membership()}
+	if s.Membership == Initialized {
+		s.InitIncomplete = initIncomplete(p.RootPath)
+	}
 	if p.KubeletHealthy != nil {
 		s.KubeletHealthy = p.KubeletHealthy(ctx)
 	}
@@ -51,7 +59,10 @@ func (p FileProber) Probe(ctx context.Context) (State, error) {
 	if p.RunningKubeletVersion != nil {
 		s.RunningKubeletVersion = p.RunningKubeletVersion(ctx)
 	}
-	if p.APIServerReachable != nil {
+	// Only a node that runs a control plane has a local apiserver to ask, and
+	// only an Initialized node's answer is ever read (the member verdict and
+	// the ADR-12-R1 repair decision), so nothing else pays for the probe.
+	if p.APIServerReachable != nil && s.Membership == Initialized {
 		s.APIServerReachable = p.APIServerReachable(ctx)
 	}
 	return s, nil

@@ -25,7 +25,7 @@ func TestPlan(t *testing.T) {
 		{
 			name:        "init already converged is no-op",
 			desired:     actualstate.RoleInit,
-			state:       actualstate.State{Membership: actualstate.Initialized, KubeletHealthy: true},
+			state:       actualstate.State{Membership: actualstate.Initialized, KubeletHealthy: true, APIServerReachable: true},
 			want:        []Action{ActionNone},
 			wantVerdict: VerdictOK,
 		},
@@ -76,7 +76,9 @@ func TestPlan(t *testing.T) {
 // the healthy case (no automatic re-bootstrap: recovery is an explicit,
 // separate reset flow) but a DIFFERENT Verdict, so the status layer can tell
 // the two apart. Covers both the RoleInit/Initialized shape and the
-// RoleControlPlane+RoleWorker/Joined shape the security sign-off named.
+// RoleControlPlane+RoleWorker/Joined shape the security sign-off named. The
+// kubelet verdict wins even when the control-plane signals are also bad: a
+// stopped kubelet explains a down apiserver, not the other way round.
 func TestPlanDegradedVerdict(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -98,6 +100,11 @@ func TestPlanDegradedVerdict(t *testing.T) {
 			desired: actualstate.RoleWorker,
 			state:   actualstate.State{Membership: actualstate.Joined, KubeletHealthy: false},
 		},
+		{
+			name:    "controlplane role, initialized, unhealthy kubelet, control plane also down",
+			desired: actualstate.RoleControlPlane,
+			state:   actualstate.State{Membership: actualstate.Initialized, KubeletHealthy: false, InitIncomplete: true, APIServerReachable: false},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -105,8 +112,8 @@ func TestPlanDegradedVerdict(t *testing.T) {
 			if !reflect.DeepEqual(actions, []Action{ActionNone}) {
 				t.Fatalf("actions = %v, want [none] (the action must not change)", actions)
 			}
-			if verdict != VerdictDegraded {
-				t.Fatalf("verdict = %q, want degraded", verdict)
+			if verdict != VerdictKubeletUnhealthy {
+				t.Fatalf("verdict = %q, want %q", verdict, VerdictKubeletUnhealthy)
 			}
 		})
 	}
@@ -114,8 +121,9 @@ func TestPlanDegradedVerdict(t *testing.T) {
 
 // TestPlanHealthyVerdictNotDegraded is the converse of
 // TestPlanDegradedVerdict: the SAME already-established-member states, but
-// with a healthy kubelet, must report VerdictOK -- proving the distinction is
-// keyed on KubeletHealthy and not, say, always degraded or always ok.
+// with a healthy kubelet (and, on an Initialized node, a finished init and a
+// serving local apiserver), must report VerdictOK -- proving the distinction
+// is keyed on those signals and not, say, always degraded or always ok.
 func TestPlanHealthyVerdictNotDegraded(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -123,9 +131,14 @@ func TestPlanHealthyVerdictNotDegraded(t *testing.T) {
 		state   actualstate.State
 	}{
 		{
-			name:    "init role, initialized, healthy kubelet",
+			name:    "init role, initialized, healthy kubelet and control plane",
 			desired: actualstate.RoleInit,
-			state:   actualstate.State{Membership: actualstate.Initialized, KubeletHealthy: true},
+			state:   actualstate.State{Membership: actualstate.Initialized, KubeletHealthy: true, APIServerReachable: true},
+		},
+		{
+			name:    "controlplane role, initialized (a joined control plane), healthy",
+			desired: actualstate.RoleControlPlane,
+			state:   actualstate.State{Membership: actualstate.Initialized, KubeletHealthy: true, APIServerReachable: true},
 		},
 		{
 			name:    "controlplane role, joined, healthy kubelet",
@@ -148,6 +161,94 @@ func TestPlanHealthyVerdictNotDegraded(t *testing.T) {
 				t.Fatalf("verdict = %q, want ok", verdict)
 			}
 		})
+	}
+}
+
+// TestPlanControlPlaneVerdicts covers what a live kubelet cannot show on a
+// control plane. kubeadm writes admin.conf in its kubeconfig phase, long
+// before it waits for the control plane, so a failed init or control-plane
+// join leaves an Initialized node with a running kubelet; before these
+// verdicts that was reported as converged on every later boot.
+func TestPlanControlPlaneVerdicts(t *testing.T) {
+	initialized := func(initIncomplete, apiUp bool) actualstate.State {
+		return actualstate.State{
+			Membership:         actualstate.Initialized,
+			KubeletHealthy:     true,
+			InitIncomplete:     initIncomplete,
+			APIServerReachable: apiUp,
+		}
+	}
+	cases := []struct {
+		name  string
+		state actualstate.State
+		want  Verdict
+	}{
+		{name: "init finished, apiserver serving", state: initialized(false, true), want: VerdictOK},
+		{name: "init unfinished, apiserver serving", state: initialized(true, true), want: VerdictInitIncomplete},
+		// An apparently unfinished init has to be checked against the cluster
+		// whatever the apiserver does, so it is reported when both are true.
+		{name: "init unfinished, apiserver down", state: initialized(true, false), want: VerdictInitIncomplete},
+		{name: "init finished, apiserver down", state: initialized(false, false), want: VerdictControlPlaneUnhealthy},
+		// A Joined node has no control plane of its own; neither signal is
+		// consulted for it (the prober sets neither for one).
+		{
+			name:  "joined node is judged on its kubelet only",
+			state: actualstate.State{Membership: actualstate.Joined, KubeletHealthy: true, InitIncomplete: true, APIServerReachable: false},
+			want:  VerdictOK,
+		},
+	}
+	for _, desired := range []actualstate.Role{actualstate.RoleInit, actualstate.RoleControlPlane, actualstate.RoleWorker} {
+		for _, c := range cases {
+			t.Run(string(desired)+"/"+c.name, func(t *testing.T) {
+				actions, verdict := Plan(desired, "", c.state)
+				if !reflect.DeepEqual(actions, []Action{ActionNone}) {
+					t.Fatalf("actions = %v, want [none] (no automatic recovery)", actions)
+				}
+				if verdict != c.want {
+					t.Fatalf("verdict = %q, want %q", verdict, c.want)
+				}
+				if verdict.Degraded() != (c.want != VerdictOK) {
+					t.Fatalf("Degraded() = %v for %q", verdict.Degraded(), verdict)
+				}
+			})
+		}
+	}
+}
+
+// TestVerdictDegraded: the zero value means no verdict was reached, which is
+// not a degraded member; only the three named verdicts are.
+func TestVerdictDegraded(t *testing.T) {
+	cases := map[Verdict]bool{
+		"":                           false,
+		VerdictOK:                    false,
+		VerdictKubeletUnhealthy:      true,
+		VerdictInitIncomplete:        true,
+		VerdictControlPlaneUnhealthy: true,
+	}
+	for v, want := range cases {
+		if got := v.Degraded(); got != want {
+			t.Errorf("Verdict(%q).Degraded() = %v, want %v", v, got, want)
+		}
+	}
+}
+
+// TestPlanControlPlaneVerdictWithPinnedVersion covers the steady state of a
+// cluster that pins kubernetesVersion, as every sample does: a target is set
+// but this control plane already runs it, so planUpgrade hands the decision
+// back and the member verdicts must still apply.
+func TestPlanControlPlaneVerdictWithPinnedVersion(t *testing.T) {
+	s := actualstate.State{
+		Membership:           actualstate.Initialized,
+		KubeletHealthy:       true,
+		NodeComponentVersion: "v1.37.0",
+		APIServerReachable:   false,
+	}
+	actions, verdict := Plan(actualstate.RoleInit, "v1.37.0", s)
+	if !reflect.DeepEqual(actions, []Action{ActionNone}) {
+		t.Fatalf("actions = %v, want [none]", actions)
+	}
+	if verdict != VerdictControlPlaneUnhealthy {
+		t.Fatalf("verdict = %q, want %q", verdict, VerdictControlPlaneUnhealthy)
 	}
 }
 

@@ -44,6 +44,43 @@ func TestFileProberMembership(t *testing.T) {
 	}
 }
 
+// TestFileProberAPIServerProbeOnlyForInitialized: only an Initialized node
+// runs a control plane with a local apiserver to ask, so the probe is never
+// spent on an uninitialized node or a joined worker.
+func TestFileProberAPIServerProbeOnlyForInitialized(t *testing.T) {
+	tests := []struct {
+		name      string
+		files     []string
+		wantCalls int
+	}{
+		{name: "uninitialized", wantCalls: 0},
+		{name: "joined", files: []string{"etc/kubernetes/kubelet.conf"}, wantCalls: 0},
+		{name: "initialized", files: []string{"etc/kubernetes/admin.conf", "etc/kubernetes/kubelet.conf"}, wantCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, f := range tt.files {
+				writeFile(t, filepath.Join(root, f))
+			}
+			calls := 0
+			s, err := FileProber{
+				RootPath:           root,
+				APIServerReachable: func(context.Context) bool { calls++; return true },
+			}.Probe(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if calls != tt.wantCalls {
+				t.Fatalf("APIServerReachable called %d times, want %d", calls, tt.wantCalls)
+			}
+			if s.APIServerReachable != (tt.wantCalls == 1) {
+				t.Fatalf("APIServerReachable = %v for a %s node", s.APIServerReachable, tt.name)
+			}
+		})
+	}
+}
+
 func TestFileProberLivenessInjected(t *testing.T) {
 	root := t.TempDir()
 	p := FileProber{

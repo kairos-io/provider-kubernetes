@@ -149,23 +149,110 @@ Expected until you install a CNI. See [CNI](./cni.md).
 ### Status reports `phase: Degraded`
 
 The node is already a cluster member (`membership: initialized` or `joined`),
-but its kubelet failed a liveness check: a plain HTTP GET of
+but one of the health checks described in
+[Node status](./status.md#phase-degraded) failed, and `reason` says which. The
+provider does **not** automatically re-run `kubeadm init`/`join` in this
+state: recovering an established member is a deliberate operator action (an
+explicit reset), never an automatic re-bootstrap. `terminal: false` means a
+later boot may still converge on its own once the cause is gone. The status is
+re-evaluated only when reconcile runs again, on the next boot or by hand with
+the command in [Node status](./status.md#phase-degraded).
+
+#### `reason: KubeletUnhealthy`
+
+The kubelet failed a liveness check: a plain HTTP GET of
 `http://127.0.0.1:10248/healthz` on this node, expecting exactly HTTP 200
-within 2 seconds - the same endpoint kubeadm itself waits on. This is **not**
+within 2 seconds, the same endpoint kubeadm itself waits on. This is **not**
 "the kubelet systemd unit is running" or "every control-plane container is
 up"; it is specifically the kubelet's own healthz answer. A "connection
 refused" result (nothing listening) is exactly what a masked or stopped
 kubelet looks like and is reported the same way as a timeout or a non-200
-response - all of them mean "not healthy" here.
+response: all of them mean "not healthy" here. Check `journalctl -u kubelet`,
+`journalctl -u containerd`, and `crictl ps -a` to find out why before deciding
+whether to reset.
 
-The provider does **not** automatically re-run `kubeadm init`/`join` in this
-state: recovering an established member is a deliberate operator action (an
-explicit reset), never an automatic re-bootstrap. `reason: KubeletUnhealthy`
-names the signal; `terminal: false` means a later boot may still converge on
-its own once the kubelet is healthy again. Check `journalctl -u kubelet`,
-`journalctl -u containerd`, and `crictl ps -a` to find out WHY the kubelet's
-healthz is failing before deciding whether to reset. See
-[Node status](./status.md) and [Lifecycle and reset](./lifecycle.md).
+#### `reason: InitIncomplete`
+
+`/etc/kubernetes/kubelet.conf` still embeds its client certificate while the
+kubelet's rotated one exists. On the node that ran `kubeadm init`, that is what
+an init which stopped part way leaves behind: kubeadm's `kubelet-finalize`
+phase, which would have rewritten the file, never ran. The usual cause is a
+control plane that did not come up within kubeadm's own 4 minute wait on the
+first boot. The boot on which that happened reported `phase: Failed`, and
+kubeadm's error is in that boot's `/var/log/provider-kubernetes-reconcile.log`.
+
+The same files have other causes on a healthy node, so **check before you
+act**:
+
+- kubeadm's documented recovery for a failed kubelet client-certificate
+  rotation writes a new `kubelet.conf` with the certificate embedded; if its
+  last step, pointing the file back at the rotated certificate, was skipped,
+  this check reports the node;
+- client-certificate rotation enabled on a node that was initialized without
+  it.
+
+Ask the cluster whether the phases that matter ran. `admin.conf` is readable by
+root only, so run these with `sudo`: without it `kubectl` reports "permission
+denied" on the file, which says nothing about the cluster.
+
+```sh
+sudo kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-system get configmap kubeadm-config
+sudo kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-public get configmap cluster-info
+sudo kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-system get deployment coredns
+```
+
+**If all three exist**, the cluster itself is complete. Do not reset. Point
+`kubelet.conf` at the rotated certificate, as `kubelet-finalize` does: in the
+`users` entry, replace `client-certificate-data` and `client-key-data` with
+
+```yaml
+    client-certificate: /var/lib/kubelet/pki/kubelet-client-current.pem
+    client-key: /var/lib/kubelet/pki/kubelet-client-current.pem
+```
+
+then run `systemctl restart kubelet`. The next reconcile pass reports
+`Converged`.
+
+**If any of them is missing (`NotFound`) or refused by the apiserver
+(`Forbidden`)**, init stopped early and the cluster is incomplete: other nodes
+cannot join it. The provider does not repair this in place. Fix what made the
+first attempt fail, then reset the node's Kubernetes state and reboot it so it
+initializes again:
+
+```sh
+mount | grep ' on /var/lib/kubelet/'    # must print nothing: no volume mounted below it
+sudo /system/providers/agent-provider-kubernetes reset --cluster-file=/run/provider-kubernetes/cluster.json
+sudo reboot
+```
+
+The reset removes this node's etcd data and everything under
+`/var/lib/kubelet`, including the contents of any volume still mounted there,
+which is why the first line must print nothing. On the node that
+ran `kubeadm init` the etcd data is the cluster itself, so also make sure no
+other node joined it and nothing you need runs on it. On Kairos the command can
+exit 1 because `/etc/kubernetes` and `/var/lib/kubelet` are mount points that
+cannot themselves be removed; their contents are, and the node initializes
+again on the next boot.
+
+#### `reason: ControlPlaneUnhealthy`
+
+The kubelet is up and `kubeadm init` finished, but this node's kube-apiserver
+did not answer its `/healthz` within the 3 minute grace period. Look at the
+static pods the kubelet runs:
+
+```sh
+crictl ps -a --name 'kube-apiserver|etcd'
+crictl logs <container-id>
+journalctl -u kubelet
+```
+
+Common causes are an etcd that cannot start or has lost quorum (on a
+multi-control-plane cluster a majority of the control planes must be up),
+expired control-plane client certificates (the apiserver's certificate for
+etcd, for example), and a full disk. After a whole-cluster power cycle, the
+first control plane to boot can report this when the others take longer than
+the grace period to come back; once they are up, re-run reconcile by hand or
+let the next boot correct it.
 
 ### `role: init` refused: "a control plane already answers at ..."
 

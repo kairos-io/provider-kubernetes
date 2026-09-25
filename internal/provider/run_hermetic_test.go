@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 
@@ -21,12 +22,23 @@ const productionStatusSinkGuard = "provider tests: Run built the production stat
 // writes /run and /var/log on the host, and a NodeAnnotationSink that execs the
 // host's kubectl against whatever API server it can reach. The guard panics
 // before either is built, failing the offending test by name.
+//
+// It also shortens the control-plane grace period (controlplanehealth.go) for
+// the whole package, so a test that reaches the ControlPlaneUnhealthy path
+// without meaning to costs milliseconds, not three minutes. The production
+// values are kept for TestControlPlaneGraceProductionValues.
 func TestMain(m *testing.M) {
 	newDefaultStatusSink = func(string) (status.StatusSink, *status.NodeAnnotationSink) {
 		panic(productionStatusSinkGuard)
 	}
+	productionControlPlaneGrace, productionControlPlanePoll = controlPlaneGrace, controlPlanePoll
+	controlPlaneGrace, controlPlanePoll = 300*time.Millisecond, 10*time.Millisecond
 	os.Exit(m.Run())
 }
+
+// productionControlPlaneGrace and productionControlPlanePoll hold the
+// package's real values, captured by TestMain before it shortens them.
+var productionControlPlaneGrace, productionControlPlanePoll time.Duration
 
 // recordingSink is a hermetic StatusSink that keeps every recorded Status in
 // memory instead of writing to the host or the API server.
@@ -59,12 +71,12 @@ func (r *recordingSink) only(t *testing.T) status.Status {
 // defaults, so setting them below keeps a test hermetic. Tests override the
 // fields their path needs.
 //
-// KubeletHealthyProbe defaults to "healthy" here, NOT failIfCalled: unlike the
-// upgrade-only probes above, run.go wires it unconditionally (D-2 needs it on
-// the base, non-upgrade path too), and its nil production default
-// (kubeletHealthyProbe) makes a real loopback HTTP call -- exactly what this
-// helper exists to keep tests away from. Tests asserting D-2's degraded path
-// override this field explicitly.
+// KubeletHealthyProbe and APIServerReachableProbe default to "healthy" here,
+// NOT failIfCalled: unlike the upgrade-only probes above, run.go wires both
+// unconditionally (an established member's verdict needs them on the base,
+// non-upgrade path too), and their nil production defaults make real loopback
+// HTTP calls -- exactly what this helper exists to keep tests away from. Tests
+// asserting a degraded verdict override the field they need explicitly.
 func hermeticRunOptions(t *testing.T, runner kubeadm.Runner) (Options, *recordingSink) {
 	t.Helper()
 	sink := &recordingSink{}
@@ -79,7 +91,7 @@ func hermeticRunOptions(t *testing.T, runner kubeadm.Runner) (Options, *recordin
 			return failIfCalled[bool](t, "EncryptionConfirmed")(ctx)
 		},
 		KubeletRestart:          failIfCalled[error](t, "KubeletRestart"),
-		APIServerReachableProbe: failIfCalled[bool](t, "APIServerReachableProbe"),
+		APIServerReachableProbe: func(context.Context) bool { return true },
 		KubeletHealthyProbe:     func(context.Context) bool { return true },
 	}, sink
 }
