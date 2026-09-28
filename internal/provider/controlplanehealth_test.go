@@ -2,16 +2,20 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
+	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/status"
@@ -34,6 +38,22 @@ func (p *scriptedProbe) probe(context.Context) bool {
 		i = len(p.answers) - 1
 	}
 	return p.answers[i]
+}
+
+// answer adapts the probe to Options.InitFinishedProbe: the cluster always
+// answered.
+func (p *scriptedProbe) answer(ctx context.Context) (bool, error) {
+	return p.probe(ctx), nil
+}
+
+// captureLogs installs a fresh logrus test hook on the standard logger and
+// restores the previous hooks when the test ends.
+func captureLogs(t *testing.T) *logrustest.Hook {
+	t.Helper()
+	logger := logrus.StandardLogger()
+	saved := logger.ReplaceHooks(make(logrus.LevelHooks))
+	t.Cleanup(func() { logger.ReplaceHooks(saved) })
+	return logrustest.NewLocal(logger)
 }
 
 func (p *scriptedProbe) count() int {
@@ -270,4 +290,65 @@ func TestRunProductionAPIServerProbeDecidesTheVerdict(t *testing.T) {
 			t.Fatalf("recorded phase=%q reason=%q, want %q", got.Phase, got.Reason, status.ReasonControlPlaneUnhealthy)
 		}
 	})
+}
+
+// TestInitFinishedViaKubectl pins the production cluster check: it asks this
+// node's apiserver through admin.conf, verifying the serving certificate under
+// the name kubeadm always includes, names the resources with their API group,
+// and only an exact addon object name in stdout counts. A kubectl failure is
+// "could not ask", reported with the exit code and nothing else.
+func TestInitFinishedViaKubectl(t *testing.T) {
+	cases := []struct {
+		name    string
+		stdout  string
+		stderr  string
+		err     error
+		want    bool
+		wantErr string
+	}{
+		{name: "both addons", stdout: "deployment.apps/coredns\ndaemonset.apps/kube-proxy\n", want: true},
+		{name: "kube-proxy replaced, CoreDNS kept", stdout: "deployment.apps/coredns\n", want: true},
+		{name: "CoreDNS replaced, kube-proxy kept", stdout: "daemonset.apps/kube-proxy\n", want: true},
+		{name: "neither exists", stdout: "", want: false},
+		{name: "something else printed", stdout: "deployment.apps/coredns-custom\n", want: false},
+		{
+			name:    "kubectl failed: could not ask, exit code only",
+			stdout:  "deployment.apps/coredns\n",
+			stderr:  "error: You must be logged in to the server (Unauthorized) https://secret.example/proxy",
+			err:     errors.New("kubectl [--kubeconfig /root-x/etc/kubernetes/admin.conf ...] failed (exit 1): Unauthorized"),
+			wantErr: "kubectl exit 1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := &fakeRunner{respond: func([]string) (kubeadm.Result, error) {
+				res := kubeadm.Result{Stdout: tc.stdout, Stderr: tc.stderr}
+				if tc.err != nil {
+					res.ExitCode = 1
+				}
+				return res, tc.err
+			}}
+			got, err := initFinishedViaKubectl("/root-x", 6444, fr)(context.Background())
+			if got != tc.want {
+				t.Fatalf("initFinishedViaKubectl = %v, want %v", got, tc.want)
+			}
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr) {
+				t.Fatalf("error = %v, want exactly %q (no argv, no kubectl output)", err, tc.wantErr)
+			}
+			want := []string{
+				"--kubeconfig", "/root-x/etc/kubernetes/admin.conf",
+				"--server", "https://127.0.0.1:6444",
+				"--tls-server-name", "kubernetes",
+				"--request-timeout", "10s",
+				"-n", "kube-system", "get", "deployments.apps/coredns", "daemonsets.apps/kube-proxy",
+				"-o", "name", "--ignore-not-found",
+			}
+			if len(fr.calls) != 1 || !slices.Equal(fr.calls[0], want) {
+				t.Fatalf("kubectl argv = %v, want %v", fr.calls, want)
+			}
+		})
+	}
 }

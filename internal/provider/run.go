@@ -70,6 +70,15 @@ type Options struct {
 	// kubeadm itself waits on. Inject a fake in tests that need a healthy or
 	// degraded fixture without a real kubelet.
 	KubeletHealthyProbe func(ctx context.Context) bool
+
+	// InitFinishedProbe reports whether the cluster shows that this node's
+	// `kubeadm init` ran past kubelet-finalize (one of the addon phase's
+	// objects exists), or an error when the cluster could not be asked.
+	// Consulted only when the files say InitIncomplete and the local apiserver
+	// answers: kubeadm's own recovery for a failed kubelet client-certificate
+	// rotation leaves the same files on a healthy node. nil ->
+	// initFinishedViaKubectl (controlplanehealth.go).
+	InitFinishedProbe func(ctx context.Context) (bool, error)
 }
 
 // Options also carries an injectable StatusSink for testing; nil -> production
@@ -243,20 +252,46 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		return err
 	}
 	actions, verdict := reconcile.Plan(role, target, state)
-	if verdict == reconcile.VerdictControlPlaneUnhealthy {
-		// After a reboot the kubelet starts the static pods only once it is up
-		// itself, so a healthy control plane's apiserver is often still coming
-		// up while this pass runs. Give it a bounded grace period before
-		// reporting it, and re-plan on what is then observed.
-		logrus.Infof("provider-kubernetes: the local apiserver is not answering /healthz yet; waiting up to %s before reporting it", controlPlaneGrace)
-		if awaitLocalAPIServer(ctx, prober.APIServerReachable, controlPlaneGrace, controlPlanePoll) {
-			logrus.Info("provider-kubernetes: the local apiserver is answering /healthz")
-			state.APIServerReachable = true
-			finalState = state
-			actions, verdict = reconcile.Plan(role, target, state)
-		} else {
-			logrus.Warnf("provider-kubernetes: the local apiserver did not answer /healthz within %s", controlPlaneGrace)
+	if verdict == reconcile.VerdictControlPlaneUnhealthy || verdict == reconcile.VerdictInitIncomplete {
+		// Both verdicts are settled against the local apiserver. After a reboot
+		// the kubelet starts the static pods only once it is up itself, so a
+		// healthy control plane's apiserver is often still coming up while this
+		// pass runs: give it a bounded grace period before reporting it.
+		if !state.APIServerReachable {
+			logrus.Infof("provider-kubernetes: the local apiserver is not answering /healthz yet; waiting up to %s before reporting it", controlPlaneGrace)
+			if awaitLocalAPIServer(ctx, prober.APIServerReachable, controlPlaneGrace, controlPlanePoll) {
+				logrus.Info("provider-kubernetes: the local apiserver is answering /healthz")
+				state.APIServerReachable = true
+			} else {
+				logrus.Warnf("provider-kubernetes: the local apiserver did not answer /healthz within %s", controlPlaneGrace)
+			}
 		}
+		// The files behind InitIncomplete are also what kubeadm's documented
+		// recovery for a failed kubelet client-certificate rotation leaves on a
+		// node whose init finished long ago. Ask the cluster before reporting it.
+		if state.InitIncomplete && state.APIServerReachable {
+			initFinished := opts.InitFinishedProbe
+			if initFinished == nil {
+				initFinished = initFinishedViaKubectl(pctx.RootPath, in.BindPort, kubeadm.KubectlRunner())
+			}
+			finished, err := initFinished(ctx)
+			switch {
+			case err != nil:
+				// Not evidence either way (for example admin.conf's certificate
+				// expired): say only that the question went unanswered.
+				logrus.Warnf("provider-kubernetes: kubelet.conf still embeds its client certificate, and the cluster "+
+					"could not be asked whether kubeadm init finished (%v); reporting InitIncomplete unconfirmed", err)
+			case finished:
+				logrus.Info("provider-kubernetes: kubelet.conf still embeds its client certificate, but the cluster has the objects " +
+					"kubeadm init's addon phase creates, so init finished and kubelet.conf was re-issued later")
+				state.InitIncomplete = false
+			default:
+				logrus.Warn("provider-kubernetes: kubelet.conf still embeds its client certificate and the cluster shows no " +
+					"CoreDNS or kube-proxy addon: kubeadm init did not finish on this node")
+			}
+		}
+		finalState = state
+		actions, verdict = reconcile.Plan(role, target, state)
 	}
 	finalVerdict = verdict
 

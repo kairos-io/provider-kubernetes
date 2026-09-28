@@ -25,6 +25,17 @@ func TestLocalAPIHealthzURL(t *testing.T) {
 
 // The host is a loopback literal, never a name, so DNS cannot redirect the
 // probe off the node.
+func TestLocalAPIServerURL(t *testing.T) {
+	for port, want := range map[int32]string{0: "https://127.0.0.1:6443", 6444: "https://127.0.0.1:6444"} {
+		if got := LocalAPIServerURL(port); got != want {
+			t.Fatalf("LocalAPIServerURL(%d) = %q, want %q", port, got, want)
+		}
+		if got := LocalAPIHealthzURL(port); got != want+"/healthz" {
+			t.Fatalf("LocalAPIHealthzURL(%d) = %q, want the server URL plus /healthz", port, got)
+		}
+	}
+}
+
 func TestLocalAPIHealthzURL_IsLoopbackLiteral(t *testing.T) {
 	if got := LocalAPIHealthzURL(6444); got[:len("https://127.0.0.1:")] != "https://127.0.0.1:" {
 		t.Fatalf("probe target is not a loopback literal: %q", got)

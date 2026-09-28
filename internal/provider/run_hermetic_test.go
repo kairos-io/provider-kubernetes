@@ -93,6 +93,9 @@ func hermeticRunOptions(t *testing.T, runner kubeadm.Runner) (Options, *recordin
 		KubeletRestart:          failIfCalled[error](t, "KubeletRestart"),
 		APIServerReachableProbe: func(context.Context) bool { return true },
 		KubeletHealthyProbe:     func(context.Context) bool { return true },
+		InitFinishedProbe: func(ctx context.Context) (bool, error) {
+			return failIfCalled[bool](t, "InitFinishedProbe")(ctx), nil
+		},
 	}, sink
 }
 

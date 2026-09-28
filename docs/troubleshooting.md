@@ -181,15 +181,16 @@ control plane that did not come up within kubeadm's own 4 minute wait on the
 first boot. The boot on which that happened reported `phase: Failed`, and
 kubeadm's error is in that boot's `/var/log/provider-kubernetes-reconcile.log`.
 
-The same files have other causes on a healthy node, so **check before you
-act**:
-
-- kubeadm's documented recovery for a failed kubelet client-certificate
-  rotation writes a new `kubelet.conf` with the certificate embedded; if its
-  last step, pointing the file back at the rotated certificate, was skipped,
-  this check reports the node;
-- client-certificate rotation enabled on a node that was initialized without
-  it.
+The same files have other causes on a healthy node: kubeadm's documented
+recovery for a failed kubelet client-certificate rotation writes a new
+`kubelet.conf` with the certificate embedded, and its last step, pointing the
+file back at the rotated certificate, is easy to skip. The provider settles
+that itself when it can: it reports `InitIncomplete` only after this node's
+apiserver answered and showed neither the CoreDNS Deployment nor the
+kube-proxy DaemonSet, which `kubeadm init` creates in its last phase. So the
+finding is reliable when the apiserver is up. It stays unconfirmed when the
+apiserver never answered, when both addons were removed on purpose, or when
+`admin.conf` was refused, so **check before you act**.
 
 Ask the cluster whether the phases that matter ran. `admin.conf` is readable by
 root only, so run these with `sudo`: without it `kubectl` reports "permission

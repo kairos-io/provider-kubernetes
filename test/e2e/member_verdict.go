@@ -15,9 +15,12 @@ package e2e
 //	(b) a second reconcile on the healthy node takes no action, reports
 //	    Converged, and does not wait for an apiserver that is already serving.
 //	(c) with kubelet.conf put back in the form kubeadm writes before
-//	    kubelet-finalize, reconcile takes no action and reports
-//	    Degraded/InitIncomplete, promptly: a verdict decided from files never
-//	    waits out the apiserver grace period.
+//	    kubelet-finalize, while the addon phase's objects exist: Converged. That
+//	    is kubeadm's own recovery for a failed kubelet client-certificate
+//	    rotation with its last step skipped, and the cluster check dismisses it;
+//	(c2) the same kubelet.conf with CoreDNS and kube-proxy removed, which is
+//	    what an init that stopped before kubelet-finalize leaves: Degraded/
+//	    InitIncomplete, promptly, with no action taken. The objects are restored;
 //	(d) with the finalized file restored, Converged again.
 //
 // Neither kubelet.conf nor the rotated certificate file is ever printed: the
@@ -25,11 +28,14 @@ package e2e
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
+
+	"github.com/kairos-io/provider-kubernetes/internal/hostexec"
 )
 
 const (
@@ -92,16 +98,33 @@ func assertMemberVerdicts(t *testing.T, nc *nodeContainer, cluster clusterplugin
 	})
 	nc.WriteFile(t, kubeletConfPath, unfinalized, "0600")
 
-	st, out, _ = reconcileAgain(t, nc, cluster, "unfinalized kubelet.conf")
+	// (c) With every addon still in place this is kubeadm's documented
+	// recovery for a failed kubelet client-certificate rotation with its last
+	// step skipped, on a cluster whose init finished: the cluster check must
+	// dismiss what the files alone suggest.
+	st, out, _ = reconcileAgain(t, nc, cluster, "re-issued kubelet.conf, addons present")
+	if st.Phase != "Converged" || st.Reason != "" {
+		t.Fatalf("re-issued kubelet.conf on a finished init: phase=%q reason=%q, want Converged\n%s", st.Phase, st.Reason, out)
+	}
+	if !strings.Contains(out, "kubelet.conf was re-issued later") {
+		t.Errorf("the pass did not report that the cluster check dismissed the finding:\n%s", out)
+	}
+
+	// (c2) Without the addon phase's objects, the cluster confirms what the
+	// files say: the state an init that stopped before kubelet-finalize
+	// leaves. The objects are put back right after.
+	restoreAddons := removeAddons(t, nc)
+	st, out, _ = reconcileAgain(t, nc, cluster, "unfinalized kubelet.conf, no addons")
 	if st.Phase != "Degraded" || st.Reason != "InitIncomplete" {
-		t.Fatalf("reconcile with an unfinalized kubelet.conf: phase=%q reason=%q, want Degraded/InitIncomplete\n%s", st.Phase, st.Reason, out)
+		t.Fatalf("reconcile with an unfinalized kubelet.conf and no addons: phase=%q reason=%q, want Degraded/InitIncomplete\n%s", st.Phase, st.Reason, out)
 	}
 	if st.Terminal || st.Outcome != "failure" {
 		t.Errorf("InitIncomplete: terminal=%t outcome=%q, want a non-terminal failure", st.Terminal, st.Outcome)
 	}
 	if strings.Contains(out, "waiting up to") {
-		t.Errorf("InitIncomplete is decided from files, but the pass waited for the apiserver:\n%s", out)
+		t.Errorf("the apiserver was serving, but the pass waited for it:\n%s", out)
 	}
+	restoreAddons()
 
 	// (d) back to the file kubeadm left.
 	nc.WriteFile(t, kubeletConfPath, finalized, "0600")
@@ -132,4 +155,55 @@ func reconcileAgain(t *testing.T, nc *nodeContainer, cluster clusterplugin.Clust
 	st := readStatus(t, nc)
 	t.Logf("member verdict (%s): phase=%q reason=%q after %s", what, st.Phase, st.Reason, elapsed.Round(time.Millisecond))
 	return st, out, elapsed
+}
+
+// removeAddons deletes the objects kubeadm init's addon phase creates (the
+// CoreDNS Deployment and the kube-proxy DaemonSet) and returns a function that
+// creates them again from what the apiserver held. A cleanup restores them if
+// the test stops in between.
+func removeAddons(t *testing.T, nc *nodeContainer) func() {
+	t.Helper()
+	// Read through the helper that keeps stdout apart: the kube-proxy
+	// DaemonSet carries the proxy variables kubeadm copies from the host,
+	// which can hold credentials, so a failure prints stderr only.
+	saved, stderr, err := nc.ExecStdoutTimeout(dockerTimeout, hostexec.KubectlPath, "--kubeconfig", adminConf,
+		"-n", "kube-system", "get", "deployments.apps/coredns", "daemonsets.apps/kube-proxy", "-o", "json")
+	if err != nil {
+		t.Fatalf("read the addon objects: %v\n%s", err, stderr)
+	}
+	var list map[string]any
+	if err := json.Unmarshal([]byte(saved), &list); err != nil {
+		t.Fatalf("parse the saved addon objects: %v", err)
+	}
+	items, _ := list["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("expected the CoreDNS Deployment and the kube-proxy DaemonSet, got %d objects", len(items))
+	}
+	for _, it := range items {
+		obj, _ := it.(map[string]any)
+		delete(obj, "status")
+		if md, ok := obj["metadata"].(map[string]any); ok {
+			for _, k := range []string{"resourceVersion", "uid", "creationTimestamp", "generation", "managedFields", "selfLink"} {
+				delete(md, k)
+			}
+		}
+	}
+	manifest, err := json.Marshal(list)
+	if err != nil {
+		t.Fatalf("re-encode the saved addon objects: %v", err)
+	}
+	kubectl(t, nc, "-n", "kube-system", "delete", "deployments.apps/coredns", "daemonsets.apps/kube-proxy", "--wait=true", "--timeout=60s")
+
+	done := false
+	restore := func() {
+		if done {
+			return
+		}
+		done = true
+		if out, err := nc.ExecInput(string(manifest), hostexec.KubectlPath, "--kubeconfig", adminConf, "create", "-f", "-"); err != nil {
+			t.Errorf("restore the addon objects: %v\n%s", err, out)
+		}
+	}
+	t.Cleanup(restore)
+	return restore
 }

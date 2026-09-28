@@ -106,6 +106,14 @@ fails names the `reason`:
    RBAC and `cluster-info` that every join needs, may not have run either.
    Without the rotated certificate (client certificate rotation disabled, or
    a custom kubelet `--cert-dir`) the check cannot decide and reports nothing.
+   The same files are left on a healthy node by kubeadm's own recovery for a
+   failed kubelet client-certificate rotation when its last step is skipped,
+   so before reporting, the provider asks this node's apiserver (using
+   `admin.conf`, waiting for it as in check 3) whether the CoreDNS Deployment
+   or the kube-proxy DaemonSet exists. Those come from `kubeadm init`'s addon
+   phase, the only one after `kubelet-finalize` that leaves anything behind: if
+   either exists, init finished and nothing is reported. The finding stands
+   when neither exists, or when the apiserver cannot be asked.
 3. **`ControlPlaneUnhealthy`**, on a control plane. The local kube-apiserver
    does not answer `https://127.0.0.1:<bindPort>/healthz` with HTTP 200, where
    `<bindPort>` is `localAPIEndpoint.bindPort` (6443 by default). After a
