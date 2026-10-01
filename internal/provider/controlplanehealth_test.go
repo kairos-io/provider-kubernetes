@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -132,6 +133,22 @@ func TestAwaitLocalAPIServer(t *testing.T) {
 			t.Fatal("want false once the caller's context is done")
 		}
 	})
+	t.Run("no attempt once the context is done, even when a tick is ready too", func(t *testing.T) {
+		// With a 1ns tick and an already-canceled context, both select cases
+		// are ready on most iterations and Go picks one at random; only the
+		// check after the tick keeps the probe from running.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		p := &scriptedProbe{answers: []bool{true}}
+		for range 200 {
+			if awaitLocalAPIServer(ctx, p.probe, time.Minute, time.Nanosecond) {
+				t.Fatal("want false once the caller's context is done")
+			}
+		}
+		if p.count() != 0 {
+			t.Fatalf("probe ran %d times on a context that was already done", p.count())
+		}
+	})
 	t.Run("each attempt carries the grace deadline", func(t *testing.T) {
 		grace := time.Minute
 		var deadline time.Time
@@ -196,6 +213,34 @@ func TestRunControlPlaneThatComesUpDuringGraceConverges(t *testing.T) {
 	}
 	if api.count() != 3 {
 		t.Fatalf("apiserver probed %d times, want 3 (stop polling once it answers)", api.count())
+	}
+}
+
+// TestRunCallerDeadlineShorterThanGrace: production runs the pass without a
+// deadline of its own, so only the grace ends the wait. A caller that does set
+// a shorter one is told which limit ended it, and the node is still reported
+// Degraded, not as a failed pass.
+func TestRunCallerDeadlineShorterThanGrace(t *testing.T) {
+	hook := captureLogs(t)
+	_, cluster := initializedControlPlane(t, "")
+	opts, sink := hermeticRunOptions(t, versionOnlyRunner())
+	opts.APIServerReachableProbe = func(context.Context) bool { return false }
+	ctx, cancel := context.WithTimeout(context.Background(), controlPlaneGrace/6)
+	defer cancel()
+
+	err := Run(ctx, cluster, opts)
+	got := sink.only(t)
+	t.Logf("Run returned %v; recorded phase=%q reason=%q", err, got.Phase, got.Reason)
+	if got.Phase != status.PhaseDegraded || got.Reason != status.ReasonControlPlaneUnhealthy {
+		t.Fatalf("recorded phase=%q reason=%q, want %q/%q", got.Phase, got.Reason, status.PhaseDegraded, status.ReasonControlPlaneUnhealthy)
+	}
+	var cutShort, claimedGrace bool
+	for _, e := range hook.AllEntries() {
+		cutShort = cutShort || strings.Contains(e.Message, "cut short by the pass's own deadline")
+		claimedGrace = claimedGrace || strings.Contains(e.Message, "did not answer /healthz within")
+	}
+	if !cutShort || claimedGrace {
+		t.Fatalf("log names the wrong limit: cut short=%t, claimed the full grace=%t", cutShort, claimedGrace)
 	}
 }
 

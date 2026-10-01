@@ -99,8 +99,10 @@ fails names the `reason`:
    looks initialized. This check reads two files and nothing else: the
    `kubelet-finalize` phase of `kubeadm init` rewrites
    `/etc/kubernetes/kubelet.conf` to reference the kubelet's rotated client
-   certificate instead of embedding one, and it does so whenever
-   `/var/lib/kubelet/pki/kubelet-client-current.pem` exists. An embedded
+   certificate instead of embedding one, and only when
+   `/var/lib/kubelet/pki/kubelet-client-current.pem` exists (the kubelet
+   writes that file as soon as it starts, before init waits for the control
+   plane). An embedded
    certificate next to that file means the phase never ran, so the phases
    before it, which create the `kubeadm-config` ConfigMap, the bootstrap-token
    RBAC and `cluster-info` that every join needs, may not have run either.
@@ -195,7 +197,8 @@ Notes:
   healthy; `reason` names the check that failed. See
   [Troubleshooting](./troubleshooting.md#status-reports-phase-degraded) for
   what to look at for each reason. A reset is the supported recovery path when
-  the node cannot be repaired in place, and the only one for `InitIncomplete`.
+  the node cannot be repaired in place, and the only one for an `InitIncomplete`
+  node whose cluster never became joinable.
 - Watching a fleet? Scrape the Node annotations with `kubectl`.
 
 See also [Lifecycle and reset](./lifecycle.md) and

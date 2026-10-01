@@ -41,11 +41,10 @@ const (
 	// Joined) but not healthy: its kubelet is down (D-2, the 2026-09-17 U2
 	// security sign-off), or, on a control plane, its `kubeadm init` never
 	// finished or its apiserver is not serving. The reason names which check
-	// failed. The
-	// reconcile action is still ActionNone --
-	// recovering an established member is a deliberate, explicit reset flow,
-	// never an automatic re-bootstrap -- so this is NOT a Failed/terminal
-	// phase: the next boot (or an operator reset) may still converge cleanly.
+	// failed. The reconcile action is still ActionNone -- recovering an
+	// established member is a deliberate, explicit reset flow, never an
+	// automatic re-bootstrap -- so this is NOT a Failed/terminal phase: the
+	// next boot (or an operator reset) may still converge cleanly.
 	// It exists so that fact is never silently reported as Converged, which
 	// would hide a real outage (e.g. every control-plane container exited).
 	PhaseDegraded Phase = "Degraded"

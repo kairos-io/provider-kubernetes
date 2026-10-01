@@ -35,7 +35,8 @@ type FileProber struct {
 	RunningKubeletVersion func(ctx context.Context) string
 	// APIServerReachable reports whether the LOCAL apiserver answers /healthz; nil
 	// yields false (ADR-12-R1: drives the kubelet-config repair decision, and the
-	// member verdict). Consulted only for an Initialized node. Injected.
+	// member verdict). Consulted only on a node that runs a control plane
+	// (Initialized, or a kube-apiserver manifest present). Injected.
 	APIServerReachable func(ctx context.Context) bool
 }
 
@@ -59,10 +60,12 @@ func (p FileProber) Probe(ctx context.Context) (State, error) {
 	if p.RunningKubeletVersion != nil {
 		s.RunningKubeletVersion = p.RunningKubeletVersion(ctx)
 	}
-	// Only a node that runs a control plane has a local apiserver to ask, and
-	// only an Initialized node's answer is ever read (the member verdict and
-	// the ADR-12-R1 repair decision), so nothing else pays for the probe.
-	if p.APIServerReachable != nil && s.Membership == Initialized {
+	// Only a node that runs a control plane has a local apiserver to ask:
+	// one that is Initialized, whose answer feeds the member verdict, or one
+	// with a kube-apiserver static-pod manifest, whose answer the ADR-12-R1
+	// repair decision reads even without admin.conf. An uninitialized node or
+	// a plain worker never pays for the probe.
+	if p.APIServerReachable != nil && (s.Membership == Initialized || s.NodeComponentVersion != "") {
 		s.APIServerReachable = p.APIServerReachable(ctx)
 	}
 	return s, nil

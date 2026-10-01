@@ -40,7 +40,9 @@ var controlPlanePoll = 3 * time.Second
 // healthy, grace has elapsed, or ctx is done, and reports whether it saw the
 // apiserver healthy. The caller has just seen it down, so the first attempt
 // waits one interval. Every probe call carries the bounded context, so a
-// stalled attempt cannot outlive the grace period.
+// stalled attempt cannot outlive the grace period, and no attempt starts once
+// that context is done: when a tick and the deadline are ready together, the
+// select may pick either.
 func awaitLocalAPIServer(ctx context.Context, probe func(context.Context) bool, grace, poll time.Duration) bool {
 	if probe == nil {
 		return false
@@ -54,6 +56,9 @@ func awaitLocalAPIServer(ctx context.Context, probe func(context.Context) bool, 
 		case <-ctx.Done():
 			return false
 		case <-ticker.C:
+		}
+		if ctx.Err() != nil {
+			return false
 		}
 		if probe(ctx) {
 			return true

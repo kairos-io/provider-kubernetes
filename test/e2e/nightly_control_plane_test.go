@@ -32,8 +32,9 @@ import (
 
 const (
 	apiserverManifest = "/etc/kubernetes/manifests/kube-apiserver.yaml"
-	// providerAPIServerGrace mirrors internal/provider.controlPlaneGrace (the
-	// harness depends only on the binary, so this is a copy; see provider.go).
+	// providerAPIServerGrace mirrors controlPlaneGrace in
+	// internal/provider/controlplanehealth.go. It is a copy because the harness
+	// depends only on the binary (the convention test/e2e/provider.go states).
 	providerAPIServerGrace = 3 * time.Minute
 )
 

@@ -44,10 +44,11 @@ func TestFileProberMembership(t *testing.T) {
 	}
 }
 
-// TestFileProberAPIServerProbeOnlyForInitialized: only an Initialized node
-// runs a control plane with a local apiserver to ask, so the probe is never
-// spent on an uninitialized node or a joined worker.
-func TestFileProberAPIServerProbeOnlyForInitialized(t *testing.T) {
+// TestFileProberAPIServerProbeOnlyForControlPlanes: only a node that runs a
+// control plane (Initialized, or with a kube-apiserver manifest) has a local
+// apiserver to ask, so the probe is never spent on an uninitialized node or a
+// plain joined worker.
+func TestFileProberAPIServerProbeOnlyForControlPlanes(t *testing.T) {
 	tests := []struct {
 		name      string
 		files     []string
@@ -56,12 +57,21 @@ func TestFileProberAPIServerProbeOnlyForInitialized(t *testing.T) {
 		{name: "uninitialized", wantCalls: 0},
 		{name: "joined", files: []string{"etc/kubernetes/kubelet.conf"}, wantCalls: 0},
 		{name: "initialized", files: []string{"etc/kubernetes/admin.conf", "etc/kubernetes/kubelet.conf"}, wantCalls: 1},
+		// A control plane without admin.conf still runs an apiserver, and the
+		// ADR-12-R1 repair decision reads its answer.
+		{name: "joined, with a kube-apiserver manifest", files: []string{"etc/kubernetes/kubelet.conf", "etc/kubernetes/manifests/kube-apiserver.yaml"}, wantCalls: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
 			for _, f := range tt.files {
 				writeFile(t, filepath.Join(root, f))
+			}
+			manifest := filepath.Join(root, "etc", "kubernetes", "manifests", "kube-apiserver.yaml")
+			if _, err := os.Stat(manifest); err == nil {
+				if err := os.WriteFile(manifest, []byte("    image: registry.k8s.io/kube-apiserver:v1.37.0\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			calls := 0
 			s, err := FileProber{

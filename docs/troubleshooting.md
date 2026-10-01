@@ -199,23 +199,44 @@ denied" on the file, which says nothing about the cluster.
 ```sh
 sudo kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-system get configmap kubeadm-config
 sudo kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-public get configmap cluster-info
-sudo kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-system get deployment coredns
 ```
 
-**If all three exist**, the cluster itself is complete. Do not reset. Point
-`kubelet.conf` at the rotated certificate, as `kubelet-finalize` does: in the
-`users` entry, replace `client-certificate-data` and `client-key-data` with
+`kubeadm init` creates these two before `kubelet-finalize` (in `upload-config`
+and `bootstrap-token`), and they are what every join needs. They alone decide
+whether a reset is ever right.
+
+**If both exist**, the cluster is joinable. Do not reset. Point `kubelet.conf`
+at the rotated certificate, as `kubelet-finalize` does: as root, edit
+`/etc/kubernetes/kubelet.conf` and in the `users` entry replace
+`client-certificate-data` and `client-key-data` with
 
 ```yaml
     client-certificate: /var/lib/kubelet/pki/kubelet-client-current.pem
     client-key: /var/lib/kubelet/pki/kubelet-client-current.pem
 ```
 
-then run `systemctl restart kubelet`. The next reconcile pass reports
-`Converged`.
+then restart the kubelet:
 
-**If any of them is missing (`NotFound`) or refused by the apiserver
-(`Forbidden`)**, init stopped early and the cluster is incomplete: other nodes
+```sh
+sudo systemctl restart kubelet
+```
+
+The next reconcile pass reports `Converged`. Then look at the two addons
+`kubeadm init` installs in its last phase:
+
+```sh
+sudo kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-system get deployments.apps/coredns daemonsets.apps/kube-proxy
+```
+
+A missing one is no reason to reset either. If it was removed or replaced on
+purpose (kube-proxy with a CNI that replaces it, CoreDNS with another DNS),
+there is nothing more to do. If it was not, init stopped in its last phases,
+after the cluster had become joinable: install the missing addon again, for
+example with kubeadm's `addon` phase run against the configuration the cluster
+was created with.
+
+**If either of the two is missing (`NotFound`) or refused by the apiserver
+(`Forbidden`)**, init stopped before the cluster became joinable: other nodes
 cannot join it. The provider does not repair this in place. Fix what made the
 first attempt fail, then reset the node's Kubernetes state and reboot it so it
 initializes again:

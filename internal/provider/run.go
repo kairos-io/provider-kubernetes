@@ -262,6 +262,11 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 			if awaitLocalAPIServer(ctx, prober.APIServerReachable, controlPlaneGrace, controlPlanePoll) {
 				logrus.Info("provider-kubernetes: the local apiserver is answering /healthz")
 				state.APIServerReachable = true
+			} else if ctx.Err() != nil {
+				// The reconcile subcommand runs without a deadline of its own, so
+				// in production only the grace ends the wait; a caller that sets
+				// one is told which limit did.
+				logrus.Warnf("provider-kubernetes: the wait for the local apiserver was cut short by the pass's own deadline (%v)", ctx.Err())
 			} else {
 				logrus.Warnf("provider-kubernetes: the local apiserver did not answer /healthz within %s", controlPlaneGrace)
 			}
