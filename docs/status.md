@@ -77,7 +77,7 @@ version: v0.4.0
 | `KubeletUnhealthy` | See `phase: Degraded` below. |
 | `InitIncomplete` | See `phase: Degraded` below. |
 | `ControlPlaneUnhealthy` | See `phase: Degraded` below. |
-| `ResetFailed` / `ResetOK` | The outcome of an `EventClusterReset`. |
+| `ResetFailed` / `ResetOK` | The outcome of a reset, from the cluster-reset event or the `reset` subcommand. When volumes were still mounted under `/var/lib/kubelet`, the `ResetFailed` message says how many and what to do; the reset log names them. |
 
 ### `phase: Degraded`
 

@@ -242,19 +242,17 @@ first attempt fail, then reset the node's Kubernetes state and reboot it so it
 initializes again:
 
 ```sh
-mount | grep ' on /var/lib/kubelet/'    # must print nothing: no volume mounted below it
 sudo /system/providers/agent-provider-kubernetes reset --cluster-file=/run/provider-kubernetes/cluster.json
 sudo reboot
 ```
 
-The reset removes this node's etcd data and everything under
-`/var/lib/kubelet`, including the contents of any volume still mounted there,
-which is why the first line must print nothing. On the node that
-ran `kubeadm init` the etcd data is the cluster itself, so also make sure no
-other node joined it and nothing you need runs on it. On Kairos the command can
-exit 1 because `/etc/kubernetes` and `/var/lib/kubelet` are mount points that
-cannot themselves be removed; their contents are, and the node initializes
-again on the next boot.
+The reset removes this node's etcd data and the kubelet's state. It never
+touches a volume that is still mounted under `/var/lib/kubelet`: it leaves it
+in place, names it, and fails with `reason: ResetFailed`, so unmount it and run
+the reset again before rebooting (see
+[Lifecycle and reset](./lifecycle.md#reset-eventclusterreset)). On the node
+that ran `kubeadm init` the etcd data is the cluster itself, so also make sure
+no other node joined it and nothing you need runs on it.
 
 #### `reason: ControlPlaneUnhealthy`
 
@@ -534,7 +532,9 @@ share a device with etcd. Once an upgrade is verified, delete the older copies; 
 ### A reset left a stale etcd member (HA)
 
 If a control plane was reset while the cluster was unreachable, its etcd member is
-orphaned. Deregister it from a surviving control plane with `kubectl delete node`
+orphaned. The reset says so with a loud warning when this node's own apiserver did
+not answer or `kubeadm reset` failed. Otherwise it asks you to verify the member is
+gone, since `kubeadm reset` reports a failed removal only as a warning. Deregister it from a surviving control plane with `kubectl delete node`
 and the bundled `/usr/bin/etcdctl` (`member list`, then `member remove <id>`,
 passing the etcd client certificate flags shown in
 [Upgrades](./upgrades.md#etcd-backups)). See

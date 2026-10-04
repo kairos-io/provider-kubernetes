@@ -33,16 +33,34 @@ exists) fails fast without burning the retry budget.
 
 ## Reset (`EventClusterReset`)
 
-Kairos's cluster-reset event drives the provider's reset path, which:
+Kairos's cluster-reset event, and the `reset` subcommand for a reset by hand,
 
-- runs a bounded `kubeadm reset`,
-- removes the authoritative artifacts under `cluster_root_path`
-  (`etc/kubernetes` including the PKI, `var/lib/kubelet`, `var/lib/etcd`),
-- sweeps `/run` for any leftover transient credential files,
+```sh
+sudo /system/providers/agent-provider-kubernetes reset --cluster-file=/run/provider-kubernetes/cluster.json
+```
+
+both:
+
+- run a bounded `kubeadm reset`,
+- empty the authoritative artifact directories under `cluster_root_path`
+  (`etc/kubernetes` including the PKI, `var/lib/kubelet`, `var/lib/etcd`) and keep
+  the directories themselves, which on Kairos are mount points,
+- sweep `/run` for any leftover transient credential files,
+- record `phase: Reset` in the node status, with `reason: ResetOK` or `ResetFailed`,
 
 so the next boot re-converges from a clean state. `cluster_root_path` is validated
-(absolute, no traversal) and symlinked artifacts are refused rather than followed,
-so reset cannot be tricked into wiping a bind-mount target.
+(absolute, no traversal), and a symlinked artifact is removed, never followed.
+
+`kubeadm reset` runs first and unmounts the kubelet's volumes itself, within the
+reset's 5 minute bound. The provider's own cleanup then never enters or removes
+anything below those directories that is still a mount point: when a volume could
+not be unmounted, for example because a container still uses it, the reset leaves
+it in place with its data, empties everything around it, and fails with
+`reason: ResetFailed`. The status says how many mounts were kept and the reset log
+names them; unmount them and run the reset again. The cleanup does not read a
+mounted filesystem below those directories, with one exception on kernels older
+than 6.18: an automount point that has not been mounted yet may still be triggered
+when it is checked.
 
 On a stacked-etcd control plane, reset also handles etcd membership - see the
 removal runbook in [High availability](./high-availability.md#removing-a-control-plane).

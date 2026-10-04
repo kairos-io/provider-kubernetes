@@ -54,7 +54,10 @@ Removing a control plane is a two-part operation:
    `kubeadm reset` removes the local member for you. If the node is being reset
    *because* it is broken/unreachable, the member is left orphaned - a stale
    member erodes quorum. The provider does **not** run `etcdctl` from a dying
-   node; it logs a loud, actionable warning and proceeds with local cleanup. You
+   node. When the node's own apiserver does not answer, or `kubeadm reset`
+   fails, it logs a loud, actionable warning and proceeds with local cleanup;
+   otherwise it asks you to verify the member is gone, because `kubeadm reset`
+   reports a failed member removal only as a warning. Either way, you
    then deregister it from a surviving control plane:
 
    ```sh
