@@ -23,15 +23,65 @@ import (
 // payload and performs a bounded, idempotent reset (ADR-4). It deliberately does
 // NOT run cluster_token validation: reset must succeed regardless of token state.
 func HandleClusterReset(event *pluggable.Event) pluggable.EventResponse {
-	return handleClusterReset(event, kubeadm.DefaultRunner(), status.NewFileSink())
+	return handleClusterReset(event, ResetOptions{Runner: kubeadm.DefaultRunner(), Sink: status.NewFileSink()})
+}
+
+// ResetOptions are the seams of a reset pass. Runner and Sink are required.
+type ResetOptions struct {
+	Runner kubeadm.Runner
+	Sink   status.StatusSink
+	// ControlPlaneReachable decides whether reset warns that this stacked-etcd
+	// control plane's member may stay registered (HA-5). nil -> this node's
+	// own apiserver /healthz on the cluster's bind port: when it answers,
+	// `kubeadm reset` can reach etcd to remove the member itself.
+	ControlPlaneReachable func(ctx context.Context) bool
+}
+
+// ResetCluster resets this node's Kubernetes state for cluster and records the
+// Phase=Reset status. The cluster.reset event and the reset subcommand both
+// come through here, so both write the status docs/status.md promises and
+// both get the same probes.
+func ResetCluster(ctx context.Context, cluster clusterplugin.Cluster, opts ResetOptions) error {
+	rootPath := defaultRootPath
+	if v := cluster.ProviderOptions[providerOptRootPathKey]; v != "" {
+		rootPath = v
+	}
+	role := actualstate.Role(string(cluster.Role))
+
+	// Best-effort: the CRI socket, the node name for the HA-5 advisory and
+	// the apiserver port come from the user config; reset proceeds without.
+	var criSocket, nodeName string
+	var bindPort int32
+	if uc, err := ParseUserConfig(cluster.Options); err != nil {
+		logrus.Warnf("provider-kubernetes: reset could not parse user config (continuing without it): %v", err)
+	} else {
+		criSocket = uc.InitConfiguration.NodeRegistration.CRISocket
+		nodeName = uc.InitConfiguration.NodeRegistration.Name
+		bindPort = localBindPort(role, uc)
+	}
+	reachable := opts.ControlPlaneReachable
+	if reachable == nil {
+		reachable = localAPIHealthyProbe(bindPort)
+	}
+
+	logrus.Infof("provider-kubernetes: handling cluster reset (root=%s)", rootPath)
+	resetErr := reset.Run(ctx, reset.Options{
+		Runner:                opts.Runner,
+		RootPath:              rootPath,
+		CRISocket:             criSocket,
+		NodeName:              nodeName,
+		ControlPlaneReachable: reachable,
+	})
+	writeResetStatus(opts.Sink, role, resetErr)
+	return resetErr
 }
 
 // maxResetPayloadBytes caps the event payload size before unmarshaling, to bound
 // CPU/memory of (in-process but still untrusted-by-shape) YAML/JSON parsing.
 const maxResetPayloadBytes = 1 << 20 // 1 MiB
 
-// handleClusterReset is the testable core (runner and sink injected).
-func handleClusterReset(event *pluggable.Event, runner kubeadm.Runner, sink status.StatusSink) pluggable.EventResponse {
+// handleClusterReset is the testable core (runner, sink and probe injected).
+func handleClusterReset(event *pluggable.Event, opts ResetOptions) pluggable.EventResponse {
 	var resp pluggable.EventResponse
 	if event == nil {
 		return resp
@@ -59,29 +109,7 @@ func handleClusterReset(event *pluggable.Event, runner kubeadm.Runner, sink stat
 		return resp // nothing to reset
 	}
 
-	rootPath := defaultRootPath
-	if v := config.Cluster.ProviderOptions[providerOptRootPathKey]; v != "" {
-		rootPath = v
-	}
-
-	// Best-effort CRI socket from the user config (optional).
-	var criSocket string
-	if uc, err := ParseUserConfig(config.Cluster.Options); err != nil {
-		logrus.Warnf("provider-kubernetes: reset could not parse user config for CRI socket (continuing without): %v", err)
-	} else {
-		criSocket = uc.InitConfiguration.NodeRegistration.CRISocket
-	}
-
-	logrus.Infof("provider-kubernetes: handling cluster reset (root=%s)", rootPath)
-	resetErr := reset.Run(context.Background(), reset.Options{
-		Runner:    runner,
-		RootPath:  rootPath,
-		CRISocket: criSocket,
-	})
-
-	// S4: write terminal reset status. Best-effort, bounded, swallowed on error.
-	writeResetStatus(sink, actualstate.Role(string(config.Cluster.Role)), resetErr)
-
+	resetErr := ResetCluster(context.Background(), *config.Cluster, opts)
 	if resetErr != nil {
 		resp.Error = fmt.Sprintf("cluster reset: %s", resetErr)
 	}

@@ -34,7 +34,7 @@ import (
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm/credential"
 	"github.com/kairos-io/provider-kubernetes/internal/provider"
-	"github.com/kairos-io/provider-kubernetes/internal/reset"
+	"github.com/kairos-io/provider-kubernetes/internal/status"
 	"github.com/kairos-io/provider-kubernetes/internal/unitmigrate"
 	"github.com/kairos-io/provider-kubernetes/version"
 )
@@ -259,12 +259,12 @@ func runMintJoin(args []string) int {
 	return 0
 }
 
-// runReset performs a bounded cluster reset from a serialized Cluster YAML, exactly
-// as HandleClusterReset does for the pluggable event. This subcommand is the e2e
-// harness's entry point for the reset scenario (ADR-13 Tier-1 scenario 3); it is
-// also a useful operator escape hatch. It reads the cluster_root_path from
-// ProviderOptions and the optional CRI socket from the user config, then calls
-// reset.Run -- no shell, no interpolation, bounded (design principle 1 / #4099-1).
+// runReset performs a bounded cluster reset from a serialized Cluster YAML through
+// provider.ResetCluster, the same entry point the pluggable cluster.reset event
+// uses, so it also writes the Phase=Reset status. This subcommand is the e2e
+// harness's entry point for the reset scenario (ADR-13 Tier-1 scenario 3) and the
+// operator's documented way to reset by hand -- no shell, no interpolation,
+// bounded (design principle 1 / #4099-1).
 func runReset(args []string) int {
 	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
 	clusterFile := fs.String("cluster-file", provider.ClusterStatePath, "path to the serialized Cluster YAML")
@@ -286,20 +286,11 @@ func runReset(args []string) int {
 		return 1
 	}
 
-	rootPath := "/"
-	if v := cluster.ProviderOptions["cluster_root_path"]; v != "" {
-		rootPath = v
-	}
-
-	var criSocket string
-	if uc, ucErr := provider.ParseUserConfig(cluster.Options); ucErr == nil {
-		criSocket = uc.InitConfiguration.NodeRegistration.CRISocket
-	}
-
-	if err := reset.Run(context.Background(), reset.Options{
-		Runner:    kubeadm.DefaultRunner(),
-		RootPath:  rootPath,
-		CRISocket: criSocket,
+	// The same entry point as the cluster.reset event: it writes the
+	// Phase=Reset status and wires the same probes.
+	if err := provider.ResetCluster(context.Background(), cluster, provider.ResetOptions{
+		Runner: kubeadm.DefaultRunner(),
+		Sink:   status.NewFileSink(),
 	}); err != nil {
 		logrus.Errorf("cluster reset: %v", err)
 		return 1

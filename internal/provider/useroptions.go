@@ -156,15 +156,12 @@ func BuildInput(ctx Context, uc UserConfig, resolvedVersion string) (kubeadmconf
 	// HA-2: for CP joins, prefer joinConfiguration.controlPlane.localAPIEndpoint
 	// for AdvertiseAddress/BindPort; fall back to initConfiguration.localAPIEndpoint.
 	advertiseAddress := uc.InitConfiguration.LocalAPIEndpoint.AdvertiseAddress
-	bindPort := uc.InitConfiguration.LocalAPIEndpoint.BindPort
 	if actualstate.Role(ctx.Role) == actualstate.RoleControlPlane {
 		if uc.JoinConfiguration.ControlPlane.LocalAPIEndpoint.AdvertiseAddress != "" {
 			advertiseAddress = uc.JoinConfiguration.ControlPlane.LocalAPIEndpoint.AdvertiseAddress
 		}
-		if uc.JoinConfiguration.ControlPlane.LocalAPIEndpoint.BindPort != 0 {
-			bindPort = uc.JoinConfiguration.ControlPlane.LocalAPIEndpoint.BindPort
-		}
 	}
+	bindPort := localBindPort(actualstate.Role(ctx.Role), uc)
 
 	return kubeadmconfig.Input{
 		KubernetesVersion:    version,
@@ -265,4 +262,15 @@ func appendIfMissing(s []string, v string) []string {
 	out := make([]string, len(s), len(s)+1)
 	copy(out, s)
 	return append(out, v)
+}
+
+// localBindPort returns the port this node's apiserver serves on: for a
+// control-plane join, joinConfiguration.controlPlane.localAPIEndpoint.bindPort
+// when set (HA-2), otherwise initConfiguration.localAPIEndpoint.bindPort. 0
+// means unset, which kubeadm fills with its own default.
+func localBindPort(role actualstate.Role, uc UserConfig) int32 {
+	if role == actualstate.RoleControlPlane && uc.JoinConfiguration.ControlPlane.LocalAPIEndpoint.BindPort != 0 {
+		return uc.JoinConfiguration.ControlPlane.LocalAPIEndpoint.BindPort
+	}
+	return uc.InitConfiguration.LocalAPIEndpoint.BindPort
 }
