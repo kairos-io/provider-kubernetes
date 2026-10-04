@@ -94,25 +94,16 @@ func initAndConverge(t *testing.T, name string) (nc *nodeContainer, nodeName str
 // converges, run the REAL reset path (the `reset` subcommand from main.go,
 // mirroring the production EventClusterReset entry point for the e2e harness).
 //
-// Asserts that kubeadm ran and cleaned the authoritative membership artifacts:
-//   - /etc/kubernetes (PKI, admin.conf, manifests) is gone -- this directory is a
-//     regular directory (not an anonymous docker volume mount point) so it is fully
-//     removable by authoritativeArtifacts.
-//   - /var/lib/etcd/member is gone -- the etcd member data within the volume.
-//   - /var/lib/kubelet/kubeadm-flags.env is gone -- the kubelet join marker within
-//     the volume.
+// Asserts that the reset exits 0 and empties every authoritative artifact
+// directory (/etc/kubernetes with the PKI, admin.conf and manifests,
+// /var/lib/kubelet, /var/lib/etcd), keeping the directories themselves: in the
+// e2e container /var/lib/kubelet and /var/lib/etcd are Docker anonymous volume
+// mount points (-v in startNode), as /etc/kubernetes and /var/lib/kubelet are
+// persistent binds on Kairos, and a mount point cannot be removed. Before the
+// reset emptied rather than removed them, this exited 1 although it had worked.
 //
-// In the e2e container environment /var/lib/kubelet and /var/lib/etcd are Docker
-// anonymous volume MOUNT POINTS (from -v /var/lib/kubelet in startNode). The Linux
-// kernel refuses os.RemoveAll on a mount point with EBUSY ("device or resource
-// busy"), so reset.Run returns a non-fatal error and the reset subcommand exits 1.
-// This is a container-setup artifact: in production these are regular directories
-// and os.RemoveAll succeeds. We allow exit 1 here and assert on the artifact
-// cleanup that DID happen (/etc/kubernetes gone, contents of the volumes emptied
-// by kubeadm reset -f).
-//
-// Note: the `reset` subcommand does NOT write a status doc (HandleClusterReset
-// does, via writeResetStatus). So we do not assert status.yaml here.
+// The subcommand goes through provider.ResetCluster, the same entry point as
+// the cluster.reset event, so it records Phase=Reset/ResetOK.
 func TestResetCleansArtifacts(t *testing.T) {
 	nc, _ := initAndConverge(t, uniqueName("reset"))
 	ip := nc.IP(t)
@@ -125,35 +116,29 @@ func TestResetCleansArtifacts(t *testing.T) {
 
 	out, err := nc.ExecTimeout(resetTimeout, providerBinaryPath,
 		"reset", "--cluster-file="+clusterStatePath)
-	// In the e2e container, /var/lib/kubelet and /var/lib/etcd are Docker anonymous
-	// volume mount points. The kernel refuses os.RemoveAll on a mount point (EBUSY),
-	// so reset.Run returns a non-nil error and the subcommand exits 1. We tolerate
-	// this specific exit-1 case and verify kubeadm reset ran correctly by checking
-	// the artifacts that CAN be removed.
 	t.Logf("reset output (exit error %v):\n%s", err, out)
-	// Verify kubeadm reset itself ran by checking it emitted its log output.
-	if !strings.Contains(out, "provider-kubernetes reset") {
-		t.Fatalf("reset subcommand did not appear to run; output:\n%s", out)
+	// In the e2e container /var/lib/kubelet and /var/lib/etcd are Docker volume
+	// mount points, as /etc/kubernetes and /var/lib/kubelet are persistent binds
+	// on Kairos. Reset empties them and keeps the directories, so with nothing
+	// mounted below them it succeeds.
+	if err != nil {
+		t.Fatalf("reset exited non-zero on a node with nothing mounted below the artifact directories: %v", err)
 	}
 
-	// 1. /etc/kubernetes is gone: this directory is not a mount point, so
-	//    authoritativeArtifacts removes it cleanly. Its absence proves kubeadm reset
-	//    ran and the PKI + admin.conf + manifests are gone.
-	if _, statErr := nc.execErr(binTest, "-e", "/etc/kubernetes"); statErr == nil {
-		t.Error("/etc/kubernetes still present after reset (want: absent); kubeadm reset may not have run")
+	// Every artifact directory is empty (or absent): PKI, admin.conf, manifests,
+	// the etcd member data and the kubelet's state are all gone.
+	for _, dir := range []string{"/etc/kubernetes", "/var/lib/kubelet", "/var/lib/etcd"} {
+		left, ferr := nc.execErr(binFind, dir, "-mindepth", "1", "-maxdepth", "1")
+		if ferr == nil && strings.TrimSpace(left) != "" {
+			t.Errorf("%s still holds after reset:\n%s", dir, left)
+		}
 	}
 
-	// 2. The etcd member data within the volume is gone.
-	if _, statErr := nc.execErr(binTest, "-e", "/var/lib/etcd/member"); statErr == nil {
-		t.Error("/var/lib/etcd/member still present after reset (want: absent)")
+	// The subcommand records the reset like the cluster.reset event does.
+	st := readStatus(t, nc)
+	if st.Phase != "Reset" || st.Reason != "ResetOK" {
+		t.Errorf("status after reset: phase=%q reason=%q, want Reset/ResetOK", st.Phase, st.Reason)
 	}
-
-	// 3. The kubelet join marker within the volume is gone.
-	if _, statErr := nc.execErr(binTest, "-e", "/var/lib/kubelet/kubeadm-flags.env"); statErr == nil {
-		t.Error("/var/lib/kubelet/kubeadm-flags.env still present after reset (want: absent)")
-	}
-
-	t.Logf("reset artifacts cleaned: /etc/kubernetes gone, /var/lib/etcd/member gone, kubeadm-flags.env gone -- reset ran correctly")
 }
 
 // TestInitClobberRefusal (ADR-13 Tier-1 scenario 4): proves the HA-3 init-clobber

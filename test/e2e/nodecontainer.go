@@ -60,6 +60,7 @@ const (
 	binReadlink   = "/usr/bin/readlink"
 	binRm         = "/usr/bin/rm"
 	binSha256sum  = "/usr/bin/sha256sum"
+	binSleep      = "/usr/bin/sleep"
 	binStat       = "/usr/bin/stat"
 	binSystemdRun = "/usr/bin/systemd-run"
 	binTar        = "/usr/bin/tar"

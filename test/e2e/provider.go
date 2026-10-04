@@ -105,6 +105,7 @@ type statusDoc struct {
 	Membership string `json:"membership"`
 	Outcome    string `json:"outcome"`
 	Reason     string `json:"reason"`
+	Message    string `json:"message"`
 	Terminal   bool   `json:"terminal"`
 	LastAction string `json:"lastAction"`
 	Version    string `json:"version"`
