@@ -1,3 +1,5 @@
+//go:build linux
+
 package reset
 
 import (
@@ -33,6 +35,27 @@ func seedArtifacts(t *testing.T, root string) {
 	}
 }
 
+// assertCleared fails unless rel under root is absent or an empty directory:
+// reset empties the artifact directories and keeps them, because on Kairos
+// and in the e2e container they are mount points that cannot be removed.
+func assertCleared(t *testing.T, root, rel string) {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, rel))
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("%s still holds %v after reset", rel, names)
+	}
+}
+
 func TestResetRunsKubeadmAndRemovesArtifacts(t *testing.T) {
 	root := t.TempDir()
 	seedArtifacts(t, root)
@@ -49,11 +72,10 @@ func TestResetRunsKubeadmAndRemovesArtifacts(t *testing.T) {
 	if got != "reset -f --cleanup-tmp-dir --cri-socket unix:///run/containerd/containerd.sock" {
 		t.Fatalf("unexpected reset argv: %q", got)
 	}
-	// Authoritative artifacts (incl. the CA key) are gone.
+	// Authoritative artifacts (incl. the CA key) are gone; the directories
+	// themselves stay, empty.
 	for _, d := range []string{"etc/kubernetes", "var/lib/kubelet", "var/lib/etcd"} {
-		if _, err := os.Stat(filepath.Join(root, d)); !os.IsNotExist(err) {
-			t.Fatalf("expected %s removed, stat err=%v", d, err)
-		}
+		assertCleared(t, root, d)
 	}
 }
 
@@ -66,8 +88,8 @@ func TestResetIsIdempotentOnKubeadmError(t *testing.T) {
 	if err := Run(context.Background(), Options{Runner: fr, RootPath: root}); err != nil {
 		t.Fatalf("expected reset to continue cleanup despite kubeadm error, got %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "etc/kubernetes")); !os.IsNotExist(err) {
-		t.Fatal("expected artifacts removed even when kubeadm reset errored")
+	for _, d := range []string{"etc/kubernetes", "var/lib/kubelet", "var/lib/etcd"} {
+		assertCleared(t, root, d)
 	}
 }
 
@@ -148,8 +170,8 @@ func TestResetStackedEtcdCPUnreachableEmitsWarning(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Artifacts still removed despite the warning.
-	if _, err := os.Stat(filepath.Join(root, "etc/kubernetes")); !os.IsNotExist(err) {
-		t.Fatal("expected artifacts removed even with stacked-etcd warning")
+	for _, d := range []string{"etc/kubernetes", "var/lib/etcd"} {
+		assertCleared(t, root, d)
 	}
 }
 

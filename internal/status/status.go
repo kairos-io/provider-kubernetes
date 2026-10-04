@@ -263,7 +263,7 @@ func BuildStatus(p BuildParams) Status {
 			s.Outcome = OutcomeFailure
 			s.Reason = ReasonResetFailed
 			s.Terminal = true
-			s.Message = sanitize("reset failed: " + p.ResetErr.Error())
+			s.Message = sanitize("reset failed: " + resetFailureMessage(p.ResetErr))
 		} else {
 			s.Outcome = OutcomeSuccess
 			s.Reason = ReasonResetOK
@@ -420,6 +420,28 @@ func degradedReason(v reconcile.Verdict, membership string) (Reason, string) {
 		// value can never be reported under a specific, wrong reason.
 		return ReasonKubeadmError, sanitize("degraded member with an unrecognized verdict " + string(v))
 	}
+}
+
+// resetFailureMessage words a failed reset for the status document. An error
+// that offers a StatusSummary (reset.MountsKeptError) is described by it: its
+// own text names mount paths whose pod UIDs and volume names the sanitizer
+// would redact, so the summary gives the count and the remedy instead, and
+// the reset log keeps the paths. Any other error joined with it follows.
+func resetFailureMessage(err error) string {
+	var summarizer interface{ StatusSummary() string }
+	if !errors.As(err, &summarizer) {
+		return err.Error()
+	}
+	parts := []string{summarizer.StatusSummary()}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range joined.Unwrap() {
+			var s interface{ StatusSummary() string }
+			if !errors.As(e, &s) {
+				parts = append(parts, e.Error())
+			}
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // deriveReason maps (action, error, result) to a CLOSED Reason constant. This

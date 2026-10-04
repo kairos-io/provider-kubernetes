@@ -6,20 +6,25 @@
 // (issue #4099-1).
 //
 // SECURITY: `RootPath` is operator-supplied via cluster_root_path. Because this
-// package runs os.RemoveAll on paths derived from it, RootPath is validated
-// (absolute, no traversal segments) inside Run; any intermediate symlinked
-// artifact is refused (not followed) to avoid destroying a bind-mount target.
-// Operators must NOT point RootPath at a directory whose only copy of their
+// package deletes paths derived from it, RootPath is validated (absolute, no
+// traversal segments) inside Run, and a symlinked artifact is removed, never
+// followed. The artifact directories are emptied and kept, and nothing below
+// them that is a mount point is ever entered or removed (clear_linux.go): a
+// volume kubeadm reset could not unmount keeps its data, and the reset reports
+// it. Operators must NOT point RootPath at a directory whose only copy of their
 // externally-managed PKI lives under it.
 //
-// HA-5: stacked-etcd CP detection + etcd orphan cleanup warning (ADR-11 #5).
-// If the node is a stacked-etcd CP and the cluster is unreachable, a loud
-// actionable warning is emitted naming the remediation. The provider never runs
-// etcdctl against a quorum; that is operator-owned.
+// HA-5: stacked-etcd CP detection + etcd orphan cleanup advisory (ADR-11 #5).
+// On a stacked-etcd CP the advisory always appears: the full, actionable
+// warning when this node's apiserver did not answer or kubeadm reset failed,
+// otherwise a line asking the operator to verify the member is gone, because
+// kubeadm reports a failed member removal only as a warning. The provider
+// never runs etcdctl against a quorum; that is operator-owned.
 package reset
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -83,24 +88,45 @@ func validateRoot(root string) (string, error) {
 	return clean, nil
 }
 
-// removeArtifact safely removes one authoritative artifact. If the path itself is
-// a symlink, the symlink is removed but the target is NOT followed: this avoids
-// recursively destroying a bind-mount target the operator did not intend to wipe.
-// (os.RemoveAll DOES traverse intermediate symlinks during recursion; this guard
-// prevents that on the artifact root.)
-func removeArtifact(path string) error {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // idempotent
-		}
-		return fmt.Errorf("lstat %s: %w", path, err)
+// ErrMountsKept is wrapped by Run's error when mount points were found under
+// the artifact directories and left in place. The reset is then incomplete:
+// whatever is mounted there is still in use, and the operator unmounts it and
+// resets again.
+var ErrMountsKept = errors.New("mount points left in place")
+
+// maxReportedMounts bounds how many kept paths the error text names; the log
+// names every one of them.
+const maxReportedMounts = 5
+
+// MountsKeptError reports the mount points a reset left in place. Its Error
+// text names them, for the log and the subcommand's stderr. StatusSummary is
+// what the status document carries: pod UIDs and volume names are long
+// tokens that the status sanitizer redacts, so the summary gives the count
+// and the remedy, and points at the log for the paths.
+type MountsKeptError struct {
+	Paths []string
+}
+
+func (e *MountsKeptError) Error() string {
+	named := e.Paths
+	more := ""
+	if len(named) > maxReportedMounts {
+		named = named[:maxReportedMounts]
+		more = fmt.Sprintf(" and %d more", len(e.Paths)-maxReportedMounts)
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		logrus.Warnf("provider-kubernetes: refusing to follow symlinked artifact %s (removing the link only, not its target)", path)
-		return os.Remove(path)
+	return fmt.Sprintf("%v: %s%s; unmount them and run the reset again", ErrMountsKept, strings.Join(named, ", "), more)
+}
+
+// Unwrap makes errors.Is(err, ErrMountsKept) hold.
+func (e *MountsKeptError) Unwrap() error { return ErrMountsKept }
+
+// StatusSummary is the status document's message for this error.
+func (e *MountsKeptError) StatusSummary() string {
+	noun := "mount points"
+	if len(e.Paths) == 1 {
+		noun = "mount point"
 	}
-	return os.RemoveAll(path)
+	return fmt.Sprintf("%d %s under the artifact directories left in place (the reset log names them); unmount them and run the reset again", len(e.Paths), noun)
 }
 
 // isStackedEtcdCP reports whether this node is a stacked-etcd control plane by
@@ -121,7 +147,9 @@ func isStackedEtcdCP(root string) bool {
 
 // Run performs a bounded, idempotent reset. `kubeadm reset` failing (e.g. on an
 // already-clean node) is non-fatal: artifact cleanup still runs so reset is
-// idempotent. It returns the first artifact-removal error, if any.
+// idempotent. It returns the first artifact-removal error and, when a mount
+// point under an artifact directory was left in place, a *MountsKeptError
+// (which wraps ErrMountsKept), joined when both happened.
 //
 // HA-5: if the node is a stacked-etcd CP and the cluster is unreachable, a loud
 // actionable warning is emitted (naming the operator remediation). No etcdctl is
@@ -145,46 +173,35 @@ func Run(ctx context.Context, opts Options) error {
 		runDir = defaultRunDir
 	}
 
-	// HA-5: detect stacked-etcd CP before we remove artifacts. We check first so
-	// we can warn (or rely on kubeadm reset for clean member removal) before wiping.
+	// HA-5: detect a stacked-etcd CP and probe it before anything is removed;
+	// the advisory itself waits for kubeadm reset's result below.
 	cpIsStacked := isStackedEtcdCP(root)
 	clusterReachable := false
 	if opts.ControlPlaneReachable != nil {
 		clusterReachable = opts.ControlPlaneReachable(ctx)
 	}
 
-	if cpIsStacked && !clusterReachable {
-		nodeName := opts.NodeName
-		if nodeName == "" {
-			if h, herr := os.Hostname(); herr == nil {
-				nodeName = h
-			} else {
-				nodeName = "<node-name>"
-			}
-		}
-		logrus.Warnf("provider-kubernetes: ATTENTION: this appears to be a stacked-etcd control-plane node and the cluster is unreachable. "+
-			"The etcd member for this node may remain registered in the etcd quorum after reset, which can cause quorum loss. "+
-			"Operator action required from a surviving control-plane node: "+
-			"(1) kubectl delete node %s  "+
-			"(2) etcdctl member list  (identify this node's member ID)  "+
-			"(3) etcdctl member remove <id>  "+
-			"This provider does NOT run etcdctl. Proceeding with local cleanup.", nodeName)
-	}
-
 	args := []string{"reset", "-f", "--cleanup-tmp-dir"}
 	if opts.CRISocket != "" {
 		args = append(args, "--cri-socket", opts.CRISocket)
 	}
-	if _, err := opts.Runner.Run(ctx, args...); err != nil {
+	_, kubeadmErr := opts.Runner.Run(ctx, args...)
+	if kubeadmErr != nil {
 		// Non-fatal: proceed to artifact cleanup so reset is idempotent. The
 		// error is already secret-sanitized by the Runner.
-		logrus.Warnf("provider-kubernetes: kubeadm reset returned an error (continuing cleanup): %v", err)
+		logrus.Warnf("provider-kubernetes: kubeadm reset returned an error (continuing cleanup): %v", kubeadmErr)
+	}
+	if cpIsStacked {
+		etcdMemberAdvisory(opts.NodeName, clusterReachable && kubeadmErr == nil)
 	}
 
 	var firstErr error
+	var kept []string
 	for _, p := range authoritativeArtifacts(opts.RootPath) {
-		if err := removeArtifact(p); err != nil {
-			logrus.Warnf("provider-kubernetes: failed to remove %s during reset: %v", p, err)
+		k, err := clearArtifact(p)
+		kept = append(kept, k...)
+		if err != nil {
+			logrus.Warnf("provider-kubernetes: failed to clear %s during reset: %v", p, err)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -195,5 +212,42 @@ func Run(ctx context.Context, opts Options) error {
 	// interrupted join. Non-fatal; Shred logs failures at debug level.
 	securefile.SweepRunDir(runDir)
 
-	return firstErr
+	var errs []error
+	if firstErr != nil {
+		errs = append(errs, firstErr)
+	}
+	if len(kept) > 0 {
+		errs = append(errs, &MountsKeptError{Paths: kept})
+	}
+	return errors.Join(errs...)
+}
+
+// etcdMemberAdvisory tells the operator what to do about this stacked-etcd
+// member. kubeadm reset removes it through admin.conf, which names the
+// controlPlaneEndpoint, and reports both "unable to fetch kubeadm-config" and
+// "failed to remove etcd member" as warnings while still exiting 0. So a
+// healthy local apiserver and a clean exit make the removal likely but not
+// certain: the advisory never goes silent, it only changes from "act" to
+// "verify".
+func etcdMemberAdvisory(nodeName string, likelyRemoved bool) {
+	if nodeName == "" {
+		if h, err := os.Hostname(); err == nil {
+			nodeName = h
+		} else {
+			nodeName = "<node-name>"
+		}
+	}
+	if likelyRemoved {
+		logrus.Warnf("provider-kubernetes: this was a stacked-etcd control-plane node. kubeadm reset removes its etcd member when it "+
+			"can reach the cluster, but reports a failed removal only as a warning: from a surviving control-plane node, "+
+			"verify with `etcdctl member list` that %s is gone, and `etcdctl member remove <id>` it if not.", nodeName)
+		return
+	}
+	logrus.Warnf("provider-kubernetes: ATTENTION: this appears to be a stacked-etcd control-plane node and the cluster is unreachable. "+
+		"The etcd member for this node may remain registered in the etcd quorum after reset, which can cause quorum loss. "+
+		"Operator action required from a surviving control-plane node: "+
+		"(1) kubectl delete node %s  "+
+		"(2) etcdctl member list  (identify this node's member ID)  "+
+		"(3) etcdctl member remove <id>  "+
+		"This provider does NOT run etcdctl. Proceeding with local cleanup.", nodeName)
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile"
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile/actualstate"
+	"github.com/kairos-io/provider-kubernetes/internal/reset"
 )
 
 const testNow = "2026-06-03T12:00:00Z"
@@ -883,5 +884,36 @@ func TestMergeReportOnlyNeverDisplacesARecordedReason(t *testing.T) {
 	got, record := MergeReportOnly(prev, true, ReasonClusterConfigDirWritable, "writable", testBootID, testVersion, testNow)
 	if !record || got.Reason != ReasonClusterConfigDirWritable {
 		t.Errorf("an empty Reason must be fillable: record=%t reason=%q", record, got.Reason)
+	}
+}
+
+// TestBuildStatusResetKeptMountsMessage: a reset that left mounts in place says
+// how many and what to do. The paths themselves (pod UIDs, PV names) are long
+// tokens the sanitizer redacts, so they stay in the reset log.
+func TestBuildStatusResetKeptMountsMessage(t *testing.T) {
+	kept := &reset.MountsKeptError{Paths: []string{
+		"/var/lib/kubelet/pods/0a1b2c3d-4e5f-6789-abcd-ef0123456789/volumes/kubernetes.io~nfs/pvc-1234abcd-5678-90ef-1234-567890abcdef",
+	}}
+	for name, err := range map[string]error{
+		"kept mount alone":                kept,
+		"kept mount with another failure": errors.Join(errors.New("remove /var/lib/etcd/x: permission denied"), kept),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := BuildStatus(BuildParams{IsReset: true, ResetErr: err, Now: "2026-10-02T00:00:00Z"})
+			if s.Reason != ReasonResetFailed {
+				t.Fatalf("reason = %q, want %q", s.Reason, ReasonResetFailed)
+			}
+			for _, want := range []string{"1 mount point", "unmount them and run the reset again"} {
+				if !strings.Contains(s.Message, want) {
+					t.Fatalf("message %q does not carry %q", s.Message, want)
+				}
+			}
+			if strings.Contains(s.Message, "REDACTED") {
+				t.Fatalf("message %q carries a redacted path instead of the summary", s.Message)
+			}
+			if strings.Contains(name, "another") && !strings.Contains(s.Message, "permission denied") {
+				t.Fatalf("message %q dropped the other failure", s.Message)
+			}
+		})
 	}
 }
