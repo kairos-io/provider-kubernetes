@@ -57,7 +57,9 @@ Removing a control plane is a two-part operation:
    node. When the node's own apiserver does not answer, or `kubeadm reset`
    fails, it logs a loud, actionable warning and proceeds with local cleanup;
    otherwise it asks you to verify the member is gone, because `kubeadm reset`
-   reports a failed member removal only as a warning. Either way, you
+   reports a failed member removal only as a warning. Only the first reset of a
+   node can tell it ran etcd (it removes the evidence), so act on that run's
+   message even if you reset again. Either way, you
    then deregister it from a surviving control plane:
 
    ```sh

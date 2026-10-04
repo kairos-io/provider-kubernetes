@@ -296,7 +296,7 @@ func TestResetReportsKeptMountsAlongsideAnotherFailure(t *testing.T) {
 // the controlPlaneEndpoint and reports a failed removal only as a warning, so
 // a healthy local apiserver and a clean exit mean "verify", never silence.
 func TestEtcdMemberAdvisoryIsNeverSilent(t *testing.T) {
-	const fullWarning = "stacked-etcd control-plane node and the cluster is unreachable"
+	const fullWarning = "stacked-etcd control-plane node and its etcd member may not have been removed"
 	const verifyLine = "verify with `etcdctl member list`"
 	cases := []struct {
 		name       string
@@ -306,8 +306,8 @@ func TestEtcdMemberAdvisoryIsNeverSilent(t *testing.T) {
 		notWant    string
 	}{
 		{name: "apiserver up, kubeadm reset clean", reachable: true, want: verifyLine, notWant: fullWarning},
-		{name: "apiserver up, kubeadm reset failed", reachable: true, kubeadmErr: context.DeadlineExceeded, want: fullWarning, notWant: verifyLine},
-		{name: "apiserver down", reachable: false, want: fullWarning, notWant: verifyLine},
+		{name: "apiserver up, kubeadm reset failed", reachable: true, kubeadmErr: context.DeadlineExceeded, want: fullWarning + " (kubeadm reset failed)", notWant: verifyLine},
+		{name: "apiserver down", reachable: false, want: fullWarning + " (this node's apiserver did not answer)", notWant: verifyLine},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

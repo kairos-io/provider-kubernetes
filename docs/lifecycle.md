@@ -57,7 +57,10 @@ anything below those directories that is still a mount point: when a volume coul
 not be unmounted, for example because a container still uses it, the reset leaves
 it in place with its data, empties everything around it, and fails with
 `reason: ResetFailed`. The status says how many mounts were kept and the reset log
-names them; unmount them and run the reset again. The cleanup does not read a
+names them; unmount them and run the reset again. In that case `kubeadm reset`
+stopped before removing the containers: the kubelet is stopped, but some
+control-plane containers, such as the apiserver, can keep running until the
+second reset removes them. The cleanup does not read a
 mounted filesystem below those directories, with one exception on kernels older
 than 6.18: an automount point that has not been mounted yet may still be triggered
 when it is checked.

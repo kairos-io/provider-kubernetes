@@ -151,9 +151,10 @@ func isStackedEtcdCP(root string) bool {
 // point under an artifact directory was left in place, a *MountsKeptError
 // (which wraps ErrMountsKept), joined when both happened.
 //
-// HA-5: if the node is a stacked-etcd CP and the cluster is unreachable, a loud
-// actionable warning is emitted (naming the operator remediation). No etcdctl is
-// run. A sweep of RunDir for leftover transient kubeadm-*.yaml files also runs.
+// HA-5: on a stacked-etcd CP the etcd member advisory follows kubeadm reset
+// (etcdMemberAdvisory): a loud actionable warning naming what made the removal
+// doubtful, or a line asking the operator to verify. No etcdctl is run. A sweep
+// of RunDir for leftover transient kubeadm-*.yaml files also runs.
 func Run(ctx context.Context, opts Options) error {
 	root, err := validateRoot(opts.RootPath)
 	if err != nil {
@@ -192,7 +193,14 @@ func Run(ctx context.Context, opts Options) error {
 		logrus.Warnf("provider-kubernetes: kubeadm reset returned an error (continuing cleanup): %v", kubeadmErr)
 	}
 	if cpIsStacked {
-		etcdMemberAdvisory(opts.NodeName, clusterReachable && kubeadmErr == nil)
+		why := ""
+		switch {
+		case !clusterReachable:
+			why = "this node's apiserver did not answer"
+		case kubeadmErr != nil:
+			why = "kubeadm reset failed"
+		}
+		etcdMemberAdvisory(opts.NodeName, why)
 	}
 
 	var firstErr error
@@ -228,8 +236,10 @@ func Run(ctx context.Context, opts Options) error {
 // "failed to remove etcd member" as warnings while still exiting 0. So a
 // healthy local apiserver and a clean exit make the removal likely but not
 // certain: the advisory never goes silent, it only changes from "act" to
-// "verify".
-func etcdMemberAdvisory(nodeName string, likelyRemoved bool) {
+// "verify". why names what made the removal doubtful; empty means nothing
+// did. The detection reads the etcd manifest and data directory, which the
+// first reset removes, so only the first run on a node can give it.
+func etcdMemberAdvisory(nodeName, why string) {
 	if nodeName == "" {
 		if h, err := os.Hostname(); err == nil {
 			nodeName = h
@@ -237,17 +247,17 @@ func etcdMemberAdvisory(nodeName string, likelyRemoved bool) {
 			nodeName = "<node-name>"
 		}
 	}
-	if likelyRemoved {
+	if why == "" {
 		logrus.Warnf("provider-kubernetes: this was a stacked-etcd control-plane node. kubeadm reset removes its etcd member when it "+
 			"can reach the cluster, but reports a failed removal only as a warning: from a surviving control-plane node, "+
 			"verify with `etcdctl member list` that %s is gone, and `etcdctl member remove <id>` it if not.", nodeName)
 		return
 	}
-	logrus.Warnf("provider-kubernetes: ATTENTION: this appears to be a stacked-etcd control-plane node and the cluster is unreachable. "+
+	logrus.Warnf("provider-kubernetes: ATTENTION: this appears to be a stacked-etcd control-plane node and its etcd member may not have been removed (%s). "+
 		"The etcd member for this node may remain registered in the etcd quorum after reset, which can cause quorum loss. "+
 		"Operator action required from a surviving control-plane node: "+
 		"(1) kubectl delete node %s  "+
 		"(2) etcdctl member list  (identify this node's member ID)  "+
 		"(3) etcdctl member remove <id>  "+
-		"This provider does NOT run etcdctl. Proceeding with local cleanup.", nodeName)
+		"This provider does NOT run etcdctl. Proceeding with local cleanup.", why, nodeName)
 }

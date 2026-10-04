@@ -108,7 +108,7 @@ func TestResetClusterEtcdAdvisoryFollowsTheProbe(t *testing.T) {
 			}
 			warned, verify := false, false
 			for _, e := range hook.AllEntries() {
-				warned = warned || strings.Contains(e.Message, "stacked-etcd control-plane node and the cluster is unreachable")
+				warned = warned || strings.Contains(e.Message, "stacked-etcd control-plane node and its etcd member may not have been removed")
 				verify = verify || strings.Contains(e.Message, "verify with `etcdctl member list`")
 			}
 			if warned == up || verify != up {
