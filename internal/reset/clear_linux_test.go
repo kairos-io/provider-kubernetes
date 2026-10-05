@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -339,4 +341,33 @@ func captureLogs(t *testing.T) *logrustest.Hook {
 	saved := logger.ReplaceHooks(make(logrus.LevelHooks))
 	t.Cleanup(func() { logger.ReplaceHooks(saved) })
 	return logrustest.NewLocal(logger)
+}
+
+// TestClearArtifactReportsInSortedOrder: the walk visits entries in name order,
+// so what it keeps, and the error and log that name it, read the same on every
+// filesystem. Directory listing order is the filesystem's own: hash order on
+// ext4, creation or reverse-creation order on tmpfs depending on the kernel.
+func TestClearArtifactReportsInSortedOrder(t *testing.T) {
+	kubelet := filepath.Join(t.TempDir(), "kubelet")
+	var want []string
+	for _, p := range []string{"p6", "p2", "p9", "p0", "p4", "p8", "p1", "p7", "p3", "p5"} {
+		m := filepath.Join(kubelet, "pods", p, "mnt")
+		mkfile(t, filepath.Join(m, "data"), "x")
+		want = append(want, m)
+	}
+	sort.Strings(want)
+	withHooks(t, func(name string) error {
+		if name == "mnt" {
+			return unix.EXDEV
+		}
+		return nil
+	}, nil)
+
+	kept, err := clearArtifact(kubelet)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Equal(kept, want) {
+		t.Fatalf("kept in order %v, want sorted %v", kept, want)
+	}
 }

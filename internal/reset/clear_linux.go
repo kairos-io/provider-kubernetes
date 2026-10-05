@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -199,7 +200,10 @@ func openBeneath(fd int, name string) (int, error) {
 }
 
 // readDirNames lists the entries of the directory open at fd without stat'ing
-// any of them, so a mount point below is never touched.
+// any of them, so a mount point below is never touched. The names are sorted:
+// listing order is the filesystem's own (hash order on ext4, creation or
+// reverse-creation order on tmpfs depending on the kernel), and sorting makes
+// the walk, and the paths it keeps and reports, the same everywhere.
 func readDirNames(fd int) ([]string, error) {
 	dup, err := unix.Dup(fd)
 	if err != nil {
@@ -208,7 +212,9 @@ func readDirNames(fd int) ([]string, error) {
 	unix.CloseOnExec(dup)
 	f := os.NewFile(uintptr(dup), "")
 	defer func() { _ = f.Close() }()
-	return f.Readdirnames(-1)
+	names, err := f.Readdirnames(-1)
+	sort.Strings(names)
+	return names, err
 }
 
 func ignoreNotExist(err error) error {
