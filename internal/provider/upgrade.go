@@ -16,15 +16,38 @@ import (
 
 // This file holds the production probes the upgrade path (ADR-12 U6) wires into
 // the prober and executor: the cluster's current version, this node's running
-// kubelet version, and whether the persistent partition is encrypted. They exec
-// kubectl/lsblk/findmnt and are intentionally best-effort (return ""/false on any
+// kubelet version, and whether the local apiserver is serving. They exec kubectl
+// or speak HTTP, and are intentionally best-effort (return ""/false on any
 // error) so a probe failure never blocks reconcile. They are injectable via
 // Options for hardware-free tests; these defaults run only on a real node.
+//
+// Whether the persistent partition is encrypted is NOT probed here: that moved
+// to internal/etcdsnapshot, which answers it from sysfs/statfs rather than by
+// exec'ing findmnt or lsblk.
 
-// kubeconfigFor returns the kubeconfig to use for cluster reads under rootPath:
-// admin.conf on a control plane, else kubelet.conf. Empty if neither exists.
+// kubeconfigFor returns the kubeconfig the upgrade probes read the cluster with,
+// under rootPath: kubelet.conf when it exists, else admin.conf. Empty if neither
+// does, and an empty rootPath means "/" so the result is never relative to the
+// provider's working directory.
+//
+// kubelet.conf is preferred for the same reason status.resolveKubeconfig prefers
+// it (security Q2): both callers below are read-only, best-effort reads about
+// this node, and kubelet.conf's system:node:<name> identity covers both --
+// kubeadm binds its kubeadm:nodes-kubeadm-config Role to the system:nodes group,
+// and the Node authorizer lets a node read its own Node object. admin.conf is
+// system:masters, an unnecessary blast radius here, and it is also the file that
+// ages out first: the kubelet rotates its own credential, nothing rotates
+// admin.conf, so an expired admin.conf used to silence both probes on an
+// otherwise healthy control plane.
+//
+// initFinishedViaKubectl (controlplanehealth.go) is deliberately NOT part of
+// this: it reads Deployments and DaemonSets in kube-system, which system:nodes
+// cannot do, so it keeps admin.conf.
 func kubeconfigFor(rootPath string) string {
-	for _, name := range []string{"admin.conf", "kubelet.conf"} {
+	if rootPath == "" {
+		rootPath = "/"
+	}
+	for _, name := range []string{"kubelet.conf", "admin.conf"} {
 		p := filepath.Join(rootPath, "etc", "kubernetes", name)
 		if _, err := os.Stat(p); err == nil {
 			return p
