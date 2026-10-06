@@ -256,8 +256,9 @@ func resolveNodeName() (string, error) {
 // under rootPath: kubelet.conf is preferred (node identity, least privilege);
 // admin.conf is used only as a fallback when kubelet.conf is absent. "" is
 // returned when neither exists (pre-membership). This is the same heuristic used
-// by the upgrade probes (kubeconfigFor in provider/upgrade.go); duplicated here
-// to keep the status package free of a provider package import.
+// by the upgrade probes (kubeconfigFor in provider/upgrade.go), which has its own
+// test pinning the order; duplicated here to keep the status package free of a
+// provider package import.
 //
 // Precedence rationale (security Q2): kubelet.conf carries the node identity
 // (system:node:<name>), which is sufficient for own-Node annotation writes and
