@@ -281,6 +281,30 @@ already exists at the endpoint, so the provider refuses to clobber it. Use `role
 controlplane` (with minted control-plane material) to join instead, or `role:
 worker`. See [Security model](./security.md#never-clobber-an-existing-cluster).
 
+If you are sure no cluster exists yet, something else serves TLS at the
+endpoint. The provider counts any TLS server there that answers `GET /version`
+with anything but 502, 503 or 504. A load balancer in TCP mode with no backend
+does not count. One that terminates TLS does, if it answers with its own page
+or closes the connection after the handshake; kubeadm needs the load balancer
+to pass TCP through anyway. Ask the endpoint what answers, from the node:
+
+```sh
+curl -sk --noproxy '*' --http1.1 --max-time 5 -o /dev/null -w '%{http_code}\n' https://<controlPlaneEndpoint>/version
+```
+
+Any code other than 000, 502, 503 or 504 is the answer that made the provider
+refuse. A 000 after a completed TLS handshake (run with `-v` to see it) also
+counts: the provider treats a TLS server that closes the connection or is too
+slow to answer as a busy control plane.
+
+Point the endpoint at the control planes only, or have the load balancer pass
+TCP through. The refusal is not remembered: the next boot checks again, or
+check now with
+
+```sh
+sudo /system/providers/agent-provider-kubernetes reconcile --cluster-file=/run/provider-kubernetes/cluster.json
+```
+
 ### Join fails: missing CA anchor / refuses to build join config
 
 Token discovery requires `caCertHashes`. Re-mint with `mint-join` (which computes

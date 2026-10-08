@@ -19,6 +19,14 @@ into the API server serving certificate and is how every node reaches the API.
 - At `role: controlplane` an empty endpoint is a **hard failure**.
 - You cannot retrofit an endpoint into a live cluster (it requires re-issuing all
   API server certs). Initialize with the stable endpoint from the start.
+- The load balancer can be up before the first control plane. `role: init`
+  refuses to run when a control plane already answers at the endpoint, and a
+  load balancer in TCP mode with no backend yet does not count as one: the
+  check needs a TLS server at the endpoint. Pass TCP through to the control
+  planes; a load balancer that terminates TLS cannot carry the client
+  certificates kubeadm's nodes authenticate with, and before the first
+  control plane it can still read as one. See
+  [Security model](./security.md#never-clobber-an-existing-cluster).
 
 ## Bring up ONE control plane at a time
 

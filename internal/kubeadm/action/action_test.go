@@ -194,7 +194,7 @@ func TestExecuteRefuseInitIsHardError(t *testing.T) {
 }
 
 // HA-4: worker join does NOT run the /readyz health gate; it goes straight through
-// after TCP reachability.
+// once the endpoint answers.
 func TestWaitForControlPlane_WorkerSkipsHealthGate(t *testing.T) {
 	reached := false
 	e := &KubeadmExecutor{
@@ -208,7 +208,7 @@ func TestWaitForControlPlane_WorkerSkipsHealthGate(t *testing.T) {
 	if !reached {
 		t.Fatal("CPReachable probe must be called for worker join")
 	}
-	// For workers, the method returns after TCP reachability (no /readyz) -- the
+	// For workers, the method returns once the endpoint answers (no /readyz) -- the
 	// test just verifies it returns nil quickly without hanging.
 }
 

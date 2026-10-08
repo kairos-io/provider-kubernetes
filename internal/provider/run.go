@@ -1,9 +1,15 @@
 package provider
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -29,9 +35,10 @@ type Options struct {
 	// RunDir is the ephemeral directory for transient secret-bearing config; empty
 	// defaults to /run.
 	RunDir string
-	// CPReachableProbe overrides the default TCP-dial probe for control-plane
-	// reachability. When nil, a bounded TCP-dial to the controlPlaneEndpoint is
-	// used. Inject a custom probe in tests to avoid real network calls.
+	// CPReachableProbe overrides the default probe for control-plane
+	// reachability. When nil, makeCPReachableProbe asks the endpoint for a TLS
+	// server answering GET /version, bounded. Inject a custom probe in tests to
+	// avoid real network calls.
 	CPReachableProbe func(ctx context.Context) bool
 
 	// StatusSink is the destination for the structured reconcile status
@@ -432,22 +439,119 @@ func joinDialEndpoint(role actualstate.Role, in kubeadmconfig.Input) string {
 	return in.ControlPlaneEndpoint
 }
 
-// makeCPReachableProbe returns a bounded TCP reachability probe for the given
-// endpoint ("host:port"). Returns nil if the endpoint is empty (callers treat
-// nil as unreachable). The probe attempts a TCP dial with a 5s deadline so it
-// never hangs (design principle 4 / #4099-1).
+// makeCPReachableProbe returns a bounded probe that reports whether a control
+// plane answers at endpoint ("host:port"). Returns nil if the endpoint is empty
+// (callers treat nil as unreachable). Its answer decides whether a fresh
+// role: init refuses to clobber an existing control plane (HA-3, ADR-11 #2),
+// whether a join waits for the control plane first, and when the executor's
+// wait for it ends.
+//
+// A TCP connect is not enough: a load balancer in TCP mode, kubeadm's own HA
+// recipe, accepts the connection before any backend exists and then closes
+// it, so a bare dial saw a control plane where there was none and the first
+// init was refused for good. The probe therefore needs a TLS server at the
+// endpoint: something that completes a TLS handshake there terminates TLS
+// for the endpoint, and a load balancer passing TCP through to no backend
+// cannot. It then asks GET /version, and the only answers that still mean
+// "no control plane" are the gateway errors (502, 503, 504) a TLS-terminating
+// load balancer gives when it has no backend, unless the body is a Kubernetes
+// Status object, which only an apiserver sends. Any other answer, a
+// connection closed or an answer cut off after the handshake, and no answer
+// within the bound all count as serving: the guard errs towards refusing an
+// init, never towards a second cluster.
+//
+// The certificate is not verified: before init there is no cluster CA to
+// verify it against. No credentials are sent, and the result is used only as
+// this yes/no. No proxy is consulted, so HTTPS_PROXY can never answer on the
+// endpoint's behalf. Bounded by cpProbeTimeout and the caller's context
+// (design principle 4 / #4099-1), and by cpProbeReadCap in what it reads; a
+// canceled caller gets false, as a failed dial did.
 func makeCPReachableProbe(endpoint string) func(ctx context.Context) bool {
 	if endpoint == "" {
 		return nil
 	}
+	dialer := &tls.Dialer{Config: &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // no CA before init; yes/no only, no credentials sent
+		MinVersion:         tls.VersionTLS12,
+	}}
 	return func(ctx context.Context) bool {
-		dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		probeCtx, cancel := context.WithTimeout(ctx, cpProbeTimeout)
 		defer cancel()
-		conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", endpoint)
+		conn, err := dialer.DialContext(probeCtx, "tcp", endpoint)
 		if err != nil {
+			// Refused, timed out, or no TLS server: a TCP load balancer
+			// without a backend accepts and closes, which fails here.
+			logrus.Debugf("provider-kubernetes: no TLS server at %s: %v", endpoint, err)
 			return false
 		}
-		_ = conn.Close()
+		defer func() { _ = conn.Close() }()
+		// A read on the connection does not watch the context: closing it
+		// when the bound passes or the caller gives up unblocks the read.
+		stop := context.AfterFunc(probeCtx, func() { _ = conn.Close() })
+		defer stop()
+		status, fromAPIServer, err := versionAnswer(probeCtx, conn, endpoint)
+		if ctx.Err() != nil {
+			return false
+		}
+		if err != nil {
+			logrus.Debugf("provider-kubernetes: TLS server at %s gave no complete answer to GET /version (counted as serving): %v", endpoint, err)
+			return true
+		}
+		switch status {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			if fromAPIServer {
+				return true // an apiserver's own error, while it shuts down for example
+			}
+			logrus.Debugf("provider-kubernetes: %s answered GET /version with %d: a load balancer without a backend", endpoint, status)
+			return false
+		}
 		return true
 	}
+}
+
+// cpProbeTimeout bounds one makeCPReachableProbe call, handshake and answer
+// together.
+var cpProbeTimeout = 5 * time.Second
+
+// cpProbeReadCap bounds how much of an answer makeCPReachableProbe reads,
+// status line, headers and body together. The certificate is not verified, so
+// whatever answers is untrusted; an apiserver's /version answer is well under
+// 1 KiB.
+const cpProbeReadCap = 64 << 10
+
+// cpProbeUserAgent names the probe in the apiserver's audit log.
+var cpProbeUserAgent = "provider-kubernetes/" + version.Version + " control-plane-probe"
+
+// versionAnswer sends GET /version on conn, an established TLS connection to
+// endpoint, and returns the status code of the answer and whether its body is
+// a Kubernetes Status object. It reads at most cpProbeReadCap bytes, and the
+// body only for a gateway error.
+func versionAnswer(ctx context.Context, conn net.Conn, endpoint string) (status int, fromAPIServer bool, err error) {
+	u := url.URL{Scheme: "https", Host: endpoint, Path: "/version"}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return 0, false, err
+	}
+	req.Close = true
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", cpProbeUserAgent)
+	if err := req.Write(conn); err != nil {
+		return 0, false, err
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(io.LimitReader(conn, cpProbeReadCap)), req)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		var st struct {
+			Kind       string `json:"kind"`
+			APIVersion string `json:"apiVersion"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&st) == nil && st.Kind == "Status" && st.APIVersion == "v1" {
+			fromAPIServer = true
+		}
+	}
+	return resp.StatusCode, fromAPIServer, nil
 }
