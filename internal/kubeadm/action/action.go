@@ -204,8 +204,9 @@ func (e *KubeadmExecutor) runJoin(ctx context.Context) error {
 	return nil
 }
 
-// waitForControlPlane waits until the CP endpoint is reachable (TCP-level) and,
-// for control-plane joins, until the CP /readyz endpoint reports healthy (HA-4).
+// waitForControlPlane waits until a control plane answers at the CP endpoint
+// (CPReachable; the provider's probe needs a TLS server there) and, for
+// control-plane joins, until the CP /readyz endpoint reports healthy (HA-4).
 // The overall wait is bounded by ctx (which the reconcile.Reconciler sets from
 // Budget.PerAttempt); it never hangs (design principle 4 / #4099-1).
 func (e *KubeadmExecutor) waitForControlPlane(ctx context.Context) error {
@@ -222,7 +223,7 @@ func (e *KubeadmExecutor) waitForControlPlane(ctx context.Context) error {
 		}
 	}
 	// HA-4: for control-plane joins, add a bounded /readyz health gate so we do
-	// not join a quorum that is TCP-reachable but not yet healthy. Worker joins
+	// not join a quorum that answers but is not yet healthy. Worker joins
 	// keep the existing behavior (kubeadm join handles the API availability wait).
 	if e.Role == actualstate.RoleControlPlane {
 		return e.waitForCPHealthy(ctx)

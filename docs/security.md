@@ -170,6 +170,36 @@ controlplane`), rather than running `kubeadm init` and destroying the existing
 cluster. This protects both Kairos-bootstrapped and externally-managed control
 planes.
 
+"Answers" means a TLS server completes a handshake at the endpoint and then
+does anything but answer `GET /version` with a gateway error (502, 503 or 504)
+from something other than an apiserver. A full answer with any other status
+counts, and so do a connection closed, an answer cut off and no answer within
+the 5-second bound once the handshake is done: the check errs towards
+refusing, so an apiserver too busy to answer still counts. What does not
+count:
+- a load balancer in TCP mode with no backend yet, which accepts the
+  connection and closes it (or holds it) without a handshake;
+- a refused connection, or a connection or handshake that does not complete
+  within 5 seconds (one bound covers connecting, the handshake and the answer);
+- a server that does not speak TLS;
+- a 502, 503 or 504 whose body is not a Kubernetes `Status` object, the answer
+  of a load balancer that terminates TLS and has no backend.
+
+The check does not verify the certificate, because there is no cluster CA
+before `init`. It sends no credentials and reads at most 64 KiB of the answer.
+Joins use the same check to wait for the control plane.
+
+The guard protects against a configuration mistake, a second `role: init`
+pointed at a live cluster. It is not a security control: whoever controls the
+network path to the endpoint can make it answer either way. It also cannot
+tell "no control plane yet" from "every control plane is down": if a fresh
+node with `role: init` boots while all control planes behind the load balancer
+are down, or the load balancer's health checks fail them all, it runs
+`kubeadm init`. A node configured `role: init` that is already a member is
+never re-initialized, whatever the check says; the exposure is a new or
+reinstalled node carrying `role: init`. Give every node after the first
+`role: controlplane` or `role: worker`.
+
 ## Exec hygiene
 
 Every tool the provider runs is an absolute path in the booted image, started with
