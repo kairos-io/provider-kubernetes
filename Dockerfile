@@ -56,7 +56,7 @@ ARG TARGETARCH=amd64
 # latest patch, rather than the provider's Go: kubelet is upstream code, so it is
 # compiled with the toolchain upstream qualifies it against. Move it to a newer
 # Go minor only once upstream release branches do.
-ARG STATIC_BUILDER_IMAGE=golang:1.26.8@sha256:3c3e25a4da13fd0478eed2df1eb35a0e667094a7124d3993a6a1d30f71c17e79
+ARG STATIC_BUILDER_IMAGE=golang:1.26.8@sha256:eb36c1664dd974cde625f736e02c204383deebe03977365caaec5bf49f794348
 
 # Kubernetes (must be within the supported window the provider enforces at
 # runtime: 1.35 / 1.36 / 1.37 as of September 2026).
