@@ -59,9 +59,15 @@ build:
 test:
 	$(GO) test ./... -coverprofile=coverage.out
 
-## vet: run go vet
+## vet: run go vet over the default build and over the e2e build tags
+##
+## `go vet ./...` compiles nothing under test/e2e: every file there is behind
+## //go:build e2e, and the Tier-2 scenarios behind `e2e && nightly`. The second
+## pass is the only type check those files get outside a real e2e run, so a
+## compile break in them cannot wait for the nightly workflow to notice.
 vet:
 	$(GO) vet ./...
+	$(GO) vet -tags "e2e nightly" ./test/e2e/...
 
 ## fmt: format the code in place
 fmt:
