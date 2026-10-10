@@ -1,6 +1,6 @@
 module github.com/kairos-io/provider-kubernetes
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/kairos-io/kairos-sdk v0.5.0
