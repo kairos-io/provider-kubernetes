@@ -21,7 +21,7 @@ CONTAINERD_VERSION ?= 2.3.5
 # with CONTAINERD_VERSION.
 CONTAINERD_COMMIT  ?= 1294c24a7da8e5a793ed378161673abe94118892
 # renovate: datasource=github-releases depName=opencontainers/runc
-RUNC_VERSION       ?= v1.5.1
+RUNC_VERSION       ?= v1.5.2
 # renovate: datasource=github-releases depName=containernetworking/plugins
 CNI_PLUGINS_VERSION ?= v1.9.1
 # Kairos OS base the image is built FROM. Defaults to the pure upstream Hadron
