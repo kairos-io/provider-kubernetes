@@ -190,7 +190,9 @@ is the one CI built. The two halves of the supply chain:
   attestation** and a **CycloneDX SBOM attestation**, signed via the workflow's OIDC
   identity (no private key, ADR-15). The release job self-verifies its own
   attestations before publishing, so a broken signing step fails the release rather
-  than reaching a tester.
+  than reaching a tester. The SBOMs come from syft, installed from a release
+  pinned by version and sha256 in `scripts/install-syft.sh`; no installer script
+  runs in the jobs that hold the signing identity.
 
 Verify with the GitHub CLI (no extra tooling):
 
