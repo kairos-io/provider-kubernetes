@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -117,6 +118,19 @@ func tlsServerAnswering(t *testing.T, code int) string {
 	}))
 	t.Cleanup(srv.Close)
 	return srv.Listener.Addr().String()
+}
+
+// The probe's TLS configuration skips verification (there is no CA before
+// init), so what it may still do is pinned: no TLS older than 1.2, and no
+// client certificate to present.
+func TestInsecureProbeTLSConfig(t *testing.T) {
+	c := insecureProbeTLSConfig()
+	if c.MinVersion < tls.VersionTLS12 {
+		t.Errorf("MinVersion = %#x, want TLS 1.2 or later", c.MinVersion)
+	}
+	if len(c.Certificates) != 0 || c.GetClientCertificate != nil {
+		t.Error("the probe's TLS configuration carries a client certificate; it must present none")
+	}
 }
 
 func TestCPReachableProbeEmptyEndpointIsNil(t *testing.T) {

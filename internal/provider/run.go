@@ -470,10 +470,7 @@ func makeCPReachableProbe(endpoint string) func(ctx context.Context) bool {
 	if endpoint == "" {
 		return nil
 	}
-	dialer := &tls.Dialer{Config: &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // no CA before init; yes/no only, no credentials sent
-		MinVersion:         tls.VersionTLS12,
-	}}
+	dialer := &tls.Dialer{Config: insecureProbeTLSConfig()}
 	return func(ctx context.Context) bool {
 		probeCtx, cancel := context.WithTimeout(ctx, cpProbeTimeout)
 		defer cancel()
@@ -507,6 +504,15 @@ func makeCPReachableProbe(endpoint string) func(ctx context.Context) bool {
 		}
 		return true
 	}
+}
+
+// insecureProbeTLSConfig is makeCPReachableProbe's TLS configuration, and it
+// does not verify the server's certificate: before init there is no cluster CA
+// to verify it against. That is safe only because the probe sends no
+// credentials and takes nothing from the answer but a yes or no. Like
+// action.tlsInsecure, it is for that probe alone.
+func insecureProbeTLSConfig() *tls.Config {
+	return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12} //nolint:gosec // see above
 }
 
 // cpProbeTimeout bounds one makeCPReachableProbe call, handshake and answer
