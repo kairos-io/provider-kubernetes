@@ -254,3 +254,58 @@ func TestRunningKubeletVersionViaKubectl_DoesNotRewriteTheConfiguredNodeName(t *
 		t.Fatalf("argv = %v, want it to carry the configured name verbatim", fr.calls)
 	}
 }
+
+// TestKubeconfigFor_PrefersKubeletConf pins the precedence the two upgrade
+// probes resolve a kubeconfig with. Both are read-only, best-effort reads about
+// this node (the kubeadm-config ConfigMap and this node's own Node object), and
+// kubelet.conf's system:node:<name> identity covers both: upstream kubeadm binds
+// the kubeadm:nodes-kubeadm-config Role to the system:nodes group, and the Node
+// authorizer lets a node get its own Node. admin.conf is system:masters, an
+// over-grant for these two calls, and it is the credential that stops working
+// first on a long-lived control plane because the kubelet rotates kubelet.conf
+// and nothing rotates admin.conf.
+//
+// status.resolveKubeconfig makes the same choice for the same reason
+// (security Q2) and its doc claims these two agree, so this test is also what
+// keeps that claim true.
+func TestKubeconfigFor_PrefersKubeletConf(t *testing.T) {
+	root := t.TempDir()
+	admin := writeKubeconfig(t, root, "admin.conf")
+	kubelet := writeKubeconfig(t, root, "kubelet.conf")
+
+	if got := kubeconfigFor(root); got != kubelet {
+		t.Fatalf("kubeconfigFor with both files = %q, want kubelet.conf %q", got, kubelet)
+	}
+
+	// admin.conf remains the fallback: a control plane mid-bootstrap can have it
+	// before the kubelet has been handed its own credential.
+	if err := os.Remove(kubelet); err != nil {
+		t.Fatal(err)
+	}
+	if got := kubeconfigFor(root); got != admin {
+		t.Fatalf("kubeconfigFor without kubelet.conf = %q, want admin.conf %q", got, admin)
+	}
+}
+
+// TestKubeconfigFor_EmptyRootIsAbsolute: an empty cluster_root_path means "/",
+// never a path relative to the provider's working directory. options.go defaults
+// it today, so this guards the function itself rather than a live caller --
+// status.resolveKubeconfig already normalizes it the same way.
+func TestKubeconfigFor_EmptyRootIsAbsolute(t *testing.T) {
+	if got := kubeconfigFor(""); got != "" && !filepath.IsAbs(got) {
+		t.Fatalf("kubeconfigFor(\"\") = %q, want \"\" or an absolute path", got)
+	}
+
+	// Prove it is not reading relative to the working directory.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "etc", "kubernetes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "etc", "kubernetes", "kubelet.conf"), []byte("apiVersion: v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if got := kubeconfigFor(""); got == filepath.Join("etc", "kubernetes", "kubelet.conf") {
+		t.Fatalf("kubeconfigFor(\"\") resolved %q against the working directory", got)
+	}
+}
