@@ -113,7 +113,7 @@ RUN go build \
 # kubeadm/kubectl/crictl are already static and run on musl unchanged. kubelet is
 # NOT downloaded here -- it is built static from source (see kubelet-build).
 # ----------------------------------------------------------------------------
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS k8s-binaries
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS k8s-binaries
 ARG KUBERNETES_VERSION
 ARG CRICTL_VERSION
 ARG TARGETARCH
@@ -156,7 +156,7 @@ RUN set -eu; \
 # (runc, CNI). containerd is built static from source (see containerd-build);
 # runc and the CNI plugins are already static and run on musl unchanged.
 # ----------------------------------------------------------------------------
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS runtime-binaries
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS runtime-binaries
 ARG RUNC_VERSION
 ARG CNI_PLUGINS_VERSION
 ARG TARGETARCH
@@ -308,7 +308,7 @@ RUN set -eux; \
 # TARGETARCH is passed explicitly: crane pull selects that platform from each
 # verified multi-arch index (crane's implicit default is linux/amd64).
 # ----------------------------------------------------------------------------
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS image-bundler
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS image-bundler
 ARG KUBERNETES_VERSION
 ARG TARGETARCH
 # crane + cosign are static Go binaries that run on musl; both are version-pinned
