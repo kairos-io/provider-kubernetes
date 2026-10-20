@@ -74,7 +74,7 @@ ARG CONTAINERD_VERSION=2.3.5
 # the static from-source containerd build).
 ARG CONTAINERD_COMMIT=1294c24a7da8e5a793ed378161673abe94118892
 # renovate: datasource=github-releases depName=opencontainers/runc
-ARG RUNC_VERSION=v1.5.1
+ARG RUNC_VERSION=v1.5.2
 # renovate: datasource=github-releases depName=containernetworking/plugins
 ARG CNI_PLUGINS_VERSION=v1.9.1
 ARG CRICTL_VERSION=v1.37.0
