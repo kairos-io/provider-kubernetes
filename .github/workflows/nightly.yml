@@ -102,9 +102,6 @@ jobs:
           go-version-file: go.mod
           check-latest: false
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
-
       - name: Resolve lower-minor patch + commit + crictl versions
         id: lower
         run: |

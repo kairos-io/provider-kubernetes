@@ -47,6 +47,22 @@ jobs:
       - name: go build
         run: make build
 
+      # The release generates its SBOMs with the syft pinned in
+      # scripts/install-syft.sh, but the release workflow runs only on tags.
+      # Install and run it here as the release does, so a broken pin (a
+      # Renovate bump included) fails a pull request, not a release.
+      - name: release SBOM tooling (pinned syft)
+        env:
+          SYFT_CHECK_FOR_APP_UPDATE: "false"
+        run: |
+          set -euo pipefail
+          bash scripts/install-syft.sh "${RUNNER_TEMP}/syft"
+          sbom="${RUNNER_TEMP}/binary.cdx.json"
+          "${RUNNER_TEMP}/syft/syft" scan file:bin/agent-provider-kubernetes -o "cyclonedx-json=${sbom}"
+          # What actions/attest requires of a CycloneDX SBOM.
+          jq -e '.bomFormat == "CycloneDX" and (.specVersion | length > 0) and (.serialNumber | length > 0)' "${sbom}" >/dev/null
+          echo "binary SBOM: CycloneDX $(jq -r .specVersion "${sbom}"), $(jq '.components | length' "${sbom}") components"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
@@ -103,9 +119,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
       - name: Resolve Kubernetes patch + commit + crictl versions
         id: ver
@@ -404,9 +417,6 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: false
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
       - name: Resolve Kubernetes patch + commit + crictl versions
         id: ver
