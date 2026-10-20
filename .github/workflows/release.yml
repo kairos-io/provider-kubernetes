@@ -194,7 +194,7 @@ jobs:
       # actions/attest-sbom 16 MiB predicate cap; the equivalent CycloneDX SBOM is
       # ~3 MiB. CycloneDX is the compact format for image-scale SBOMs.
       - name: Generate image SBOM (CycloneDX)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: ${{ steps.build.outputs.image }}@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
@@ -292,7 +292,7 @@ jobs:
       # CycloneDX for consistency with the image SBOM (one SBOM format across all
       # published artifacts; well under the attest-sbom 16 MiB cap).
       - name: Generate binary SBOM (CycloneDX)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           file: bin/agent-provider-kubernetes
           format: cyclonedx-json
