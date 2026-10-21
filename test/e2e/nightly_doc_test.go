@@ -10,7 +10,7 @@ package e2e
 //     files carry `//go:build e2e && nightly`, so they are EXCLUDED from the per-PR
 //     run -- the per-PR budget never pays for the heavy HA, failure and
 //     control-plane-down scenarios.
-//   - Nightly Tier-2 (nightly.yml) runs `go test -tags "e2e nightly" ...`, which
+//   - Nightly Tier-2 (nightly-e2e.yml) runs `go test -tags "e2e nightly" ...`, which
 //     satisfies `e2e && nightly`, so it compiles AND runs everything: the Tier-1
 //     scenarios (still tagged `e2e`) PLUS the nightly-only files.
 //   - `make e2e` -> per-PR set; `make e2e-nightly` -> the full set with a longer

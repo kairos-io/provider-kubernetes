@@ -27,6 +27,13 @@ name: Nightly E2E
 on:
   schedule:
     # 03:00 UTC daily (ADR-13 OQ-E3).
+    #
+    # This file was `nightly.yml` until kairos-io/kairos#5401. `main` went quiet
+    # from 2026-07-02 to 2026-09-14, so GitHub's 60-day inactivity rule stopped
+    # scheduling it: the last run is 2026-09-01, and editing the file in place
+    # (b5898041, 2026-09-18) did not bring it back. GitHub keys that pause to the
+    # workflow id, which is derived from the path, so the rename registers the
+    # cron again. Do not rename this file back.
     - cron: "0 3 * * *"
   workflow_dispatch: {}
 
