@@ -53,7 +53,7 @@ jobs:
           # Pin to the version validated locally against the v2 config. Its
           # bundled golang.org/x/tools must read the export data of the go.mod
           # `go` version (v2.14.0 ships x/tools v0.50.0, needed for go1.27.2).
-          version: v2.14.0
+          version: v2.15.0
 
   # Derive the image-build matrix from the single source of truth for the
   # supported Kubernetes window: kubeadm.SupportedMinors in version.go (ADR-3).
