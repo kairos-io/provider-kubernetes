@@ -43,7 +43,7 @@ ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940
 ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
 # Provider toolchain: its tag MUST match the go.mod `go` directive (enforced by
 # `make verify-pins`), so the image build never drifts from CI.
-ARG GO_BUILDER_IMAGE=golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
+ARG GO_BUILDER_IMAGE=golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
 ARG TARGETARCH=amd64
 
 # containerd and kubelet are ALWAYS built fully static from source: Hadron is
