@@ -215,6 +215,19 @@ func runMintJoin(args []string) int {
 		fmt.Fprintf(os.Stderr, "role must be worker or controlplane, got %q\n", *role)
 		return 2
 	}
+	// Check the cluster_token before minting, so a value the joining node would
+	// refuse at boot does not leave a bootstrap token behind. Empty is allowed:
+	// the rendered config then carries a placeholder to fill in.
+	if tok := strings.TrimSpace(*clusterToken); tok != "" {
+		warning, err := provider.ValidateClusterToken(tok)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		if warning != "" {
+			fmt.Fprintln(os.Stderr, "warning:", warning)
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
