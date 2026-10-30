@@ -158,6 +158,19 @@ func TestParseMigrateUnitsArgs(t *testing.T) {
 
 // --- D-3 / F-UKIBOOT (security review 2026-09-18): S-D3-1 wrapper tests ---
 
+// TestRunMintJoinRejectsShortClusterToken is kairos-io/kairos#5840: a
+// --cluster-token the joining node would refuse at boot must be a usage error
+// (2) before anything is minted. Minting needs kubeadm and an admin.conf under
+// --root-path, neither of which exists here, so reaching it would return 1.
+func TestRunMintJoinRejectsShortClusterToken(t *testing.T) {
+	root := t.TempDir()
+	for _, tok := range []string{"short", "  short-token   "} {
+		if got := runMintJoin([]string{"--root-path", root, "--endpoint", "10.0.0.5:6443", "--cluster-token", tok}); got != 2 {
+			t.Errorf("runMintJoin(--cluster-token %q) = %d, want 2", tok, got)
+		}
+	}
+}
+
 // fakeProvider builds a clusterplugin.ClusterProvider that records every
 // Cluster it is called with and returns a fixed yip.YipConfig.
 func fakeProvider(cfg yip.YipConfig) (clusterplugin.ClusterProvider, *[]clusterplugin.Cluster) {

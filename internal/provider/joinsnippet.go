@@ -99,6 +99,10 @@ func RenderJoinCloudConfig(s JoinSnippet) (string, error) {
 	clusterToken := strings.TrimSpace(s.ClusterToken)
 	if clusterToken == "" {
 		clusterToken = clusterTokenPlaceholder
+	} else if _, err := ValidateClusterToken(clusterToken); err != nil {
+		// The joining node applies the same rule at boot; refuse here so the
+		// operator learns it on the minting node, not the remote one.
+		return "", err
 	}
 	device := strings.TrimSpace(s.Device)
 	if device == "" {
