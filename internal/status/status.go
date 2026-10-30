@@ -460,7 +460,7 @@ func deriveReason(a reconcile.Action, err error, result reconcile.RunResult) Rea
 		case reconcile.ActionRefuseUpgrade:
 			return ReasonUpgradeRefused
 		case reconcile.ActionRunJoin:
-			return ReasonJoinTimeout
+			return ReasonConfigInvalid
 		default:
 			return ReasonKubeadmError
 		}
@@ -469,9 +469,9 @@ func deriveReason(a reconcile.Action, err error, result reconcile.RunResult) Rea
 	// Budget exhaustion: the driver retried MaxAttempts times.
 	if result.BudgetExhausted {
 		switch a {
-		case reconcile.ActionWaitForControlPlane, reconcile.ActionRunJoin:
+		case reconcile.ActionWaitForControlPlane:
 			return ReasonControlPlaneUnreachable
-		case reconcile.ActionWaitForClusterUpgrade:
+		case reconcile.ActionRunJoin, reconcile.ActionWaitForClusterUpgrade:
 			return ReasonJoinTimeout
 		default:
 			return ReasonBudgetExhausted

@@ -67,13 +67,13 @@ version: v0.4.0
 
 | `reason` | What happened |
 |----------|---------------|
-| `ControlPlaneUnreachable` | The control-plane endpoint was not reachable within the budget. |
-| `JoinTimeout` | A join did not complete within the budget. |
+| `ControlPlaneUnreachable` | The control-plane endpoint was not reachable within the budget, so the join never started. |
+| `JoinTimeout` | `kubeadm join` still failed when the budget ran out. The control plane may have answered and refused the join; `message` carries the kubeadm error. |
 | `InitRefused` | A second `role: init` was refused to avoid clobbering an existing cluster (#4099-5). |
 | `UpgradeRefused` | A downgrade, skip-level, or out-of-window upgrade pin was refused. |
 | `BudgetExhausted` | The bounded retry budget ran out. |
 | `KubeadmError` | A kubeadm action failed. |
-| `ConfigInvalid` | The supplied cluster config was invalid (e.g. empty/short `cluster_token`). |
+| `ConfigInvalid` | The supplied cluster config was invalid (e.g. empty/short `cluster_token`, or a joining node with no join material). |
 | `KubeletUnhealthy` | See `phase: Degraded` below. |
 | `InitIncomplete` | See `phase: Degraded` below. |
 | `ControlPlaneUnhealthy` | See `phase: Degraded` below. |

@@ -138,7 +138,7 @@ func TestNightlyPreMembershipFailureStatus(t *testing.T) {
 	// 4. Reason is the CLOSED-enum token the provider sets when the bounded
 	//    wait-for-control-plane reachability budget is exhausted against a dead
 	//    endpoint: ReasonControlPlaneUnreachable (internal/status deriveReason maps
-	//    {ActionWaitForControlPlane|ActionRunJoin, BudgetExhausted} ->
+	//    {ActionWaitForControlPlane, BudgetExhausted} ->
 	//    "ControlPlaneUnreachable"). The lastAction the plan reaches is
 	//    wait-for-control-plane (it never advances to run-join because the endpoint
 	//    never becomes reachable).

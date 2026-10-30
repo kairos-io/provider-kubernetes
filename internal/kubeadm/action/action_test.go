@@ -149,8 +149,12 @@ func TestRunJoinWorkerPinsCAAndShreds(t *testing.T) {
 
 func TestRunJoinRequiresMaterial(t *testing.T) {
 	e := &KubeadmExecutor{Runner: &fakeRunner{}, RunDir: t.TempDir(), Role: actualstate.RoleWorker}
-	if err := e.Execute(context.Background(), reconcile.ActionRunJoin); err == nil {
+	err := e.Execute(context.Background(), reconcile.ActionRunJoin)
+	if err == nil {
 		t.Fatal("expected error when join material is missing")
+	}
+	if !errors.Is(err, reconcile.ErrTerminal) {
+		t.Fatalf("missing join material must be terminal, got %v", err)
 	}
 }
 
