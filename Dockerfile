@@ -44,7 +44,10 @@ ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7
 # Provider toolchain: its tag MUST match the go.mod `go` directive (enforced by
 # `make verify-pins`), so the image build never drifts from CI.
 ARG GO_BUILDER_IMAGE=golang:1.27.3-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c
-ARG TARGETARCH=amd64
+# TARGETARCH is BuildKit's automatic platform arg. It MUST NOT get a default:
+# a default overrides the --platform value, and an arm64 build would then fetch
+# and build amd64 Kubernetes binaries.
+ARG TARGETARCH
 
 # containerd and kubelet are ALWAYS built fully static from source: Hadron is
 # musl, so the glibc-linked official releases cannot exec. A fully static binary
