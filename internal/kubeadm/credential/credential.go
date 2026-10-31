@@ -199,15 +199,24 @@ func (m Minter) UploadCerts(ctx context.Context, certKey string) error {
 // matching upload would cause CP-join to fail or use a stale key. The 2h kubeadm-
 // certs expiry is preserved (B3; no TTL:0 / expiry-strip). The cert-key is never
 // passed on argv (B1) and is not reused (B2: fresh per CP-join call).
-func (m Minter) MintJoinMaterial(ctx context.Context, controlPlane bool, ttl time.Duration) (*JoinMaterial, error) {
-	token, _, err := m.CreateToken(ctx, ttl)
-	if err != nil {
-		return nil, err
-	}
+//
+// The CA hash is read before the token is created, and a failure after `token
+// create` deletes that token again (best effort), so a failed mint never leaves
+// a live token on the cluster that nobody received.
+func (m Minter) MintJoinMaterial(ctx context.Context, controlPlane bool, ttl time.Duration) (_ *JoinMaterial, err error) {
 	hash, err := m.CACertHashFromFile()
 	if err != nil {
 		return nil, err
 	}
+	token, _, err := m.CreateToken(ctx, ttl)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			m.deleteToken(ctx, token)
+		}
+	}()
 	jm := &JoinMaterial{Token: token, CACertHashes: []string{hash}}
 	if controlPlane {
 		key, err := m.GenerateCertificateKey(ctx)
@@ -223,6 +232,19 @@ func (m Minter) MintJoinMaterial(ctx context.Context, controlPlane bool, ttl tim
 		jm.CertificateKey = key
 	}
 	return jm, nil
+}
+
+// tokenDeleteTimeout bounds the best-effort revoke of a token from a failed mint.
+const tokenDeleteTimeout = 30 * time.Second
+
+// deleteToken revokes a bootstrap token by its ID, best effort. Only the ID goes
+// on argv, never the secret. It runs even when ctx is already cancelled, since a
+// cancelled mint is one of the failures that must not leave the token behind.
+func (m Minter) deleteToken(ctx context.Context, token string) {
+	id, _, _ := strings.Cut(token, ".")
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tokenDeleteTimeout)
+	defer cancel()
+	_, _ = m.Runner.Run(ctx, "token", "delete", id, "--kubeconfig", m.adminConf())
 }
 
 // CACertHashFromFile computes the SPKI pin of the cluster CA at the default path
