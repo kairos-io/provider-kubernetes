@@ -238,8 +238,8 @@ func (m Minter) MintJoinMaterial(ctx context.Context, controlPlane bool, ttl tim
 const tokenDeleteTimeout = 30 * time.Second
 
 // deleteToken revokes a bootstrap token by its ID, best effort. Only the ID goes
-// on argv, never the secret. It runs even when ctx is already cancelled, since a
-// cancelled mint is one of the failures that must not leave the token behind.
+// on argv, never the secret. It runs even when ctx is already canceled, since a
+// canceled mint is one of the failures that must not leave the token behind.
 func (m Minter) deleteToken(ctx context.Context, token string) {
 	id, _, _ := strings.Cut(token, ".")
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tokenDeleteTimeout)
