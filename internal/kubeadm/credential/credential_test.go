@@ -290,3 +290,79 @@ func TestGenerateCertificateKey(t *testing.T) {
 		t.Fatalf("key value must not appear in argv: %v", fr.lastArgs)
 	}
 }
+
+// TestMintJoinMaterialFailureDeletesToken: a mint that fails after `token
+// create` must revoke the token it created, so it does not stay live for the
+// whole TTL with nobody holding it. A missing ca.crt must fail before any token
+// exists at all. Only the token ID goes on argv, never the secret.
+func TestMintJoinMaterialFailureDeletesToken(t *testing.T) {
+	const tok = "abcdef.0123456789abcdef"
+	writeCA := func(t *testing.T, root string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, "etc/kubernetes/pki"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "etc/kubernetes/pki/ca.crt"), selfSignedPEM(t), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name       string
+		withCA     bool
+		failOn     string // first two argv words joined by a space
+		wantCalls  []string
+		wantDelete bool
+	}{
+		{name: "ca.crt missing", withCA: false,
+			wantCalls: nil},
+		{name: "certificate-key fails", withCA: true, failOn: "certs certificate-key",
+			wantCalls: []string{"token create", "certs certificate-key", "token delete"}, wantDelete: true},
+		{name: "upload-certs fails", withCA: true, failOn: "init phase",
+			wantCalls: []string{"token create", "certs certificate-key", "init phase", "token delete"}, wantDelete: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tc.withCA {
+				writeCA(t, root)
+			}
+			var calls []string
+			var deleteArgs []string
+			rr := respondRunner{respond: func(args []string) (kubeadm.Result, error) {
+				verb := strings.Join(args[:2], " ")
+				calls = append(calls, verb)
+				if verb == "token delete" {
+					deleteArgs = args
+				}
+				if verb == tc.failOn {
+					return kubeadm.Result{}, fmt.Errorf("exit 1")
+				}
+				switch verb {
+				case "token create":
+					return kubeadm.Result{Stdout: tok + "\n"}, nil
+				case "certs certificate-key":
+					return kubeadm.Result{Stdout: strings.Repeat("a", 64) + "\n"}, nil
+				}
+				return kubeadm.Result{}, nil
+			}}
+			m := Minter{Runner: rr, RootPath: root, RunDir: t.TempDir()}
+
+			jm, err := m.MintJoinMaterial(context.Background(), true, time.Hour)
+			if err == nil || jm != nil {
+				t.Fatalf("expected a failed mint, got jm=%v err=%v", jm, err)
+			}
+			if strings.Join(calls, ",") != strings.Join(tc.wantCalls, ",") {
+				t.Fatalf("kubeadm calls = %q, want %q", calls, tc.wantCalls)
+			}
+			if !tc.wantDelete {
+				return
+			}
+			if len(deleteArgs) < 3 || deleteArgs[2] != "abcdef" {
+				t.Fatalf("token delete must name the token ID, got %q", deleteArgs)
+			}
+			if strings.Contains(strings.Join(deleteArgs, " "), "0123456789abcdef") {
+				t.Fatalf("token secret must not appear on argv: %q", deleteArgs)
+			}
+		})
+	}
+}
