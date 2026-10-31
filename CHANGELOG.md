@@ -102,8 +102,9 @@ accidental substitution, and state that outlives the image it came from.
   which limits disclosure but does not prevent that.
 - On trusted-boot nodes no log channel survives from before the pivot. The status
   document, and its `/var/log` mirror, are the only record of an early refusal.
-- Only amd64 images are published. The Dockerfile handles arm64, but the release
-  workflow builds amd64 only, so there is no arm64 image for this release.
+- Only amd64 images are published, and the Dockerfile does not build arm64: it
+  pinned TARGETARCH to amd64, so a `--platform linux/arm64` build fetched and
+  built amd64 Kubernetes binaries. There is no arm64 image for this release.
 
 ## v0.3.0 - 2026-07-01
 
