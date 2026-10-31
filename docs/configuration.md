@@ -116,8 +116,9 @@ Notes:
   `control_plane_host`; `mint-join` writes the same value in both places.
 - For a control-plane join, set `controlPlane.localAPIEndpoint.advertiseAddress`
   to the joining node's own routable IP, especially on multi-homed nodes. The
-  minting control plane cannot know it; `mint-join` leaves a placeholder you fill
-  in (or pass `--advertise-address`).
+  minting control plane cannot know it; `mint-join` leaves it empty, so kubeadm
+  uses the default-route interface, unless you fill it in (or pass
+  `--advertise-address`).
 - Token discovery **requires** `caCertHashes`; the provider refuses to emit a
   join config without a CA anchor and never sets `unsafeSkipCAVerification`.
 - `bindPort` defaults to kubeadm's 6443. If you move it, give

@@ -142,7 +142,7 @@ func TestRenderJoinCloudConfig_CPWithAdvertiseAddress(t *testing.T) {
 	}
 }
 
-func TestRenderJoinCloudConfig_CPWithoutAdvertiseAddressHasPlaceholder(t *testing.T) {
+func TestRenderJoinCloudConfig_CPWithoutAdvertiseAddressIsEmpty(t *testing.T) {
 	out, err := RenderJoinCloudConfig(JoinSnippet{
 		Role:           "controlplane",
 		Endpoint:       "vip.example.test:6443",
@@ -154,9 +154,13 @@ func TestRenderJoinCloudConfig_CPWithoutAdvertiseAddressHasPlaceholder(t *testin
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Must contain the placeholder indicating operator must fill this in.
-	if !strings.Contains(out, "FILL-IN-THIS-NODE-IP") {
-		t.Errorf("expected placeholder when advertiseAddress is empty, got:\n%s", out)
+	// An empty address lets kubeadm fall back to the default-route interface.
+	// A placeholder string is not an IP, so kubeadm would reject the join.
+	if !strings.Contains(out, "advertiseAddress: \"\"\n") {
+		t.Errorf("expected an empty advertiseAddress when none is given, got:\n%s", out)
+	}
+	if strings.Contains(out, "FILL-IN-THIS-NODE-IP") {
+		t.Errorf("rendered a placeholder kubeadm rejects as advertiseAddress:\n%s", out)
 	}
 }
 
