@@ -322,8 +322,10 @@ booting the node, and never reuse a key across joins. See
 ### Pin/binary mismatch: version is a hard error
 
 `clusterConfiguration.kubernetesVersion` must be within the supported window and
-match the `kubeadm` binary in the image. A mismatch fails fast by design. Use the
-image tag for the minor you want, or adjust the pin. See
+match the minor of the `kubeadm` binary in the image. A minor mismatch fails fast
+by design. Use the image tag for the minor you want, or adjust the pin. A pin with
+only another patch is not an error: the node runs the bundled version and logs
+`pinned kubernetesVersion ... is replaced by the bundled kubeadm version ...`. See
 [Lifecycle](./lifecycle.md#supported-version-window).
 
 ### `fork/exec /usr/bin/<tool>: no such file or directory`
