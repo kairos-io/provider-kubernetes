@@ -361,7 +361,7 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	logrus.Infof("provider-kubernetes: reconciling role=%q membership=%q actions=%v", role, state.Membership, actions)
 	// The converged fast path (a lone ActionNone) finishes at once; anything
 	// else may run kubeadm for minutes, so say the pass is in progress first.
-	if !(len(actions) == 1 && actions[0] == reconcile.ActionNone) {
+	if len(actions) != 1 || actions[0] != reconcile.ActionNone {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		sink.Record(sctx, status.BuildReconciling(role, state.Membership, time.Now().UTC().Format(time.RFC3339), bootID, providerVersion))
 		cancel()
