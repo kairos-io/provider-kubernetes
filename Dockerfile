@@ -633,3 +633,15 @@ RUN --mount=type=bind,from=kairos-init,src=/kairos-init,dst=/kairos-init \
     image_version="v0.0.0-dev+${sanitized:-unset}"; \
     /kairos-init -l debug -s install -m generic -t false --version "${image_version}"; \
     /kairos-init -l debug -s init    -m generic -t false --version "${image_version}"
+
+# Provenance labels the Hadron base would otherwise leak into this image: its
+# revision, created, title and url point at kairos-io/hadron, so set our own.
+# They come last so a new commit or build date does not invalidate the
+# kairos-init layer above. An unset PROVIDER_REVISION/BUILD_DATE leaves the
+# label empty rather than inheriting Hadron's value.
+ARG PROVIDER_REVISION=""
+ARG BUILD_DATE=""
+LABEL org.opencontainers.image.revision="${PROVIDER_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.title="provider-kubernetes" \
+      org.opencontainers.image.url="https://github.com/kairos-io/provider-kubernetes"
