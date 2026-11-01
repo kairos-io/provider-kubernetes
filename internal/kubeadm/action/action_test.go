@@ -597,3 +597,37 @@ func TestRunJoinOmitsKubeletConfiguration(t *testing.T) {
 		t.Fatalf("join config must NOT contain a KubeletConfiguration:\n%s", content)
 	}
 }
+
+// #5802: a worker runs no apiserver, so its repair must not wait for one. It
+// returns once kubelet-start has run, and the plan goes on to upgrade node.
+func TestRepairKubeletConfig_WorkerSkipsLocalAPIWait(t *testing.T) {
+	waited := false
+	fr := &fakeRunner{}
+	e := &KubeadmExecutor{
+		Runner:            fr,
+		RootPath:          "/",
+		RunDir:            t.TempDir(),
+		Role:              actualstate.RoleWorker,
+		Input:             kubeadmconfig.Input{KubernetesVersion: "v1.35.0", ControlPlaneEndpoint: "10.0.0.1:6443"},
+		LocalAPIReachable: func(context.Context) bool { waited = true; return false },
+		KubeletRestart:    func(context.Context) error { return nil },
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := e.Execute(ctx, reconcile.ActionRepairKubeletConfig); err != nil {
+		t.Fatalf("worker repair: %v", err)
+	}
+	if waited {
+		t.Fatal("worker repair probed a local apiserver")
+	}
+	if err := e.Execute(ctx, reconcile.ActionUpgradeNode); err != nil {
+		t.Fatalf("upgrade node after repair: %v", err)
+	}
+	var got []string
+	for _, c := range fr.calls {
+		got = append(got, strings.Join(c[:2], " "))
+	}
+	if strings.Join(got, ",") != "init phase,upgrade node" {
+		t.Fatalf("kubeadm calls = %v, want kubelet-start then upgrade node", got)
+	}
+}
