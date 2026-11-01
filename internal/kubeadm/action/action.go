@@ -310,8 +310,8 @@ func (e *KubeadmExecutor) runUpgradeApply(ctx context.Context) error {
 // is `kubeadm init phase kubelet-start`, which is API-free and touches no PKI,
 // etcd, or static-pod manifests. The rendered config carries NO secret (no
 // bootstrap token, no certificate key) -- it is still 0600 on tmpfs and shredded
-// for consistency. It then bounded-waits for the local apiserver so the subsequent
-// `upgrade apply` can reach the control plane.
+// for consistency. On a control plane it then bounded-waits for the local
+// apiserver so the subsequent `upgrade apply` can reach the control plane.
 func (e *KubeadmExecutor) runRepairKubeletConfig(ctx context.Context) error {
 	cluster := kubeadmconfig.BuildClusterConfiguration(e.Input)
 	initCfg := kubeadmconfig.BuildInitConfiguration(e.Input)
@@ -339,6 +339,11 @@ func (e *KubeadmExecutor) runRepairKubeletConfig(ctx context.Context) error {
 
 	if _, err := e.Runner.Run(ctx, "init", "phase", "kubelet-start", "--config", path); err != nil {
 		return fmt.Errorf("kubeadm init phase kubelet-start: %w", err)
+	}
+	// A worker runs no apiserver, so there is nothing local to wait for; its
+	// next step is upgrade node (#5802).
+	if e.Role == actualstate.RoleWorker {
+		return nil
 	}
 	// Wait (bounded) for the local control plane to return before upgrade apply.
 	return e.waitForLocalAPIHealthy(ctx)
