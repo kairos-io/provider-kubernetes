@@ -34,6 +34,9 @@ KAIROS_BASE_IMAGE  ?= ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940
 # (the version Kairos itself uses to build Hadron); override for testing.
 KAIROS_INIT_IMAGE  ?= quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
 IMAGE              ?= kairos-kubeadm:$(VERSION)
+# OCI revision and created labels, so the image does not carry the Hadron base's.
+REVISION           ?= $(shell git rev-parse HEAD 2>/dev/null)
+BUILD_DATE         ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # e2e (ADR-13). The node image FROM-derives the kairos-kubeadm base so it reuses
 # the checksum-verified toolchain. BASE_IMAGE defaults to the per-version
@@ -127,6 +130,8 @@ image:
 	  --build-arg RUNC_VERSION=$(RUNC_VERSION) \
 	  --build-arg CNI_PLUGINS_VERSION=$(CNI_PLUGINS_VERSION) \
 	  --build-arg PROVIDER_VERSION=$(VERSION) \
+	  --build-arg PROVIDER_REVISION=$(REVISION) \
+	  --build-arg BUILD_DATE=$(BUILD_DATE) \
 	  -t $(IMAGE) .
 
 ## e2e-node-image: build the systemd-as-PID1 node container image (ADR-13 E2),
