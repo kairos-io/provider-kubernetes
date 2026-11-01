@@ -36,9 +36,9 @@ cluster:
 
   config: |
     clusterConfiguration:
-      # Must match the kubeadm binary in the image you booted. A mismatch is a
-      # hard error, and on an air-gapped node there is no registry to paper
-      # over a wrong version.
+      # Must match the minor of the kubeadm binary in the image you booted. A
+      # minor mismatch is a hard error. A different patch is accepted, and the
+      # node runs the bundled kubeadm version and its bundled images.
       kubernetesVersion: v1.37.0
       controlPlaneEndpoint: "192.168.1.10:6443"
 

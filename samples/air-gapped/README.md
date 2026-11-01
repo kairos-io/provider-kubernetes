@@ -54,10 +54,13 @@ sudo /system/providers/agent-provider-kubernetes import-images --verify-only
 ```
 
 Then confirm containerd holds each image under the reference kubeadm looks up,
-which is the lookup that decides whether kubeadm pulls:
+which is the lookup that decides whether kubeadm pulls. Ask for the bundled
+version, not the pin: only the pin's minor is enforced, so a `v1.37.0` pin on an
+image that bundles `v1.37.2` runs (and bundles) the `v1.37.2` images:
 
 ```sh
-sudo /usr/bin/kubeadm config images list --kubernetes-version v1.37.0
+sudo /usr/bin/kubeadm config images list \
+  --kubernetes-version "$(/usr/bin/kubeadm version -o short)"
 sudo /usr/bin/crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
   --image-endpoint unix:///run/containerd/containerd.sock images
 ```

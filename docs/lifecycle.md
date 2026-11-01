@@ -77,9 +77,11 @@ rolling forward (currently **1.35 / 1.36 / 1.37**; releases up to v0.3.0 shipped
 EOL and deliberately unsupported).
 
 - The target minor can be pinned via `clusterConfiguration.kubernetesVersion`.
-- A pin that does not match the `kubeadm` binary bundled in the image is a **hard
-  error** (fail fast), as is any version outside the supported window. There is no
-  best-effort "close enough" behavior.
+- A pin whose **minor** does not match the `kubeadm` binary bundled in the image
+  is a **hard error** (fail fast), as is any version outside the supported window.
+- Only the minor of a pin is enforced. A pin with another patch (e.g. `v1.37.0`
+  against a bundled `v1.37.2`) is accepted and the cluster runs the bundled
+  version; the provider logs a warning naming both versions.
 
 Each released image bundles one Kubernetes minor; pick the matching image tag (see
 [Getting started](./getting-started.md)).

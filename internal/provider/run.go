@@ -201,6 +201,9 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	if endpointWarn != "" {
 		logrus.Warnf("provider-kubernetes: %s", endpointWarn)
 	}
+	if note := kubeadm.PinReplacedNote(uc.ClusterConfiguration.KubernetesVersion, resolved); note != "" {
+		logrus.Warnf("provider-kubernetes: %s", note)
+	}
 
 	// HA-3: inject a bounded CP reachability probe for all roles, including init,
 	// so Plan can detect an already-serving CP at role=init and refuse to clobber
