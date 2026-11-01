@@ -51,10 +51,17 @@ func TestPlan(t *testing.T) {
 			wantVerdict: VerdictOK,
 		},
 		{
-			name:        "controlplane join when CP reachable",
+			name:        "controlplane join when CP reachable still passes the readyz gate",
 			desired:     actualstate.RoleControlPlane,
 			state:       actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: true},
-			want:        []Action{ActionRunJoin},
+			want:        []Action{ActionWaitForControlPlane, ActionRunJoin},
+			wantVerdict: VerdictOK,
+		},
+		{
+			name:        "controlplane waits for CP when unreachable",
+			desired:     actualstate.RoleControlPlane,
+			state:       actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: false},
+			want:        []Action{ActionWaitForControlPlane, ActionRunJoin},
 			wantVerdict: VerdictOK,
 		},
 	}
