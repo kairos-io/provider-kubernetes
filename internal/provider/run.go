@@ -98,7 +98,9 @@ type Options struct {
 // work is bounded by the reconcile Budget (issue #4099-1).
 //
 // Every return path (success AND failure) records a structured status to the
-// Layer-1 local channel (ADR-4-S, S4). The status write is best-effort: it is
+// Layer-1 local channel (ADR-4-S, S4). A pass that runs any action other than
+// the converged no-op records a Reconciling status first, which that final
+// status replaces. The status write is best-effort: it is
 // bounded to 2s per path, errors are logged and swallowed, and the real reconcile
 // exit code is never masked.
 func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error {
@@ -357,6 +359,13 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	}
 
 	logrus.Infof("provider-kubernetes: reconciling role=%q membership=%q actions=%v", role, state.Membership, actions)
+	// The converged fast path (a lone ActionNone) finishes at once; anything
+	// else may run kubeadm for minutes, so say the pass is in progress first.
+	if !(len(actions) == 1 && actions[0] == reconcile.ActionNone) {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sink.Record(sctx, status.BuildReconciling(role, state.Membership, time.Now().UTC().Format(time.RFC3339), bootID, providerVersion))
+		cancel()
+	}
 	reconciler := reconcile.Reconciler{Budget: budget, Exec: exec}
 	result, reconcileErr := reconciler.RunWithResult(ctx, actions)
 	finalResult = result

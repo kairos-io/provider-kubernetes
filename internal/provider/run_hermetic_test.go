@@ -50,14 +50,21 @@ func (r *recordingSink) Record(_ context.Context, s status.Status) {
 	r.records = append(r.records, s)
 }
 
-// only returns the status Run recorded, failing the test unless exactly one was
-// recorded (ADR-4-S: every Run exit path records once).
+// only returns the completion status Run recorded, failing the test unless
+// exactly one was recorded (ADR-4-S: every Run exit path records once). The
+// in-progress Reconciling status written before the first action is skipped.
 func (r *recordingSink) only(t *testing.T) status.Status {
 	t.Helper()
-	if len(r.records) != 1 {
-		t.Fatalf("recorded %d statuses, want exactly 1: %+v", len(r.records), r.records)
+	var final []status.Status
+	for _, s := range r.records {
+		if s.Phase != status.PhaseReconciling {
+			final = append(final, s)
+		}
 	}
-	return r.records[0]
+	if len(final) != 1 {
+		t.Fatalf("recorded %d completion statuses, want exactly 1: %+v", len(final), r.records)
+	}
+	return final[0]
 }
 
 // hermeticRunOptions returns Run options that keep a test off the host: the
