@@ -144,8 +144,37 @@ func TestProviderReturnsPromptlyAndNamed(t *testing.T) {
 	if bad.Name == "" {
 		t.Fatal("expected a named YipConfig on bad input")
 	}
-	if len(bad.Stages) != 0 {
-		t.Fatal("Provider must NOT emit stages on invalid input")
+	if len(bad.Stages[reconcileStageKey]) == 0 {
+		t.Fatal("Provider must emit a reconcile stage on invalid input so ConfigInvalid is recorded")
+	}
+}
+
+func TestProviderInvalidConfigEmitsReconcileOnly(t *testing.T) {
+	for name, c := range map[string]clusterplugin.Cluster{
+		"empty token": {Role: clusterplugin.RoleInit},
+		"short token": {Role: clusterplugin.RoleInit, ClusterToken: "short"},
+		"bad role":    {Role: "master", ClusterToken: validToken()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Provider(c)
+			stages := cfg.Stages[reconcileStageKey]
+			if len(stages) != 2 {
+				t.Fatalf("expected write + reconcile stages, got %+v", stages)
+			}
+			if len(stages[0].Files) != 1 || stages[0].Files[0].Path != ClusterStatePath || stages[0].Files[0].Permissions != 0o600 {
+				t.Fatalf("first stage must write %s at 0600, got %+v", ClusterStatePath, stages[0].Files)
+			}
+			if len(stages[1].Commands) != 1 || !strings.Contains(stages[1].Commands[0], ProviderBinaryPath+" reconcile --cluster-file="+ClusterStatePath) {
+				t.Fatalf("second stage must run reconcile, got %+v", stages[1].Commands)
+			}
+			for _, st := range stages {
+				for _, cmd := range st.Commands {
+					if strings.Contains(cmd, "import-images") {
+						t.Fatalf("invalid config must not import images: %q", cmd)
+					}
+				}
+			}
+		})
 	}
 }
 

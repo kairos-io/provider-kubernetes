@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
+	"gopkg.in/yaml.v3"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile"
@@ -455,6 +456,40 @@ func TestRunProductionAPIServerProbeFollowsBindPort(t *testing.T) {
 	}
 	if got := sink.only(t); got.Phase != status.PhaseConverged || got.LastAction != string(reconcile.ActionUpgradeApply) {
 		t.Fatalf("recorded phase=%q lastAction=%q, want %q after %q", got.Phase, got.LastAction, status.PhaseConverged, reconcile.ActionUpgradeApply)
+	}
+}
+
+func TestRunRecordsConfigInvalidForProviderRejectedToken(t *testing.T) {
+	for _, token := range []string{"", "short"} {
+		t.Run(token, func(t *testing.T) {
+			cfg := Provider(clusterplugin.Cluster{
+				Role:             clusterplugin.RoleInit,
+				ClusterToken:     token,
+				ControlPlaneHost: "10.0.0.1",
+			})
+			stages := cfg.Stages[reconcileStageKey]
+			if len(stages) == 0 || len(stages[0].Files) != 1 {
+				t.Fatalf("Provider emitted no cluster state for reconcile: %+v", cfg.Stages)
+			}
+			var cluster clusterplugin.Cluster
+			if err := yaml.Unmarshal([]byte(stages[0].Files[0].Content), &cluster); err != nil {
+				t.Fatalf("cluster state is not valid YAML: %v", err)
+			}
+
+			fr := &fakeRunner{}
+			opts, sink := hermeticRunOptions(t, fr)
+			if err := Run(context.Background(), cluster, opts); err == nil {
+				t.Fatal("Run returned nil for a rejected cluster_token, want an error")
+			}
+			if len(fr.calls) != 0 {
+				t.Fatalf("Run called kubeadm: %v", fr.calls)
+			}
+			st := sink.only(t)
+			if st.Phase != status.PhaseFailed || st.Reason != status.ReasonConfigInvalid || !st.Terminal {
+				t.Fatalf("got phase=%s reason=%s terminal=%v, want Failed/ConfigInvalid/terminal",
+					st.Phase, st.Reason, st.Terminal)
+			}
+		})
 	}
 }
 
