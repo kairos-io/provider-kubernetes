@@ -43,7 +43,7 @@ ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940
 ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
 # Provider toolchain: its tag MUST match the go.mod `go` directive (enforced by
 # `make verify-pins`), so the image build never drifts from CI.
-ARG GO_BUILDER_IMAGE=golang:1.27.3-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c
+ARG GO_BUILDER_IMAGE=golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
 ARG TARGETARCH=amd64
 
 # containerd and kubelet are ALWAYS built fully static from source: Hadron is
@@ -56,7 +56,7 @@ ARG TARGETARCH=amd64
 # latest patch, rather than the provider's Go: kubelet is upstream code, so it is
 # compiled with the toolchain upstream qualifies it against. Move it to a newer
 # Go minor only once upstream release branches do.
-ARG STATIC_BUILDER_IMAGE=golang:1.26.10@sha256:3e81679b4c293b7eecc6f8a044b355a3062a09db22cca961731c81a2dbcd8f83
+ARG STATIC_BUILDER_IMAGE=golang:1.26.10@sha256:670bb5aa5349ae03b8516764718486f4f16399134bdc9acd0c46a23f043ab05c
 
 # Kubernetes (must be within the supported window the provider enforces at
 # runtime: 1.35 / 1.36 / 1.37 as of September 2026).
@@ -314,7 +314,7 @@ ARG TARGETARCH
 # crane + cosign are static Go binaries that run on musl; both are version-pinned
 # and checksum-verified at install, matching the rest of the binary supply chain.
 # renovate: datasource=github-releases depName=google/go-containerregistry
-ARG CRANE_VERSION=v0.20.3
+ARG CRANE_VERSION=v0.22.1
 # renovate: datasource=github-releases depName=sigstore/cosign
 ARG COSIGN_VERSION=v2.6.5
 RUN apk add --no-cache curl ca-certificates
