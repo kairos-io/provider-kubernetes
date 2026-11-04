@@ -174,7 +174,7 @@ func (e *KubeadmExecutor) runInit(ctx context.Context) error {
 
 func (e *KubeadmExecutor) runJoin(ctx context.Context) error {
 	if e.Join == nil {
-		return fmt.Errorf("join requires delivered join material, but none was provided")
+		return fmt.Errorf("%w: join requires delivered join material, but none was provided", reconcile.ErrTerminal)
 	}
 
 	in := e.Input
