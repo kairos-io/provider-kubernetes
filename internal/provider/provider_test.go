@@ -88,6 +88,31 @@ func TestNewContextHonorsClusterRootPath(t *testing.T) {
 	}
 }
 
+func TestNewContextValidatesClusterRootPath(t *testing.T) {
+	cluster := func(root string) clusterplugin.Cluster {
+		return clusterplugin.Cluster{
+			Role:            clusterplugin.RoleInit,
+			ClusterToken:    validToken(),
+			ProviderOptions: map[string]string{"cluster_root_path": root},
+		}
+	}
+	for _, root := range []string{"relative/dir", "/srv/../etc", ".."} {
+		if _, err := NewContext(cluster(root)); err == nil {
+			t.Errorf("NewContext(cluster_root_path=%q): want an error, got nil", root)
+		}
+	}
+	for _, root := range []string{"/srv/k8s..root", "/srv/..hidden", "/"} {
+		ctx, err := NewContext(cluster(root))
+		if err != nil {
+			t.Errorf("NewContext(cluster_root_path=%q): unexpected error: %v", root, err)
+			continue
+		}
+		if ctx.RootPath != root {
+			t.Errorf("RootPath = %q, want %q", ctx.RootPath, root)
+		}
+	}
+}
+
 func TestNewContextRejectsBadToken(t *testing.T) {
 	if _, err := NewContext(clusterplugin.Cluster{Role: clusterplugin.RoleInit}); err == nil {
 		t.Fatal("expected error for empty cluster_token")

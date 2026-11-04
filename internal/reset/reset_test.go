@@ -112,6 +112,19 @@ func TestResetRejectsTraversalRootPath(t *testing.T) {
 	}
 }
 
+func TestValidateRootOnlyRejectsTraversalSegments(t *testing.T) {
+	for _, root := range []string{"/srv/k8s..root", "/srv/..hidden", "/srv/a..", "/srv//k8s/"} {
+		if _, err := ValidateRoot(root); err != nil {
+			t.Errorf("ValidateRoot(%q): unexpected error: %v", root, err)
+		}
+	}
+	for _, root := range []string{"/srv/../etc", "/..", "/srv/k8s/.."} {
+		if _, err := ValidateRoot(root); err == nil {
+			t.Errorf("ValidateRoot(%q): want a traversal error, got nil", root)
+		}
+	}
+}
+
 func TestResetRejectsRelativeRootPath(t *testing.T) {
 	if err := Run(context.Background(), Options{Runner: &fakeRunner{}, RootPath: "relative/root"}); err == nil {
 		t.Fatal("expected hard error on relative RootPath")
@@ -208,7 +221,7 @@ func TestResetSweepsRunDir(t *testing.T) {
 
 func TestResetDefaultsEmptyRootPathToSlash(t *testing.T) {
 	// We don't actually want to wipe the test host, so use a fake runner and
-	// assert only that validateRoot accepts an empty input (defense-in-depth:
+	// assert only that ValidateRoot accepts an empty input (defense-in-depth:
 	// package applies the default; we get past validation, and any removals
 	// either no-op (NotExist) or fail with permission, neither of which is fatal
 	// here because we only check that Run returns nil for a clean system).

@@ -51,7 +51,9 @@ role differs by node role:
 
 Filesystem root the provider operates under (default `/`). It locates
 `etc/kubernetes/...`, `var/lib/kubelet`, etc. Honored everywhere, including the
-reset path, which validates it (absolute, no traversal) before removing artifacts.
+reset path. The value must be absolute and must not contain a `..` segment; a
+value that fails this is rejected when the config is read, and again before a
+reset removes any artifact.
 
 ### `config:` - the kubeadm v1beta4 surface
 
