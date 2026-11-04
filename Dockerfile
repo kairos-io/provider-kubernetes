@@ -314,7 +314,7 @@ ARG TARGETARCH
 # crane + cosign are static Go binaries that run on musl; both are version-pinned
 # and checksum-verified at install, matching the rest of the binary supply chain.
 # renovate: datasource=github-releases depName=google/go-containerregistry
-ARG CRANE_VERSION=v0.20.3
+ARG CRANE_VERSION=v0.22.1
 # renovate: datasource=github-releases depName=sigstore/cosign
 ARG COSIGN_VERSION=v2.6.5
 RUN apk add --no-cache curl ca-certificates
