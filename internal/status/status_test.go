@@ -102,10 +102,10 @@ func TestBuildStatusTerminalCases(t *testing.T) {
 			wantTerm:   true,
 		},
 		{
-			name:       "RunJoin terminal",
+			name:       "RunJoin terminal -> ConfigInvalid",
 			action:     reconcile.ActionRunJoin,
 			err:        termErr,
-			wantReason: ReasonJoinTimeout,
+			wantReason: ReasonConfigInvalid,
 			wantPhase:  PhaseFailed,
 			wantTerm:   true,
 		},
@@ -156,9 +156,9 @@ func TestBuildStatusBudgetExhausted(t *testing.T) {
 			wantReason: ReasonControlPlaneUnreachable,
 		},
 		{
-			name:       "RunJoin exhausted",
+			name:       "RunJoin exhausted -> JoinTimeout",
 			action:     reconcile.ActionRunJoin,
-			wantReason: ReasonControlPlaneUnreachable,
+			wantReason: ReasonJoinTimeout,
 		},
 		{
 			name:       "WaitForClusterUpgrade exhausted",
