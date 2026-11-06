@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 
@@ -257,8 +258,9 @@ func doImport(ctx context.Context, runner StdinRunner, verifyOnly bool, walk fun
 		_ = f.Close()
 		if runErr != nil {
 			res.Failed++
+			reason, detail := runFailure(ctx, runErr, runRes.Stderr)
 			logrus.Errorf("image-import: failed %s ref=%s reason=%s detail=%q",
-				img.Tarball, img.Ref, ReasonCtrFailed, capDetail(kubeadm.Sanitize(runRes.Stderr)))
+				img.Tarball, img.Ref, reason, detail)
 			continue
 		}
 		res.Imported++
@@ -272,6 +274,21 @@ func doImport(ctx context.Context, runner StdinRunner, verifyOnly bool, walk fun
 	res.Outcome = computeOutcome(res, verifyOnly)
 	logSummary(res)
 	return res
+}
+
+// runFailure picks the reason and the sanitized, capped detail for a failed
+// ctr import. A run cut short by ctx is a deadline; anything else is
+// ctr-failed, with the runner error (fork/exec, signal, exit status) kept
+// after whatever ctr wrote to stderr so capDetail's tail cut never drops it.
+func runFailure(ctx context.Context, runErr error, stderr string) (Reason, string) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ReasonDeadline, capDetail(kubeadm.Sanitize(fmt.Sprintf("%v: %v", ctxErr, runErr)))
+	}
+	detail := runErr.Error()
+	if s := strings.TrimSpace(stderr); s != "" {
+		detail = fmt.Sprintf("%s (%v)", s, runErr)
+	}
+	return ReasonCtrFailed, capDetail(kubeadm.Sanitize(detail))
 }
 
 // reasonForTarCheckErr maps a CheckTar error to its closed Reason via
