@@ -617,9 +617,10 @@ RUN echo "BUNDLED_KUBERNETES_VERSION=${KUBERNETES_VERSION}" >> /etc/os-release
 # wires the installer machinery; without it kairos-installer.service exits 1 and
 # auto-install does not fire on the LiveCD.
 #
-# kairos-init's --version is strict semver. PROVIDER_VERSION can be a git SHA or
-# 'dev', so we lift it into a synthesized semver (the SHA/string is preserved as
-# semver build metadata after '+').
+# kairos-init's --version is strict semver. A release passes its tag (v0.4.0),
+# which is used as is so KAIROS_VERSION reports the release. Anything else (a
+# git SHA, 'dev') is lifted into a synthesized semver, with the SHA/string kept
+# as semver build metadata after '+'.
 ARG PROVIDER_VERSION
 # OCI provenance: links the published package back to the repo + records the
 # provider/Kubernetes versions baked in. Applied to every build (local, CI, release).
@@ -629,7 +630,12 @@ LABEL org.opencontainers.image.source="https://github.com/kairos-io/provider-kub
       org.opencontainers.image.licenses="Apache-2.0"
 RUN --mount=type=bind,from=kairos-init,src=/kairos-init,dst=/kairos-init \
     set -eux; \
-    sanitized=$(printf '%s' "${PROVIDER_VERSION}" | tr -c 'A-Za-z0-9-' '-' | sed 's/^-*//; s/-*$//'); \
-    image_version="v0.0.0-dev+${sanitized:-unset}"; \
+    semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; \
+    if printf '%s' "${PROVIDER_VERSION}" | grep -Eq "${semver}"; then \
+      image_version="${PROVIDER_VERSION}"; \
+    else \
+      sanitized=$(printf '%s' "${PROVIDER_VERSION}" | tr -c 'A-Za-z0-9-' '-' | sed 's/^-*//; s/-*$//'); \
+      image_version="v0.0.0-dev+${sanitized:-unset}"; \
+    fi; \
     /kairos-init -l debug -s install -m generic -t false --version "${image_version}"; \
     /kairos-init -l debug -s init    -m generic -t false --version "${image_version}"
