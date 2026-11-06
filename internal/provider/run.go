@@ -189,10 +189,16 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	if err != nil {
 		return configInvalid(err)
 	}
-	resolved, err := kubeadm.Resolve(detected, uc.ClusterConfiguration.KubernetesVersion)
+	resolved, err := kubeadm.Resolve(detected, "")
 	if err != nil {
 		finalErr = err
 		return err
+	}
+	// The binary alone resolves, so a failure now comes from the pin.
+	if pin := uc.ClusterConfiguration.KubernetesVersion; pin != "" {
+		if resolved, err = kubeadm.Resolve(detected, pin); err != nil {
+			return configInvalid(err)
+		}
 	}
 	in, endpointWarn, err := BuildInput(pctx, uc, resolved)
 	if err != nil {
