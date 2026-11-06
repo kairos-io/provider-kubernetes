@@ -520,7 +520,10 @@ read.
 
 - **Nothing happened after booting a newer image.** An upgrade runs only when you
   bump `clusterConfiguration.kubernetesVersion` to the new minor; a newer binary
-  alone is a no-op by design.
+  with no pin is a no-op by design.
+- **Every boot fails with `reason: ConfigInvalid` after booting a newer image.**
+  The old minor is still pinned. Set `clusterConfiguration.kubernetesVersion` to
+  the new minor (this starts the upgrade) or remove the pin.
 - **Reconcile logs `refuse-upgrade`.** The pin is a downgrade, skip-level
   (e.g. 1.35 -> 1.37), or out-of-window. Upgrade one minor at a time within the
   window.

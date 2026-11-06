@@ -73,7 +73,7 @@ version: v0.4.0
 | `UpgradeRefused` | A downgrade, skip-level, or out-of-window upgrade pin was refused. |
 | `BudgetExhausted` | The bounded retry budget ran out. |
 | `KubeadmError` | A kubeadm action failed. |
-| `ConfigInvalid` | The supplied cluster config was invalid (e.g. empty/short `cluster_token`, or a joining node with no join material). |
+| `ConfigInvalid` | The supplied cluster config was invalid (e.g. empty/short `cluster_token`, a joining node with no join material, or a `kubernetesVersion` pin whose minor differs from the bundled kubeadm). |
 | `KubeletUnhealthy` | See `phase: Degraded` below. |
 | `InitIncomplete` | See `phase: Degraded` below. |
 | `ControlPlaneUnhealthy` | See `phase: Degraded` below. |

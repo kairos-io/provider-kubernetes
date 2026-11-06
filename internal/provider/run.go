@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -151,21 +152,26 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		// suppress a would-be Converged status, never mask a real error --
 		// BuildStatus only consults it on the p.Err == nil path.
 		finalVerdict reconcile.Verdict
+		// finalConfigInvalid marks a failure the operator's config caused
+		// before any kubeadm action (a stale kubernetesVersion pin), so the
+		// status says ConfigInvalid instead of a generic KubeadmError.
+		finalConfigInvalid bool
 	)
 	// Defer record-then-return: runs exactly once on every exit path.
 	defer func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		sink.Record(sctx, status.BuildStatus(status.BuildParams{
-			Role:       role,
-			Membership: finalState.Membership,
-			LastAction: finalLastAction,
-			Err:        finalErr,
-			Result:     finalResult,
-			Verdict:    finalVerdict,
-			Now:        time.Now().UTC().Format(time.RFC3339),
-			BootID:     bootID,
-			Version:    providerVersion,
+			Role:          role,
+			Membership:    finalState.Membership,
+			LastAction:    finalLastAction,
+			Err:           finalErr,
+			Result:        finalResult,
+			Verdict:       finalVerdict,
+			ConfigInvalid: finalConfigInvalid,
+			Now:           time.Now().UTC().Format(time.RFC3339),
+			BootID:        bootID,
+			Version:       providerVersion,
 		}))
 	}()
 
@@ -182,6 +188,7 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	resolved, err := kubeadm.Resolve(detected, uc.ClusterConfiguration.KubernetesVersion)
 	if err != nil {
 		finalErr = err
+		finalConfigInvalid = errors.Is(err, kubeadm.ErrPinMismatch)
 		return err
 	}
 	in, endpointWarn, err := BuildInput(pctx, uc, resolved)

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -122,6 +123,37 @@ func TestRunRejectsUnsupportedVersion(t *testing.T) {
 	}
 	if got := sink.only(t); got.Phase != status.PhaseFailed || got.Outcome != status.OutcomeFailure {
 		t.Fatalf("recorded phase=%q outcome=%q, want %q/%q", got.Phase, got.Outcome, status.PhaseFailed, status.OutcomeFailure)
+	}
+}
+
+// A newer image booted with the old minor still pinned is a config error the
+// operator must fix by bumping the pin, not a kubeadm failure: no kubeadm
+// command ran, and the pass fails the same way on every boot until then.
+func TestRunStalePinIsConfigInvalid(t *testing.T) {
+	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if args[0] == "version" {
+			return kubeadm.Result{Stdout: "v1.37.0\n"}, nil
+		}
+		return kubeadm.Result{}, nil
+	}}
+	cluster := clusterplugin.Cluster{
+		Role:             clusterplugin.RoleControlPlane,
+		ClusterToken:     validToken(),
+		ControlPlaneHost: "10.0.0.1",
+		ProviderOptions:  map[string]string{"cluster_root_path": t.TempDir()},
+		Options:          "clusterConfiguration:\n  kubernetesVersion: v1.36.2\n",
+	}
+	opts, sink := hermeticRunOptions(t, fr)
+	err := Run(context.Background(), cluster, opts)
+	if !errors.Is(err, kubeadm.ErrPinMismatch) {
+		t.Fatalf("Run returned %v, want an error wrapping kubeadm.ErrPinMismatch", err)
+	}
+	st := sink.only(t)
+	if st.Phase != status.PhaseFailed || st.Reason != status.ReasonConfigInvalid || !st.Terminal {
+		t.Fatalf("got phase=%s reason=%s terminal=%v, want Failed/ConfigInvalid/terminal", st.Phase, st.Reason, st.Terminal)
+	}
+	if strings.HasPrefix(st.Message, ":") || !strings.Contains(st.Message, "kubernetesVersion") {
+		t.Fatalf("message %q does not name the pin", st.Message)
 	}
 }
 

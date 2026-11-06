@@ -2,6 +2,7 @@ package kubeadm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -43,6 +44,19 @@ func IsSupported(version string) bool {
 	return false
 }
 
+// ErrPinMismatch marks a Resolve failure caused by the operator's
+// kubernetesVersion pin rather than by the bundled binary: the pin is not
+// valid semver, or its minor differs from the binary's. Bumping or removing
+// the pin fixes it, so callers report it as a configuration error.
+var ErrPinMismatch = errors.New("kubernetesVersion pin does not match the bundled kubeadm")
+
+// pinError carries the full pin message and matches ErrPinMismatch, so the
+// message is not prefixed with the sentinel's text.
+type pinError struct{ msg string }
+
+func (e *pinError) Error() string        { return e.msg }
+func (e *pinError) Is(target error) bool { return target == ErrPinMismatch }
+
 // Resolve reconciles an operator-pinned target version against the detected
 // kubeadm binary version (ADR-3 / OQ-5):
 //   - the detected version must be valid and within the supported window;
@@ -59,10 +73,10 @@ func Resolve(detected, pinned string) (string, error) {
 	}
 	if pinned != "" {
 		if !semver.IsValid(pinned) {
-			return "", fmt.Errorf("pinned kubernetesVersion %q is not valid semver", pinned)
+			return "", &pinError{fmt.Sprintf("pinned kubernetesVersion %q is not valid semver", pinned)}
 		}
 		if Minor(pinned) != Minor(detected) {
-			return "", fmt.Errorf("pinned kubernetesVersion %s (minor %s) does not match the installed kubeadm binary %s (minor %s)", pinned, Minor(pinned), detected, Minor(detected))
+			return "", &pinError{fmt.Sprintf("pinned kubernetesVersion %s (minor %s) does not match the installed kubeadm binary %s (minor %s); set clusterConfiguration.kubernetesVersion to %s or remove the pin", pinned, Minor(pinned), detected, Minor(detected), detected)}
 		}
 	}
 	return detected, nil

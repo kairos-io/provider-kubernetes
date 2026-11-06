@@ -51,15 +51,17 @@ func TestResolve(t *testing.T) {
 		pinned    string
 		want      string
 		wantError bool
+		// wantPin marks an error the operator's pin caused (ErrPinMismatch).
+		wantPin bool
 	}{
 		{name: "supported no pin", detected: "v1.35.2", want: "v1.35.2"},
 		{name: "supported matching pin", detected: "v1.36.0", pinned: "v1.36.3", want: "v1.36.0"},
 		{name: "newest minor supported", detected: "v1.37.0", want: "v1.37.0"},
-		{name: "pin minor mismatch", detected: "v1.35.2", pinned: "v1.36.0", wantError: true},
+		{name: "pin minor mismatch", detected: "v1.35.2", pinned: "v1.36.0", wantError: true, wantPin: true},
 		{name: "detected dropped minor 1.34", detected: "v1.34.11", wantError: true},
 		{name: "detected out of window", detected: "v1.30.0", wantError: true},
 		{name: "detected invalid", detected: "nope", wantError: true},
-		{name: "pin invalid", detected: "v1.35.0", pinned: "nope", wantError: true},
+		{name: "pin invalid", detected: "v1.35.0", pinned: "nope", wantError: true, wantPin: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -67,6 +69,9 @@ func TestResolve(t *testing.T) {
 			if tt.wantError {
 				if err == nil {
 					t.Fatalf("expected error, got nil (result %q)", got)
+				}
+				if errors.Is(err, ErrPinMismatch) != tt.wantPin {
+					t.Fatalf("errors.Is(%v, ErrPinMismatch) = %v, want %v", err, !tt.wantPin, tt.wantPin)
 				}
 				return
 			}
