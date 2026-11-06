@@ -12,8 +12,9 @@ This walks you from nothing to a running single-node Kubernetes control plane.
   control-plane endpoint (see [High availability](./high-availability.md)).
 
 The provider targets a rolling window of upstream Kubernetes minors (currently
-**1.35 / 1.36 / 1.37**). Pick one; the bundled `kubeadm` binary must match
-(a mismatch is a hard error - see [Lifecycle](./lifecycle.md)).
+**1.35 / 1.36 / 1.37**). Pick one; the bundled `kubeadm` binary's minor must match
+(a minor mismatch is a hard error, a patch difference is not - see
+[Lifecycle](./lifecycle.md#supported-version-window)).
 
 ## 1. Get an image
 
