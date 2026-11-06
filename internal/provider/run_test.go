@@ -524,6 +524,50 @@ func TestRunRejectsUnsupportedRoleAsConfigInvalid(t *testing.T) {
 	}
 }
 
+// TestRunRecordsReconcilingWhileKubeadmRuns pins the documented "written at
+// start, replaced on completion" contract of status.PhaseReconciling: an
+// operator reading the status while `kubeadm init` runs must see the pass in
+// progress, not nothing or the previous boot's result.
+func TestRunRecordsReconcilingWhileKubeadmRuns(t *testing.T) {
+	var sink *recordingSink
+	var duringInit []status.Status
+	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		switch {
+		case args[0] == "version":
+			return kubeadm.Result{Stdout: "v1.37.0\n"}, nil
+		case args[0] == "token" && args[1] == "generate":
+			return kubeadm.Result{Stdout: "abcdef.0123456789abcdef\n"}, nil
+		case args[0] == "certs":
+			return kubeadm.Result{Stdout: strings.Repeat("a", 64) + "\n"}, nil
+		case args[0] == "init":
+			duringInit = slices.Clone(sink.records)
+		}
+		return kubeadm.Result{}, nil
+	}}
+	cluster := clusterplugin.Cluster{
+		Role:             clusterplugin.RoleInit,
+		ClusterToken:     validToken(),
+		ControlPlaneHost: "10.0.0.1",
+		ProviderOptions:  map[string]string{"cluster_root_path": t.TempDir()},
+	}
+	opts, s := hermeticRunOptions(t, fr)
+	sink = s
+	if err := Run(context.Background(), cluster, opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(duringInit) != 1 {
+		t.Fatalf("recorded %d statuses before kubeadm init ran, want 1: %+v", len(duringInit), duringInit)
+	}
+	got := duringInit[0]
+	if got.Phase != status.PhaseReconciling || got.Outcome != "" || got.Role != "init" ||
+		got.Membership != "uninitialized" || got.APIVersion != status.APIVersion || got.UpdatedAt == "" {
+		t.Fatalf("status during kubeadm init = %+v, want an in-progress Reconciling status for role init, membership uninitialized", got)
+	}
+	if final := sink.only(t); final.Phase != status.PhaseConverged {
+		t.Fatalf("final phase=%q, want %q", final.Phase, status.PhaseConverged)
+	}
+}
+
 // TestRunRejectsNonHostRootAsConfigInvalid: kubeadm never sees
 // cluster_root_path, so a run under any other root must stop before kubeadm
 // and record ConfigInvalid instead of initializing state the next boot misses.
