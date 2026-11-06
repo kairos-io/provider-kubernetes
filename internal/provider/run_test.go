@@ -555,3 +555,117 @@ func TestRunRejectsNonHostRootAsConfigInvalid(t *testing.T) {
 		t.Fatalf("message %q does not name cluster_root_path", st.Message)
 	}
 }
+
+// Config errors found after the token check fail every attempt the same way,
+// so they are recorded as a terminal ConfigInvalid before any action runs.
+func TestRunRecordsConfigErrorsAsConfigInvalid(t *testing.T) {
+	tests := []struct {
+		name    string
+		role    clusterplugin.Role
+		host    string
+		options string
+		want    string
+	}{
+		{
+			name:    "unparseable user config",
+			role:    clusterplugin.RoleInit,
+			host:    "10.0.0.1",
+			options: "clusterConfiguration: [\n",
+			want:    "parse cluster config",
+		},
+		{
+			name: "controlplane without control_plane_host",
+			role: clusterplugin.RoleControlPlane,
+			options: "joinConfiguration:\n  discovery:\n    bootstrapToken:\n" +
+				"      token: abcdef.0123456789abcdef\n      caCertHashes:\n      - sha256:deadbeef\n",
+			want: "control_plane_host",
+		},
+		{
+			name:    "serviceSubnet too small for clusterDNS",
+			role:    clusterplugin.RoleInit,
+			host:    "10.0.0.1",
+			options: "clusterConfiguration:\n  networking:\n    serviceSubnet: 10.96.0.0/30\n",
+			want:    "derive clusterDNS",
+		},
+		{
+			name: "worker without join material",
+			role: clusterplugin.RoleWorker,
+			host: "10.0.0.1",
+			want: "no join material",
+		},
+		{
+			name:    "worker token without CA anchor",
+			role:    clusterplugin.RoleWorker,
+			host:    "10.0.0.1",
+			options: "joinConfiguration:\n  discovery:\n    bootstrapToken:\n      token: abcdef.0123456789abcdef\n",
+			want:    "no CA trust anchor",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+				if args[0] == "version" {
+					return kubeadm.Result{Stdout: "v1.37.0\n"}, nil
+				}
+				return kubeadm.Result{}, nil
+			}}
+			cluster := clusterplugin.Cluster{
+				Role:             tt.role,
+				ClusterToken:     validToken(),
+				ControlPlaneHost: tt.host,
+				ProviderOptions:  map[string]string{"cluster_root_path": t.TempDir()},
+				Options:          tt.options,
+			}
+			opts, sink := hermeticRunOptions(t, fr)
+			if err := Run(context.Background(), cluster, opts); err == nil {
+				t.Fatal("Run returned nil, want a config error")
+			}
+			for _, c := range fr.calls {
+				if c[0] != "version" {
+					t.Fatalf("Run called kubeadm %v for a config error; calls=%v", c, fr.calls)
+				}
+			}
+			st := sink.only(t)
+			if st.Phase != status.PhaseFailed || st.Reason != status.ReasonConfigInvalid || !st.Terminal {
+				t.Fatalf("got phase=%s reason=%s terminal=%v, want Failed/ConfigInvalid/terminal", st.Phase, st.Reason, st.Terminal)
+			}
+			if st.Budget.Attempts != 0 || st.LastAction != "" {
+				t.Fatalf("got budget=%+v lastAction=%q, want no attempt spent", st.Budget, st.LastAction)
+			}
+			if !strings.Contains(st.Message, tt.want) {
+				t.Fatalf("message %q does not contain %q", st.Message, tt.want)
+			}
+		})
+	}
+}
+
+// A worker that already joined has nothing left to join with, so missing join
+// material is not an error there.
+func TestRunJoinedWorkerWithoutJoinMaterialConverges(t *testing.T) {
+	fr := &fakeRunner{respond: func(args []string) (kubeadm.Result, error) {
+		if args[0] == "version" {
+			return kubeadm.Result{Stdout: "v1.37.0\n"}, nil
+		}
+		return kubeadm.Result{}, nil
+	}}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc", "kubernetes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc", "kubernetes", "kubelet.conf"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cluster := clusterplugin.Cluster{
+		Role:             clusterplugin.RoleWorker,
+		ClusterToken:     validToken(),
+		ControlPlaneHost: "10.0.0.1",
+		ProviderOptions:  map[string]string{"cluster_root_path": root},
+	}
+	opts, sink := hermeticRunOptions(t, fr)
+	if err := Run(context.Background(), cluster, opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st := sink.only(t); st.Phase != status.PhaseConverged {
+		t.Fatalf("got phase=%s reason=%s, want Converged", st.Phase, st.Reason)
+	}
+}
