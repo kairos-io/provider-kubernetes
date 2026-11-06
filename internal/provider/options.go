@@ -6,6 +6,7 @@ import (
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile/actualstate"
+	"github.com/kairos-io/provider-kubernetes/internal/reset"
 )
 
 const (
@@ -67,6 +68,9 @@ func NewContext(cluster clusterplugin.Cluster) (Context, error) {
 	rootPath := defaultRootPath
 	if v := cluster.ProviderOptions[providerOptRootPathKey]; v != "" {
 		rootPath = v
+	}
+	if _, err := reset.ValidateRoot(rootPath); err != nil {
+		return Context{}, fmt.Errorf("cluster_root_path: %w", err)
 	}
 
 	return Context{
