@@ -567,3 +567,35 @@ func TestRunRecordsReconcilingWhileKubeadmRuns(t *testing.T) {
 		t.Fatalf("final phase=%q, want %q", final.Phase, status.PhaseConverged)
 	}
 }
+
+// TestRunRejectsNonHostRootAsConfigInvalid: kubeadm never sees
+// cluster_root_path, so a run under any other root must stop before kubeadm
+// and record ConfigInvalid instead of initializing state the next boot misses.
+func TestRunRejectsNonHostRootAsConfigInvalid(t *testing.T) {
+	relaxed := rootPathSupported
+	rootPathSupported = productionRootPathSupported
+	t.Cleanup(func() { rootPathSupported = relaxed })
+
+	fr := &fakeRunner{}
+	opts, sink := hermeticRunOptions(t, fr)
+	err := Run(context.Background(), clusterplugin.Cluster{
+		Role:             clusterplugin.RoleInit,
+		ClusterToken:     validToken(),
+		ControlPlaneHost: "10.0.0.1",
+		ProviderOptions:  map[string]string{"cluster_root_path": t.TempDir()},
+	}, opts)
+	if err == nil {
+		t.Fatal("Run with a non-/ cluster_root_path returned nil, want an error")
+	}
+	if len(fr.calls) != 0 {
+		t.Fatalf("Run with a non-/ cluster_root_path called kubeadm: %v", fr.calls)
+	}
+	st := sink.only(t)
+	if st.Phase != status.PhaseFailed || st.Reason != status.ReasonConfigInvalid || !st.Terminal {
+		t.Fatalf("got phase=%s reason=%s terminal=%v, want Failed/ConfigInvalid/terminal",
+			st.Phase, st.Reason, st.Terminal)
+	}
+	if !strings.Contains(st.Message, "cluster_root_path") {
+		t.Fatalf("message %q does not name cluster_root_path", st.Message)
+	}
+}

@@ -494,7 +494,7 @@ bundle as a whole (a directory, the provider binary used as the reference, or
 | `missing`, `symlink`, `not-regular`, `owner`, `mode`, `size` | The tarball (or, on a `bundle refused` line, `images.lock`) is absent, a symlink, not a regular file, not owned by root, writable by group or others, or outside the size limits. |
 | `device` | The file is not on the same filesystem as the provider binary, for example because something is bind-mounted over the bundle directory (including a `CUSTOM_BIND_MOUNTS` entry). |
 | `tar-structure`, `manifest`, `config-digest` | The tarball is not the expected image archive, names a different reference, or its image config does not match its name. |
-| `ctr-failed`, `deadline` | containerd rejected the import, or the 5 minute bound ran out. |
+| `ctr-failed`, `deadline` | `ctr` could not run or containerd rejected the import, or the 5 minute bound ran out. The `detail` carries the `ctr` error and its output. |
 
 Files in the bundle directory that are not in `images.lock` are never opened; they
 are reported as `unlisted`. The import never blocks boot. A refused image is not

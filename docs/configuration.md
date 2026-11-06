@@ -49,11 +49,14 @@ role differs by node role:
 
 ### `providerConfig.cluster_root_path`
 
-Filesystem root the provider operates under (default `/`). It locates
-`etc/kubernetes/...`, `var/lib/kubelet`, etc. Honored everywhere, including the
-reset path. The value must be absolute and must not contain a `..` segment; a
-value that fails this is rejected when the config is read, and again before a
-reset removes any artifact.
+Filesystem root the provider reads `etc/kubernetes/...`, `var/lib/kubelet` and
+`var/lib/etcd` under (default `/`). Only `/` is supported: `kubeadm init`,
+`join` and `upgrade` always keep their state in the host's `/etc/kubernetes` and
+`/var/lib/kubelet`, so any other root would hide that state from the provider on
+the next boot. A value other than `/` is rejected when the config is read and
+recorded as `ConfigInvalid`. The value must also be absolute and must not
+contain a `..` segment; the reset path checks this again before it removes any
+artifact.
 
 ### `config:` - the kubeadm v1beta4 surface
 
