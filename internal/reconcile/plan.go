@@ -234,14 +234,15 @@ func planUpgrade(desired actualstate.Role, target string, s actualstate.State) (
 				return []Action{ActionRefuseUpgrade}, true
 			}
 		}
-		acts := make([]Action, 0, 3)
-		if !s.KubeletHealthy {
-			// The worker's new kubelet may also crashloop on a stale flag; repair it.
-			acts = append(acts, ActionRepairKubeletConfig)
-		}
+		// No repair-kubelet-config here, even with an unhealthy kubelet: the
+		// repair is `kubeadm init phase kubelet-start`, which on a joined worker
+		// (ca.crt but no ca.key) fails as an incomplete external CA (#5802).
+		// A worker does not need it either. It runs no apiserver, so a stale
+		// kubelet flag blocks nothing the upgrade needs, and `kubeadm upgrade
+		// node` rewrites config.yaml, strips the flags the new kubeadm drops from
+		// kubeadm-flags.env, and the executor then restarts the kubelet.
 		// Wait for the control plane to flip the cluster version, then upgrade node.
-		acts = append(acts, ActionWaitForClusterUpgrade, ActionUpgradeNode)
-		return acts, true
+		return []Action{ActionWaitForClusterUpgrade, ActionUpgradeNode}, true
 
 	default:
 		return nil, false
