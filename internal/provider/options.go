@@ -52,9 +52,16 @@ type Context struct {
 	TokenWarning string
 }
 
+// rootPathSupported reports whether NewContext accepts a validated, cleaned
+// cluster_root_path. kubeadm init, join and upgrade write /etc/kubernetes and
+// /var/lib/kubelet on the host whatever the root is, so "/" is the only root
+// under which the prober, the join minter and reset find that state. Tests
+// swap it to run the pipeline against a temporary root.
+var rootPathSupported = func(root string) bool { return root == defaultRootPath }
+
 // NewContext parses and validates a Cluster into a provider Context. It fails
-// fast on invalid input (e.g. an empty/too-short cluster_token or a role other
-// than init, controlplane or worker) so the provider never proceeds on bad
+// fast on invalid input (e.g. an empty/too-short cluster_token, a role other
+// than init, controlplane or worker, or a cluster_root_path other than "/") so the provider never proceeds on bad
 // configuration.
 func NewContext(cluster clusterplugin.Cluster) (Context, error) {
 	warning, err := ValidateClusterToken(cluster.ClusterToken)
@@ -69,8 +76,13 @@ func NewContext(cluster clusterplugin.Cluster) (Context, error) {
 	if v := cluster.ProviderOptions[providerOptRootPathKey]; v != "" {
 		rootPath = v
 	}
-	if _, err := reset.ValidateRoot(rootPath); err != nil {
+	clean, err := reset.ValidateRoot(rootPath)
+	if err != nil {
 		return Context{}, fmt.Errorf("cluster_root_path: %w", err)
+	}
+	if !rootPathSupported(clean) {
+		return Context{}, fmt.Errorf("cluster_root_path: only %q is supported, got %q: kubeadm keeps its state in the host's /etc/kubernetes and /var/lib/kubelet",
+			defaultRootPath, rootPath)
 	}
 
 	return Context{

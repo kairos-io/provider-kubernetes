@@ -113,6 +113,38 @@ func TestNewContextValidatesClusterRootPath(t *testing.T) {
 	}
 }
 
+// TestNewContextAcceptsOnlyTheHostRoot runs the production root check that
+// TestMain relaxes: kubeadm writes the host's /etc/kubernetes whatever the
+// root is, so a root the prober would look under instead must be refused.
+func TestNewContextAcceptsOnlyTheHostRoot(t *testing.T) {
+	relaxed := rootPathSupported
+	rootPathSupported = productionRootPathSupported
+	t.Cleanup(func() { rootPathSupported = relaxed })
+
+	cluster := func(root string) clusterplugin.Cluster {
+		return clusterplugin.Cluster{
+			Role:            clusterplugin.RoleInit,
+			ClusterToken:    validToken(),
+			ProviderOptions: map[string]string{"cluster_root_path": root},
+		}
+	}
+	for _, root := range []string{"/persistent/root", "/srv/k8s..root", "/tmp"} {
+		_, err := NewContext(cluster(root))
+		if err == nil {
+			t.Errorf("NewContext(cluster_root_path=%q): want an error, got nil", root)
+			continue
+		}
+		if !strings.Contains(err.Error(), "cluster_root_path") {
+			t.Errorf("NewContext(cluster_root_path=%q): error %q does not name cluster_root_path", root, err)
+		}
+	}
+	for _, root := range []string{"", "/", "//", "/."} {
+		if _, err := NewContext(cluster(root)); err != nil {
+			t.Errorf("NewContext(cluster_root_path=%q): unexpected error: %v", root, err)
+		}
+	}
+}
+
 func TestNewContextRejectsBadToken(t *testing.T) {
 	if _, err := NewContext(clusterplugin.Cluster{Role: clusterplugin.RoleInit}); err == nil {
 		t.Fatal("expected error for empty cluster_token")
