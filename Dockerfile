@@ -43,7 +43,7 @@ ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940
 ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
 # Provider toolchain: its tag MUST match the go.mod `go` directive (enforced by
 # `make verify-pins`), so the image build never drifts from CI.
-ARG GO_BUILDER_IMAGE=golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
+ARG GO_BUILDER_IMAGE=golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18
 ARG TARGETARCH=amd64
 
 # containerd and kubelet are ALWAYS built fully static from source: Hadron is
@@ -56,7 +56,7 @@ ARG TARGETARCH=amd64
 # latest patch, rather than the provider's Go: kubelet is upstream code, so it is
 # compiled with the toolchain upstream qualifies it against. Move it to a newer
 # Go minor only once upstream release branches do.
-ARG STATIC_BUILDER_IMAGE=golang:1.26.10@sha256:670bb5aa5349ae03b8516764718486f4f16399134bdc9acd0c46a23f043ab05c
+ARG STATIC_BUILDER_IMAGE=golang:1.26.10@sha256:cfa27959837144bf4649802ba38e59daffd0dd2a7994aa83daaf113285b0f551
 
 # Kubernetes (must be within the supported window the provider enforces at
 # runtime: 1.35 / 1.36 / 1.37 as of September 2026).
@@ -113,7 +113,7 @@ RUN go build \
 # kubeadm/kubectl/crictl are already static and run on musl unchanged. kubelet is
 # NOT downloaded here -- it is built static from source (see kubelet-build).
 # ----------------------------------------------------------------------------
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS k8s-binaries
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a AS k8s-binaries
 ARG KUBERNETES_VERSION
 ARG CRICTL_VERSION
 ARG TARGETARCH
@@ -156,7 +156,7 @@ RUN set -eu; \
 # (runc, CNI). containerd is built static from source (see containerd-build);
 # runc and the CNI plugins are already static and run on musl unchanged.
 # ----------------------------------------------------------------------------
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS runtime-binaries
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a AS runtime-binaries
 ARG RUNC_VERSION
 ARG CNI_PLUGINS_VERSION
 ARG TARGETARCH
@@ -308,7 +308,7 @@ RUN set -eux; \
 # TARGETARCH is passed explicitly: crane pull selects that platform from each
 # verified multi-arch index (crane's implicit default is linux/amd64).
 # ----------------------------------------------------------------------------
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS image-bundler
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a AS image-bundler
 ARG KUBERNETES_VERSION
 ARG TARGETARCH
 # crane + cosign are static Go binaries that run on musl; both are version-pinned
