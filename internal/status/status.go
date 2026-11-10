@@ -392,6 +392,23 @@ func MergeReportOnly(prev Status, existing bool, reason Reason, message, bootID,
 	return s, true
 }
 
+// BuildReconciling is the in-progress status Run writes before its first
+// kubeadm action, so a pass that takes minutes (init, join, an upgrade) is
+// visible as running rather than as nothing or the previous boot's result.
+// Outcome stays empty: the pass has neither succeeded nor failed yet. The
+// completion status from BuildStatus replaces it. Pure, like BuildStatus.
+func BuildReconciling(role actualstate.Role, membership actualstate.Membership, now, bootID, version string) Status {
+	return Status{
+		APIVersion: APIVersion,
+		Phase:      PhaseReconciling,
+		Role:       string(role),
+		Membership: string(membership),
+		UpdatedAt:  now,
+		BootID:     bootID,
+		Version:    version,
+	}
+}
+
 // degradedReason maps a degraded member verdict to its closed Reason and a
 // fixed operator message. Each verdict has its own reason because each needs
 // a different response: a stopped kubelet is investigated on the node, an
