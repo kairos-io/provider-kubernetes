@@ -41,6 +41,14 @@ These cover the bulk of the logic and run in seconds. The e2e files are behind a
 `//go:build e2e` tag, so `make test` / `go test ./...` never compile or run them --
 the fast gate stays fast.
 
+`make vet` and `make lint` do look at them. `vet` runs a second pass with
+`-tags "e2e nightly"` and the golangci-lint config sets the same build tags, so
+`test/e2e/` is type-checked and linted on every pull request without anything
+being started. That matters most for the Tier-2 files behind
+`//go:build e2e && nightly`: the per-PR e2e job runs `-tags e2e` and does not
+compile them, so the nightly workflow would otherwise be the only thing that
+ever does (kairos-io/kairos#5401).
+
 ## End-to-end tests
 
 The e2e suite (`test/e2e/`, behind `//go:build e2e`) proves the layer unit tests
