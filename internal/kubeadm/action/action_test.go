@@ -3,8 +3,11 @@ package action
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -228,6 +231,36 @@ func TestWaitForCPHealthy_EmptyEndpointSkips(t *testing.T) {
 	// Should return nil immediately (no endpoint, no dial attempt).
 	if err := e.Execute(ctx, reconcile.ActionWaitForControlPlane); err != nil {
 		t.Fatalf("empty endpoint must skip health gate, got: %v", err)
+	}
+}
+
+// HA-4: the CP join /readyz gate polls the endpoint kubeadm join dials. With a
+// join-scoped apiServerEndpoint set, a dead controlPlaneEndpoint must not hold
+// the join back.
+func TestWaitForCPHealthy_UsesJoinAPIServerEndpoint(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/readyz" {
+			hits.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	e := &KubeadmExecutor{
+		Role: actualstate.RoleControlPlane,
+		Input: kubeadmconfig.Input{
+			ControlPlaneEndpoint:  "127.0.0.1:1",
+			JoinAPIServerEndpoint: srv.Listener.Addr().String(),
+		},
+		CPReachable: func(context.Context) bool { return true },
+	}
+	if err := e.Execute(ctx, reconcile.ActionWaitForControlPlane); err != nil {
+		t.Fatalf("gate must pass on a healthy join endpoint, got: %v", err)
+	}
+	if hits.Load() == 0 {
+		t.Fatal("gate must poll the join apiServerEndpoint's /readyz")
 	}
 }
 
