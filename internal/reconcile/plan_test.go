@@ -325,10 +325,12 @@ func TestPlanUpgrade(t *testing.T) {
 			want:  []Action{ActionWaitForClusterUpgrade, ActionUpgradeNode},
 		},
 		{
-			name:    "worker broken kubelet -> repair, wait, node",
+			// #5802: kubelet-start fails on a joined worker, and upgrade node
+			// repairs the kubelet config itself, so there is no repair step.
+			name:    "worker broken kubelet -> wait, node (no repair)",
 			desired: actualstate.RoleWorker, target: t135,
 			state: actualstate.State{Membership: actualstate.Joined, KubeletHealthy: false, ClusterVersion: t135, RunningKubeletVersion: "v1.34.8"},
-			want:  []Action{ActionRepairKubeletConfig, ActionWaitForClusterUpgrade, ActionUpgradeNode},
+			want:  []Action{ActionWaitForClusterUpgrade, ActionUpgradeNode},
 		},
 		{
 			name:    "worker converged -> no-op",
