@@ -224,7 +224,8 @@ cluster:
       controlPlane:
         certificateKey: {{yq .CertKey}}
         localAPIEndpoint:
-          # Set to this joining CP node's own IP (HA-2, ADR-11). Operator must fill this in.
-          advertiseAddress: {{if .AdvertiseAddress}}{{yq .AdvertiseAddress}}{{else}}"FILL-IN-THIS-NODE-IP"{{end}}
+          # Set to this joining CP node's own IP (HA-2, ADR-11). Left empty, kubeadm
+          # uses the default-route interface address.
+          advertiseAddress: {{if .AdvertiseAddress}}{{yq .AdvertiseAddress}}{{else}}""{{end}}
 {{- end}}
 `))
