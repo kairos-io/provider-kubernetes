@@ -96,6 +96,8 @@ func TestRenderJoinCloudConfig_Rejects(t *testing.T) {
 		{"no hashes", JoinSnippet{Role: "worker", Endpoint: "x:6443", Token: "t"}},
 		{"blank hashes", JoinSnippet{Role: "worker", Endpoint: "x:6443", Token: "t", CACertHashes: []string{"  "}}},
 		{"cp without cert key", JoinSnippet{Role: "controlplane", Endpoint: "x:6443", Token: "t", CACertHashes: []string{"sha256:a"}}},
+		{"short cluster token", JoinSnippet{Role: "worker", Endpoint: "x:6443", Token: "t", CACertHashes: []string{"sha256:a"}, ClusterToken: "short"}},
+		{"short cluster token after trim", JoinSnippet{Role: "worker", Endpoint: "x:6443", Token: "t", CACertHashes: []string{"sha256:a"}, ClusterToken: "  short-token    "}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
