@@ -290,3 +290,122 @@ func TestGenerateCertificateKey(t *testing.T) {
 		t.Fatalf("key value must not appear in argv: %v", fr.lastArgs)
 	}
 }
+
+// uploadCertsConfig runs UploadCerts against root and returns the transient
+// --config content kubeadm would read, captured before it is shredded.
+func uploadCertsConfig(t *testing.T, root string) string {
+	t.Helper()
+	var cfg string
+	rr := respondRunner{respond: func(args []string) (kubeadm.Result, error) {
+		for i, a := range args {
+			if a == "--config" && i+1 < len(args) {
+				data, err := os.ReadFile(args[i+1])
+				if err != nil {
+					t.Fatalf("read transient config: %v", err)
+				}
+				cfg = string(data)
+			}
+		}
+		return kubeadm.Result{}, nil
+	}}
+	m := Minter{Runner: rr, RootPath: root, RunDir: t.TempDir()}
+	if err := m.UploadCerts(context.Background(), strings.Repeat("a", 64)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg == "" {
+		t.Fatal("upload-certs was not called with a --config file")
+	}
+	return cfg
+}
+
+func writeK8sFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, "etc", "kubernetes", rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const testAPIServerManifest = `apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint: %s
+  name: kube-apiserver
+  namespace: kube-system
+`
+
+const testAdminConf = `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://%s
+  name: kubernetes
+`
+
+func TestUploadCerts_AdvertiseAddressFromAPIServerManifest(t *testing.T) {
+	root := t.TempDir()
+	writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "10.0.0.5:6444"))
+	writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "cp.example.com:443"))
+
+	cfg := uploadCertsConfig(t, root)
+	if !strings.Contains(cfg, "advertiseAddress: 10.0.0.5") || !strings.Contains(cfg, "bindPort: 6444") {
+		t.Fatalf("transient config must carry the node's own API endpoint, got:\n%s", cfg)
+	}
+}
+
+func TestUploadCerts_AdvertiseAddressIPv6(t *testing.T) {
+	root := t.TempDir()
+	writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "'[fd00::5]:6443'"))
+
+	cfg := uploadCertsConfig(t, root)
+	if !strings.Contains(cfg, "advertiseAddress: fd00::5") || !strings.Contains(cfg, "bindPort: 6443") {
+		t.Fatalf("transient config must carry the IPv6 API endpoint, got:\n%s", cfg)
+	}
+}
+
+func TestUploadCerts_AdvertiseAddressFallsBackToAdminConfIP(t *testing.T) {
+	root := t.TempDir()
+	writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "192.168.1.10:8443"))
+
+	cfg := uploadCertsConfig(t, root)
+	if !strings.Contains(cfg, "advertiseAddress: 192.168.1.10") {
+		t.Fatalf("transient config must carry the admin.conf server IP, got:\n%s", cfg)
+	}
+	if strings.Contains(cfg, "bindPort") {
+		t.Fatalf("admin.conf port may be a load balancer's; bindPort must stay unset, got:\n%s", cfg)
+	}
+}
+
+func TestUploadCerts_NoAdvertiseAddressForHostnameOrMissing(t *testing.T) {
+	cases := map[string]func(t *testing.T, root string){
+		"nothing on disk": func(*testing.T, string) {},
+		"admin.conf hostname": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "cp.example.com:6443"))
+		},
+		"manifest without annotation, unspecified admin.conf IP": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", "apiVersion: v1\nkind: Pod\nmetadata:\n  name: kube-apiserver\n")
+			writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "0.0.0.0:6443"))
+		},
+		"unparseable files": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", ":::not yaml")
+			writeK8sFile(t, root, "admin.conf", ":::not yaml")
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			setup(t, root)
+			cfg := uploadCertsConfig(t, root)
+			if strings.Contains(cfg, "advertiseAddress") || strings.Contains(cfg, "bindPort") {
+				t.Fatalf("no usable IP: the API endpoint must be left to kubeadm, got:\n%s", cfg)
+			}
+			if !strings.Contains(cfg, "certificateKey:") {
+				t.Fatalf("transient config must still carry the certificate key, got:\n%s", cfg)
+			}
+		})
+	}
+}
