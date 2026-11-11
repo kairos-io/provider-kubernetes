@@ -17,10 +17,15 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"sigs.k8s.io/yaml"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
@@ -155,11 +160,14 @@ func (m Minter) UploadCerts(ctx context.Context, certKey string) error {
 		return fmt.Errorf("upload-certs: certKey must not be empty")
 	}
 
-	// Build a minimal InitConfiguration carrying only the certificateKey. This is
-	// the only field upload-certs reads from the config (it ignores all other
-	// InitConfiguration fields when run as a standalone phase).
+	// Build a minimal InitConfiguration carrying the certificateKey and this
+	// node's own API endpoint. upload-certs only needs the key, but kubeadm
+	// defaults the whole InitConfiguration first, and an empty advertiseAddress
+	// makes it pick the default-route interface, which fails on a node without
+	// a default route.
 	initCfg := kubeadmconfig.NewInitConfiguration()
 	initCfg.CertificateKey = certKey
+	initCfg.LocalAPIEndpoint = m.localAPIEndpoint()
 
 	content, err := kubeadmconfig.Marshal(initCfg)
 	if err != nil {
@@ -184,6 +192,69 @@ func (m Minter) UploadCerts(ctx context.Context, certKey string) error {
 		return fmt.Errorf("upload-certs: %w", err)
 	}
 	return nil
+}
+
+// apiserverAdvertiseAnnotation is the annotation kubeadm puts on the
+// kube-apiserver static pod with this node's localAPIEndpoint as "ip:port".
+const apiserverAdvertiseAnnotation = "kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint"
+
+// localAPIEndpoint returns this control plane's own API endpoint for the
+// transient upload-certs config. It prefers the kube-apiserver static pod
+// annotation, which kubeadm writes from this node's localAPIEndpoint, and falls
+// back to the admin.conf server host. admin.conf names controlPlaneEndpoint,
+// whose port may be a load balancer's rather than this apiserver's, so only the
+// address is taken from it. That endpoint is often a DNS name: kubeadm only
+// accepts an IP as advertiseAddress, so a name (or no usable source) yields an
+// empty endpoint and kubeadm keeps its own default-route detection.
+func (m Minter) localAPIEndpoint() kubeadmconfig.APIEndpoint {
+	k8sDir := filepath.Join(m.RootPath, "etc", "kubernetes")
+	if data, err := os.ReadFile(filepath.Join(k8sDir, "manifests", "kube-apiserver.yaml")); err == nil {
+		var pod struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
+		}
+		if yaml.Unmarshal(data, &pod) == nil {
+			if ep, ok := apiEndpointFromHostPort(pod.Metadata.Annotations[apiserverAdvertiseAnnotation]); ok {
+				return ep
+			}
+		}
+	}
+	if data, err := os.ReadFile(m.adminConf()); err == nil {
+		var kc struct {
+			Clusters []struct {
+				Cluster struct {
+					Server string `json:"server"`
+				} `json:"cluster"`
+			} `json:"clusters"`
+		}
+		if yaml.Unmarshal(data, &kc) == nil && len(kc.Clusters) > 0 {
+			if u, err := url.Parse(kc.Clusters[0].Cluster.Server); err == nil {
+				if ep, ok := apiEndpointFromHostPort(u.Host); ok {
+					return kubeadmconfig.APIEndpoint{AdvertiseAddress: ep.AdvertiseAddress}
+				}
+			}
+		}
+	}
+	return kubeadmconfig.APIEndpoint{}
+}
+
+// apiEndpointFromHostPort turns "ip:port" into an APIEndpoint. ok is false
+// unless the host is a specified IP literal; the port is kept only if valid.
+func apiEndpointFromHostPort(hostPort string) (kubeadmconfig.APIEndpoint, bool) {
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(hostPort))
+	if err != nil {
+		return kubeadmconfig.APIEndpoint{}, false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() {
+		return kubeadmconfig.APIEndpoint{}, false
+	}
+	ep := kubeadmconfig.APIEndpoint{AdvertiseAddress: ip.String()}
+	if port, err := strconv.ParseUint(portStr, 10, 16); err == nil && port > 0 {
+		ep.BindPort = int32(port)
+	}
+	return ep, true
 }
 
 // MintJoinMaterial assembles fresh join material on a control-plane node (ADR-10
