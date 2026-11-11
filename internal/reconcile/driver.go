@@ -90,7 +90,7 @@ func (r Reconciler) RunWithResult(ctx context.Context, actions []Action) (RunRes
 }
 
 func (r Reconciler) runAction(ctx context.Context, a Action, sleep func(time.Duration)) (RunResult, error) {
-	var lastErr error
+	var firstErr, lastErr error
 	for attempt := 1; attempt <= r.Budget.MaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return RunResult{
@@ -105,6 +105,9 @@ func (r Reconciler) runAction(ctx context.Context, a Action, sleep func(time.Dur
 		if err == nil {
 			return RunResult{Attempts: attempt}, nil
 		}
+		if firstErr == nil {
+			firstErr = err
+		}
 		lastErr = err
 
 		// A terminal decision will not change on retry; fail fast (still loud).
@@ -116,10 +119,16 @@ func (r Reconciler) runAction(ctx context.Context, a Action, sleep func(time.Dur
 			sleep(backoff(attempt))
 		}
 	}
-	return RunResult{
+	res := RunResult{
 		Attempts:        r.Budget.MaxAttempts,
 		BudgetExhausted: true,
-	}, fmt.Errorf("failed after %d attempts: %w", r.Budget.MaxAttempts, lastErr)
+	}
+	if r.Budget.MaxAttempts > 1 {
+		// A retry often fails only on what the first attempt left behind, so
+		// keep the first error: it is the real cause.
+		return res, fmt.Errorf("failed after %d attempts: %w (first attempt: %v)", r.Budget.MaxAttempts, lastErr, firstErr)
+	}
+	return res, fmt.Errorf("failed after %d attempts: %w", r.Budget.MaxAttempts, lastErr)
 }
 
 // backoff is a simple linear backoff between attempts.

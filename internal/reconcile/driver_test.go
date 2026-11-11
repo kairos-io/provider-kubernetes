@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,6 +58,41 @@ func TestReconcilerFailsLoudAfterMaxAttempts(t *testing.T) {
 	}
 	if exec.calls[ActionRunJoin] != 3 {
 		t.Fatalf("expected exactly 3 bounded attempts, got %d", exec.calls[ActionRunJoin])
+	}
+}
+
+// perAttemptExec fails every call with a different error.
+type perAttemptExec struct{ calls int }
+
+func (e *perAttemptExec) Execute(_ context.Context, _ Action) error {
+	e.calls++
+	if e.calls == 1 {
+		return errors.New("wait-control-plane timed out")
+	}
+	return errors.New("preflight: manifests already exist")
+}
+
+func TestReconcilerKeepsFirstAttemptError(t *testing.T) {
+	exec := &perAttemptExec{}
+	err := testReconciler(exec).Run(context.Background(), []Action{ActionRunInit})
+	if err == nil {
+		t.Fatal("expected error after exhausting attempts")
+	}
+	for _, want := range []string{"wait-control-plane timed out", "preflight: manifests already exist"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestReconcilerSingleAttemptErrorHasNoFirstAttemptNote(t *testing.T) {
+	exec := newFakeExec()
+	exec.alwaysError = true
+	r := testReconciler(exec)
+	r.Budget.MaxAttempts = 1
+	err := r.Run(context.Background(), []Action{ActionRunInit})
+	if err == nil || strings.Contains(err.Error(), "first attempt") {
+		t.Fatalf("unexpected error %v", err)
 	}
 }
 
