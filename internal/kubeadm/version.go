@@ -62,7 +62,7 @@ func Resolve(detected, pinned string) (string, error) {
 			return "", fmt.Errorf("pinned kubernetesVersion %q is not valid semver", pinned)
 		}
 		if Minor(pinned) != Minor(detected) {
-			return "", fmt.Errorf("pinned kubernetesVersion %s (minor %s) does not match the installed kubeadm binary %s (minor %s)", pinned, Minor(pinned), detected, Minor(detected))
+			return "", fmt.Errorf("pinned kubernetesVersion %s (minor %s) does not match the installed kubeadm binary %s (minor %s); set clusterConfiguration.kubernetesVersion to %s or remove the pin", pinned, Minor(pinned), detected, Minor(detected), detected)
 		}
 	}
 	return detected, nil

@@ -51,11 +51,14 @@ func TestResolve(t *testing.T) {
 		pinned    string
 		want      string
 		wantError bool
+		// wantMsg, when set, must appear in the error.
+		wantMsg string
 	}{
 		{name: "supported no pin", detected: "v1.35.2", want: "v1.35.2"},
 		{name: "supported matching pin", detected: "v1.36.0", pinned: "v1.36.3", want: "v1.36.0"},
 		{name: "newest minor supported", detected: "v1.37.0", want: "v1.37.0"},
-		{name: "pin minor mismatch", detected: "v1.35.2", pinned: "v1.36.0", wantError: true},
+		{name: "pin minor mismatch", detected: "v1.35.2", pinned: "v1.36.0", wantError: true,
+			wantMsg: "set clusterConfiguration.kubernetesVersion to v1.35.2 or remove the pin"},
 		{name: "detected dropped minor 1.34", detected: "v1.34.11", wantError: true},
 		{name: "detected out of window", detected: "v1.30.0", wantError: true},
 		{name: "detected invalid", detected: "nope", wantError: true},
@@ -67,6 +70,9 @@ func TestResolve(t *testing.T) {
 			if tt.wantError {
 				if err == nil {
 					t.Fatalf("expected error, got nil (result %q)", got)
+				}
+				if tt.wantMsg != "" && !strings.Contains(err.Error(), tt.wantMsg) {
+					t.Fatalf("error %q does not contain %q", err, tt.wantMsg)
 				}
 				return
 			}
