@@ -36,8 +36,10 @@ KAIROS_BASE_IMAGE  ?= ghcr.io/kairos-io/hadron:v0.6.3@sha256:a5a4722531411b7dec6
 KAIROS_INIT_IMAGE  ?= quay.io/kairos/kairos-init:v4.5.2@sha256:7de7999e8b8a3d80820968143609ea473da29ede14ff41a3579ea80f5418be3f
 IMAGE              ?= kairos-kubeadm:$(VERSION)
 # OCI revision and created labels, so the image does not carry the Hadron base's.
+# created is the commit date, not the wall clock, so rebuilding the same commit
+# yields the same image digest.
 REVISION           ?= $(shell git rev-parse HEAD 2>/dev/null)
-BUILD_DATE         ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILD_DATE         ?= $(shell git show -s --format=%cI HEAD 2>/dev/null)
 
 # e2e (ADR-13). The node image FROM-derives the kairos-kubeadm base so it reuses
 # the checksum-verified toolchain. BASE_IMAGE defaults to the per-version
