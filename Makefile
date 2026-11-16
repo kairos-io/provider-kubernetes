@@ -151,7 +151,7 @@ e2e-node-image:
 e2e: e2e-node-image
 	E2E_NODE_IMAGE=$(E2E_NODE_IMAGE) \
 	E2E_KUBERNETES_VERSION=$(KUBERNETES_VERSION) \
-	$(GO) test -tags e2e -timeout $(E2E_TIMEOUT) -v ./test/e2e/...
+	$(GO) test -tags e2e -count=1 -timeout $(E2E_TIMEOUT) -v ./test/e2e/...
 
 ## e2e-nightly: run the heavier Tier-2 (ADR-13 E4) scenarios that are too slow for
 ## per-PR (multi-CP stacked-etcd HA, pre-membership failure-status). It mirrors
