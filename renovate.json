@@ -152,23 +152,18 @@
       "enabled": false
     },
     {
-      "description": "Hadron base OS image: Dockerfile ARG and Makefile default in one PR.",
-      "groupName": "Hadron base image",
+      "description": "Hadron and kairos-init are a matched pair, not two independent pins: the final stage re-runs kairos-init against the Hadron base, and a kairos-init older than that Hadron cannot regenerate its initramfs (dracut -f fails). Keep both images -- all four Dockerfile ARG and Makefile default lines -- in one PR so the pair is reviewed as a single decision. separateMajorMinor=false holds them together even though their version lines now differ: Hadron still ships v0.x, while kairos-init moved to the kairos monorepo's v4.x after kairos-io/kairos-init was archived.",
+      "groupName": "Kairos base images",
+      "separateMajorMinor": false,
       "matchDatasources": [
         "docker"
       ],
       "matchPackageNames": [
-        "ghcr.io/kairos-io/hadron"
-      ]
-    },
-    {
-      "description": "kairos-init image: Dockerfile ARG and Makefile default in one PR.",
-      "groupName": "kairos-init image",
-      "matchDatasources": [
-        "docker"
-      ],
-      "matchPackageNames": [
+        "ghcr.io/kairos-io/hadron",
         "quay.io/kairos/kairos-init"
+      ],
+      "prBodyNotes": [
+        "Hadron and kairos-init move together. Before merging, confirm the kairos-init tag in this PR is at least as new as the Kairos release that built the proposed Hadron, or the image build fails regenerating the initramfs."
       ]
     },
     {
