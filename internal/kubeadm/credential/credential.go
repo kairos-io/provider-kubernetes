@@ -240,14 +240,15 @@ func (m Minter) localAPIEndpoint() kubeadmconfig.APIEndpoint {
 }
 
 // apiEndpointFromHostPort turns "ip:port" into an APIEndpoint. ok is false
-// unless the host is a specified IP literal; the port is kept only if valid.
+// unless the host is an IP literal that can serve as an advertiseAddress; the
+// port is kept only if valid.
 func apiEndpointFromHostPort(hostPort string) (kubeadmconfig.APIEndpoint, bool) {
 	host, portStr, err := net.SplitHostPort(strings.TrimSpace(hostPort))
 	if err != nil {
 		return kubeadmconfig.APIEndpoint{}, false
 	}
 	ip := net.ParseIP(host)
-	if ip == nil || ip.IsUnspecified() {
+	if !usableAdvertiseIP(ip) {
 		return kubeadmconfig.APIEndpoint{}, false
 	}
 	ep := kubeadmconfig.APIEndpoint{AdvertiseAddress: ip.String()}
@@ -255,6 +256,23 @@ func apiEndpointFromHostPort(hostPort string) (kubeadmconfig.APIEndpoint, bool) 
 		ep.BindPort = int32(port)
 	}
 	return ep, true
+}
+
+// usableAdvertiseIP reports whether ip can stand in as this control plane's
+// advertiseAddress. Unspecified, loopback, link-local, multicast and broadcast
+// addresses cannot: they do not identify this node to the rest of the cluster,
+// which is why kubeadmconfig.buildJoinConfiguration warns about a loopback
+// advertiseAddress. admin.conf in particular may name a local proxy on
+// 127.0.0.1, and substituting that here would be worse than leaving the field
+// empty -- empty is what makes kubeadm fall back to its own default-route
+// detection, and the caller relies on that fallback.
+//
+// IsGlobalUnicast is exactly that union, so it is used rather than a hand-kept
+// list: it unmaps IPv4-in-IPv6 first (::ffff:127.0.0.1 is rejected) and keeps
+// RFC1918, ULA and CGNAT addresses usable, since a private address is still how
+// nodes reach each other. It reports false for a nil IP.
+func usableAdvertiseIP(ip net.IP) bool {
+	return ip.IsGlobalUnicast()
 }
 
 // MintJoinMaterial assembles fresh join material on a control-plane node (ADR-10

@@ -390,6 +390,30 @@ func TestUploadCerts_NoAdvertiseAddressForHostnameOrMissing(t *testing.T) {
 			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", "apiVersion: v1\nkind: Pod\nmetadata:\n  name: kube-apiserver\n")
 			writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "0.0.0.0:6443"))
 		},
+		// A loopback advertiseAddress does not identify this node to the rest of
+		// the cluster, so it must not be substituted for kubeadm's own detection.
+		// admin.conf naming a local proxy on 127.0.0.1 is the realistic case.
+		"loopback in the apiserver manifest": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "127.0.0.1:6443"))
+		},
+		"loopback in admin.conf": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "127.0.0.1:6443"))
+		},
+		"IPv6 loopback": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "'[::1]:6443'"))
+		},
+		"link-local": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "169.254.1.1:6443"))
+		},
+		"multicast": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "224.0.0.1:6443"))
+		},
+		"IPv4 broadcast": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "255.255.255.255:6443"))
+		},
+		"IPv4-mapped IPv6 loopback": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "'[::ffff:127.0.0.1]:6443'"))
+		},
 		"unparseable files": func(t *testing.T, root string) {
 			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", ":::not yaml")
 			writeK8sFile(t, root, "admin.conf", ":::not yaml")
@@ -407,5 +431,21 @@ func TestUploadCerts_NoAdvertiseAddressForHostnameOrMissing(t *testing.T) {
 				t.Fatalf("transient config must still carry the certificate key, got:\n%s", cfg)
 			}
 		})
+	}
+}
+
+// An unusable address in the preferred source must not end the search: the
+// admin.conf fallback still has to be consulted.
+func TestUploadCerts_LoopbackManifestFallsBackToAdminConf(t *testing.T) {
+	root := t.TempDir()
+	writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "127.0.0.1:6443"))
+	writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "10.10.0.7:6443"))
+
+	cfg := uploadCertsConfig(t, root)
+	if !strings.Contains(cfg, "advertiseAddress: 10.10.0.7") {
+		t.Fatalf("a loopback manifest annotation must fall through to admin.conf, got:\n%s", cfg)
+	}
+	if strings.Contains(cfg, "bindPort") {
+		t.Fatalf("the admin.conf port may be a load balancer's; bindPort must stay unset, got:\n%s", cfg)
 	}
 }
