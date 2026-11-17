@@ -78,10 +78,102 @@ func TestReconcilerKeepsFirstAttemptError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error after exhausting attempts")
 	}
-	for _, want := range []string{"wait-control-plane timed out", "preflight: manifests already exist"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not mention %q", err, want)
-		}
+	msg := err.Error()
+	first := strings.Index(msg, "wait-control-plane timed out")
+	last := strings.Index(msg, "preflight: manifests already exist")
+	if first < 0 || last < 0 {
+		t.Fatalf("error must mention both attempts, got %q", msg)
+	}
+	// Order matters, not just presence: the status Message is cut at the first
+	// newline and then to 256 characters, so a note appended after a multi-line
+	// kubeadm error is exactly the part the operator never sees.
+	if first > last {
+		t.Fatalf("the first-attempt note must precede the final error, got %q", msg)
+	}
+}
+
+// errLastAttempt is the sentinel sentinelExec wraps on every attempt after the
+// first, so a test can assert what errors.Is targets.
+var errLastAttempt = errors.New("last-attempt sentinel")
+
+type sentinelExec struct{ calls int }
+
+func (e *sentinelExec) Execute(_ context.Context, _ Action) error {
+	e.calls++
+	if e.calls == 1 {
+		return errors.New("first boom")
+	}
+	return fmt.Errorf("later boom: %w", errLastAttempt)
+}
+
+// Only the error the action actually ended on is %w-wrapped. The first-attempt
+// note is informational and must not hijack errors.Is/As.
+func TestReconcilerWrapsOnlyTheFinalError(t *testing.T) {
+	err := testReconciler(&sentinelExec{}).Run(context.Background(), []Action{ActionRunInit})
+	if err == nil {
+		t.Fatal("expected error after exhausting attempts")
+	}
+	if !errors.Is(err, errLastAttempt) {
+		t.Fatalf("errors.Is must target the error the action ended on, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "first boom") {
+		t.Fatalf("the first attempt must still be reported, got %v", err)
+	}
+}
+
+// noisyFirstExec fails the first attempt with a long multi-line error, the way
+// kubeadm does, and later attempts with a short one.
+type noisyFirstExec struct{ calls int }
+
+func (e *noisyFirstExec) Execute(_ context.Context, _ Action) error {
+	e.calls++
+	if e.calls == 1 {
+		return errors.New("line one is the real cause\n" +
+			strings.Repeat("padding ", 40) + "\nline three")
+	}
+	return errors.New("manifests already exist")
+}
+
+func TestReconcilerFirstAttemptNoteIsSingleLineAndCapped(t *testing.T) {
+	err := testReconciler(&noisyFirstExec{}).Run(context.Background(), []Action{ActionRunInit})
+	if err == nil {
+		t.Fatal("expected error after exhausting attempts")
+	}
+	msg := err.Error()
+	const marker = "(first attempt: "
+	open := strings.Index(msg, marker)
+	if open < 0 {
+		t.Fatalf("expected a first-attempt note, got %q", msg)
+	}
+	note := msg[open+len(marker):]
+	if end := strings.Index(note, "): "); end >= 0 {
+		note = note[:end]
+	}
+	if strings.ContainsAny(note, "\n\r") {
+		t.Fatalf("the note must be single-line or sanitize() cuts it, got %q", note)
+	}
+	if n := len([]rune(note)); n > firstAttemptNoteMax+3 { // +3 for the "..." marker
+		t.Fatalf("the note must be capped at %d runes, got %d: %q", firstAttemptNoteMax, n, note)
+	}
+	if !strings.Contains(note, "line one is the real cause") {
+		t.Fatalf("the note must keep the head of the first error, got %q", note)
+	}
+	// Capping the note is what leaves room for this.
+	if !strings.Contains(msg, "manifests already exist") {
+		t.Fatalf("the final error must survive the note, got %q", msg)
+	}
+}
+
+// An identical first error adds nothing but noise to a 256-character budget.
+func TestReconcilerOmitsRedundantFirstAttemptNote(t *testing.T) {
+	exec := newFakeExec()
+	exec.alwaysError = true // every attempt fails with the same message
+	err := testReconciler(exec).Run(context.Background(), []Action{ActionRunJoin})
+	if err == nil {
+		t.Fatal("expected error after exhausting attempts")
+	}
+	if strings.Contains(err.Error(), "first attempt") {
+		t.Fatalf("an identical first error must not be repeated, got %q", err)
 	}
 }
 
@@ -140,5 +232,19 @@ func TestReconcilerRequiresExecutor(t *testing.T) {
 	r := Reconciler{Budget: DefaultBudget(), Sleep: func(time.Duration) {}}
 	if err := r.Run(context.Background(), []Action{ActionRunInit}); err == nil {
 		t.Fatal("expected error when executor is nil")
+	}
+}
+
+// A pathological first-attempt error must not be split line by line just to
+// keep a 120-rune note: being OOM-killed here would cost the status write and
+// lose the very report the note exists to deliver.
+func TestOneLineBoundsItsInput(t *testing.T) {
+	huge := strings.Repeat("\n", 128<<10) + "marker"
+	if out := oneLine(huge, firstAttemptNoteMax); strings.Contains(out, "marker") {
+		t.Fatalf("input past the bound must not be consulted, got %q", out)
+	}
+	long := strings.Repeat("abcdefghij", 100<<10)
+	if n := len([]rune(oneLine(long, firstAttemptNoteMax))); n > firstAttemptNoteMax+3 {
+		t.Fatalf("the note must stay capped regardless of input size, got %d runes", n)
 	}
 }

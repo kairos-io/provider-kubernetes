@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -123,12 +124,57 @@ func (r Reconciler) runAction(ctx context.Context, a Action, sleep func(time.Dur
 		Attempts:        r.Budget.MaxAttempts,
 		BudgetExhausted: true,
 	}
-	if r.Budget.MaxAttempts > 1 {
-		// A retry often fails only on what the first attempt left behind, so
-		// keep the first error: it is the real cause.
-		return res, fmt.Errorf("failed after %d attempts: %w (first attempt: %v)", r.Budget.MaxAttempts, lastErr, firstErr)
+	// A retry often fails only on what the first attempt left behind, so the
+	// first attempt is usually the real cause and must reach the operator.
+	//
+	// It therefore goes BEFORE the wrapped error, flattened to one line and
+	// capped: the operator reads this through the status document, whose Message
+	// is cut at the first newline and then to 256 characters
+	// (internal/status.sanitize). Appended after a multi-line kubeadm error, the
+	// note is exactly the part that gets cut.
+	//
+	// Only lastErr is %w-wrapped, deliberately: errors.Is/As must target the
+	// error the action actually ended on. The note is rendered with %s so it
+	// contributes no wrapping of its own.
+	if r.Budget.MaxAttempts > 1 && firstErr != nil && lastErr != nil &&
+		firstErr.Error() != lastErr.Error() {
+		return res, fmt.Errorf("failed after %d attempts (first attempt: %s): %w",
+			r.Budget.MaxAttempts, oneLine(firstErr.Error(), firstAttemptNoteMax), lastErr)
 	}
 	return res, fmt.Errorf("failed after %d attempts: %w", r.Budget.MaxAttempts, lastErr)
+}
+
+// firstAttemptNoteMax caps the first-attempt note. The status Message is cut to
+// 256 characters, so an unbounded note would push the error the action actually
+// ended on out of the operator's view entirely.
+const firstAttemptNoteMax = 120
+
+// oneLine flattens s to a single line and caps it at max runes, so it survives
+// the status document's first-newline cut without crowding out the rest of the
+// message. Blank lines are dropped; the rest are joined with "; ".
+func oneLine(s string, max int) string {
+	// Only the first max runes can ever survive, so never materialize a
+	// pathological error: the kubeadm runner captures stderr into an unbounded
+	// buffer, and splitting tens of MiB into lines before capping allocates
+	// orders of magnitude more than it keeps. Being OOM-killed here would cost
+	// the status write in internal/provider.Run's defer -- losing exactly the
+	// failure report this note exists to deliver. Input past the bound is
+	// deliberately not consulted.
+	const maxInput = 64 << 10
+	if len(s) > maxInput {
+		s = strings.ToValidUTF8(s[:maxInput], "")
+	}
+	var kept []string
+	for _, line := range strings.Split(s, "\n") {
+		if line = strings.TrimSpace(strings.TrimSuffix(line, "\r")); line != "" {
+			kept = append(kept, line)
+		}
+	}
+	out := strings.Join(kept, "; ")
+	if rs := []rune(out); len(rs) > max {
+		out = strings.TrimSpace(string(rs[:max])) + "..."
+	}
+	return out
 }
 
 // backoff is a simple linear backoff between attempts.

@@ -1,10 +1,12 @@
 package status
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	sigsyaml "sigs.k8s.io/yaml"
 
@@ -915,5 +917,55 @@ func TestBuildStatusResetKeptMountsMessage(t *testing.T) {
 				t.Fatalf("message %q dropped the other failure", s.Message)
 			}
 		})
+	}
+}
+
+// multiLineRetryExec fails the first attempt with the real cause, then every
+// later attempt with the multi-line wreckage the first attempt left behind --
+// the way kubeadm reports "manifests already exist" after a timed-out
+// wait-control-plane.
+type multiLineRetryExec struct{ calls int }
+
+func (e *multiLineRetryExec) Execute(_ context.Context, _ reconcile.Action) error {
+	e.calls++
+	if e.calls == 1 {
+		return errors.New("wait-control-plane timed out after 4m0s")
+	}
+	return errors.New("preflight checks failed\n" +
+		"\t[ERROR Port-6443]: Port 6443 is in use\n" +
+		"\t[ERROR FileAvailable--etc-kubernetes-manifests-kube-apiserver.yaml]: already exists\n" +
+		"To see the stack trace of this error execute with --v=5 or higher")
+}
+
+// The operator reads reconcile failures through the status document, and
+// sanitize() cuts Message at the first newline and then to 256 characters. This
+// is the assertion that matters for kairos-io/kairos#6031: keeping the first
+// attempt's error inside err.Error() is not enough, it has to survive that cut.
+func TestBuildStatusMessageKeepsFirstAttemptError(t *testing.T) {
+	r := reconcile.Reconciler{
+		Budget: reconcile.Budget{PerAttempt: time.Second, MaxAttempts: 3, Total: time.Minute},
+		Exec:   &multiLineRetryExec{},
+		Sleep:  func(time.Duration) {}, // do not actually wait in tests
+	}
+	res, err := r.RunWithResult(context.Background(), []reconcile.Action{reconcile.ActionRunInit})
+	if err == nil {
+		t.Fatal("expected the reconcile to fail after exhausting the budget")
+	}
+
+	p := baseParams()
+	p.Role = actualstate.RoleInit
+	p.LastAction = reconcile.ActionRunInit
+	p.Err = err
+	p.Result = res
+	s := BuildStatus(p)
+
+	if s.Phase != PhaseFailed {
+		t.Fatalf("expected phase %q, got %q", PhaseFailed, s.Phase)
+	}
+	if strings.ContainsAny(s.Message, "\n\r") {
+		t.Fatalf("Message must be single-line, got %q", s.Message)
+	}
+	if !strings.Contains(s.Message, "wait-control-plane timed out") {
+		t.Fatalf("the status message must carry the first attempt's error, the real cause; got %q", s.Message)
 	}
 }
