@@ -37,7 +37,7 @@
 # right manifest. When bumping a tag, re-resolve the digest
 # (docker buildx imagetools inspect <image:tag>) and update both here and in the
 # Makefile defaults that override these ARGs.
-ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940f58d899e72f6776f4d64934cd6f402f4a4186ccc40d4d
+ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.6.5@sha256:a0b12fd9b7ff47d5c25e2564db1cb5810a278eb0cb54cb5306f6a2eb4338f94f
 # kairos-init that matches the version Kairos itself uses to build Hadron. Older
 # pins (e.g. v0.6.0) cannot regenerate Hadron's initramfs (dracut -f ... fails).
 ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
