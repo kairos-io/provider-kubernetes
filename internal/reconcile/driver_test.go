@@ -128,39 +128,103 @@ type noisyFirstExec struct{ calls int }
 func (e *noisyFirstExec) Execute(_ context.Context, _ Action) error {
 	e.calls++
 	if e.calls == 1 {
-		return errors.New("line one is the real cause\n" +
-			strings.Repeat("padding ", 40) + "\nline three")
+		return errors.New("line one is the real cause " + strings.Repeat("padding ", 40) +
+			"\nline two\nline three")
 	}
 	return errors.New("manifests already exist")
 }
 
-func TestReconcilerFirstAttemptNoteIsSingleLineAndCapped(t *testing.T) {
+func TestReconcilerSummaryLineIsBounded(t *testing.T) {
 	err := testReconciler(&noisyFirstExec{}).Run(context.Background(), []Action{ActionRunInit})
 	if err == nil {
 		t.Fatal("expected error after exhausting attempts")
 	}
-	msg := err.Error()
-	const marker = "(first attempt: "
-	open := strings.Index(msg, marker)
-	if open < 0 {
-		t.Fatalf("expected a first-attempt note, got %q", msg)
+	summary, _, _ := strings.Cut(err.Error(), "\n")
+	const actionWrap = `action "run-init": `
+	summary = strings.TrimPrefix(summary, actionWrap)
+	if len(summary) > summaryMax {
+		t.Fatalf("the summary line must fit in %d bytes, got %d: %q", summaryMax, len(summary), summary)
 	}
-	note := msg[open+len(marker):]
-	if end := strings.Index(note, "): "); end >= 0 {
-		note = note[:end]
+	if !strings.Contains(summary, "line one is the real cause") {
+		t.Fatalf("the summary must keep the head of the first error, got %q", summary)
 	}
-	if strings.ContainsAny(note, "\n\r") {
-		t.Fatalf("the note must be single-line or sanitize() cuts it, got %q", note)
+	// The short last cause hands its unused room to the long first one, and is
+	// itself never cut.
+	if !strings.Contains(summary, "last attempt: manifests already exist") {
+		t.Fatalf("the final error must survive in the summary, got %q", summary)
 	}
-	if n := len([]rune(note)); n > firstAttemptNoteMax+3 { // +3 for the "..." marker
-		t.Fatalf("the note must be capped at %d runes, got %d: %q", firstAttemptNoteMax, n, note)
+	// The full errors still reach the log, below the summary.
+	if !strings.Contains(err.Error(), "line three") {
+		t.Fatalf("the full first error must follow the summary, got %q", err)
 	}
-	if !strings.Contains(note, "line one is the real cause") {
-		t.Fatalf("the note must keep the head of the first error, got %q", note)
+}
+
+// kubeadmExec fails the way `kubeadm init` does through the kubeadm runner: the
+// command line ahead of stderr, progress output, and the error last. The first
+// attempt times out in wait-control-plane; the retries trip over what it left.
+type kubeadmExec struct{ calls int }
+
+const kubeadmRunnerPrefix = "kubeadm init: kubeadm [init --config /run/kubeadm-1234567.yaml --upload-certs] failed (exit 1): exit status 1: "
+
+const kubeadmWaitControlPlane = kubeadmRunnerPrefix +
+	"[init] Using Kubernetes version: v1.36.2\n" +
+	"[preflight] Running pre-flight checks\n" +
+	"[wait-control-plane] Waiting for the kubelet to boot up the control plane as static Pods from directory \"/etc/kubernetes/manifests\"\n" +
+	"[kubelet-check] Waiting for a healthy kubelet at http://127.0.0.1:10248/healthz. This can take up to 4m0s\n" +
+	"error: error execution phase wait-control-plane: failed while waiting for the kubelet to start: context deadline exceeded\n" +
+	"To see the stack trace of this error execute with --v=5 or higher\n"
+
+const kubeadmPreflight = kubeadmRunnerPrefix +
+	"[init] Using Kubernetes version: v1.36.2\n" +
+	"[preflight] Running pre-flight checks\n" +
+	"error: error execution phase preflight: [preflight] Some fatal errors occurred:\n" +
+	"\t[ERROR Port-6443]: Port 6443 is in use\n" +
+	"\t[ERROR FileAvailable--etc-kubernetes-manifests-kube-apiserver.yaml]: /etc/kubernetes/manifests/kube-apiserver.yaml already exists\n" +
+	"To see the stack trace of this error execute with --v=5 or higher\n"
+
+func (e *kubeadmExec) Execute(_ context.Context, _ Action) error {
+	e.calls++
+	if e.calls == 1 {
+		return errors.New(kubeadmWaitControlPlane)
 	}
-	// Capping the note is what leaves room for this.
-	if !strings.Contains(msg, "manifests already exist") {
-		t.Fatalf("the final error must survive the note, got %q", msg)
+	return errors.New(kubeadmPreflight)
+}
+
+func TestReconcilerSummaryDropsKubeadmCommandLine(t *testing.T) {
+	err := testReconciler(&kubeadmExec{}).Run(context.Background(), []Action{ActionRunInit})
+	if err == nil {
+		t.Fatal("expected error after exhausting attempts")
+	}
+	summary, _, _ := strings.Cut(err.Error(), "\n")
+	for _, want := range []string{
+		"first attempt: wait-control-plane: failed while waiting for the kubelet",
+		"last attempt: preflight:",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary must contain %q, got %q", want, summary)
+		}
+	}
+	if strings.Contains(summary, "--upload-certs") {
+		t.Fatalf("the command line must not spend the summary's room, got %q", summary)
+	}
+}
+
+func TestErrorCause(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"plain", "wait-control-plane timed out", "wait-control-plane timed out"},
+		{"multi-line without error line", "a\n\n b \r\nc", "a; b; c"},
+		{"runner prefix", kubeadmRunnerPrefix + "something broke", "something broke"},
+		{"kubeadm error line", kubeadmWaitControlPlane,
+			"wait-control-plane: failed while waiting for the kubelet to start: context deadline exceeded"},
+		{"preflight keeps the ERROR lines", kubeadmPreflight,
+			"preflight: [preflight] Some fatal errors occurred:; [ERROR Port-6443]: Port 6443 is in use; " +
+				"[ERROR FileAvailable--etc-kubernetes-manifests-kube-apiserver.yaml]: /etc/kubernetes/manifests/kube-apiserver.yaml already exists"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errorCause(tc.in); got != tc.want {
+				t.Fatalf("errorCause() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -235,16 +299,21 @@ func TestReconcilerRequiresExecutor(t *testing.T) {
 	}
 }
 
-// A pathological first-attempt error must not be split line by line just to
-// keep a 120-rune note: being OOM-killed here would cost the status write and
-// lose the very report the note exists to deliver.
-func TestOneLineBoundsItsInput(t *testing.T) {
-	huge := strings.Repeat("\n", 128<<10) + "marker"
-	if out := oneLine(huge, firstAttemptNoteMax); strings.Contains(out, "marker") {
-		t.Fatalf("input past the bound must not be consulted, got %q", out)
+// A pathological error must not be split line by line just to keep a few dozen
+// bytes: being OOM-killed here would cost the status write and lose the very
+// report the summary exists to deliver. kubeadm prints its error last, so the
+// tail is where the cause is looked for.
+func TestErrorCauseBoundsItsInput(t *testing.T) {
+	huge := "head\n" + strings.Repeat("progress\n", 64<<10) + "error execution phase marker: boom\n"
+	if got := errorCause(huge); got != "marker: boom" {
+		t.Fatalf("the error line at the tail must be found, got %q", got)
+	}
+	middle := "head\n" + strings.Repeat("x", 64<<10) + "\nerror: lost\n" + strings.Repeat("y", 64<<10)
+	if got := errorCause(middle); strings.Contains(got, "lost") {
+		t.Fatalf("input past both bounds must not be consulted, got %q", got[:64])
 	}
 	long := strings.Repeat("abcdefghij", 100<<10)
-	if n := len([]rune(oneLine(long, firstAttemptNoteMax))); n > firstAttemptNoteMax+3 {
-		t.Fatalf("the note must stay capped regardless of input size, got %d runes", n)
+	if n := len(summarizeAttempts(3, long, long+"!")); n > summaryMax {
+		t.Fatalf("the summary must stay capped regardless of input size, got %d bytes", n)
 	}
 }

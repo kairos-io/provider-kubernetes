@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ErrTerminal marks an executor error as a deliberate, non-retryable decision
@@ -127,54 +129,116 @@ func (r Reconciler) runAction(ctx context.Context, a Action, sleep func(time.Dur
 	// A retry often fails only on what the first attempt left behind, so the
 	// first attempt is usually the real cause and must reach the operator.
 	//
-	// It therefore goes BEFORE the wrapped error, flattened to one line and
-	// capped: the operator reads this through the status document, whose Message
-	// is cut at the first newline and then to 256 characters
-	// (internal/status.sanitize). Appended after a multi-line kubeadm error, the
-	// note is exactly the part that gets cut.
+	// The operator reads this through the status document, whose Message is cut
+	// at the first newline and then to 256 bytes (internal/status.sanitize). The
+	// first line is therefore a summary naming both causes, each reduced to the
+	// part of the error that says what went wrong; the full errors follow on the
+	// next lines for the log.
 	//
-	// Only lastErr is %w-wrapped, deliberately: errors.Is/As must target the
-	// error the action actually ended on. The note is rendered with %s so it
-	// contributes no wrapping of its own.
+	// Only lastErr is wrapped, deliberately: errors.Is/As must target the error
+	// the action actually ended on.
 	if r.Budget.MaxAttempts > 1 && firstErr != nil && lastErr != nil &&
 		firstErr.Error() != lastErr.Error() {
-		return res, fmt.Errorf("failed after %d attempts (first attempt: %s): %w",
-			r.Budget.MaxAttempts, oneLine(firstErr.Error(), firstAttemptNoteMax), lastErr)
+		return res, &exhaustedError{
+			msg: summarizeAttempts(r.Budget.MaxAttempts, firstErr.Error(), lastErr.Error()) +
+				"\nfirst attempt: " + firstErr.Error() +
+				"\nlast attempt: " + lastErr.Error(),
+			last: lastErr,
+		}
 	}
 	return res, fmt.Errorf("failed after %d attempts: %w", r.Budget.MaxAttempts, lastErr)
 }
 
-// firstAttemptNoteMax caps the first-attempt note. The status Message is cut to
-// 256 characters, so an unbounded note would push the error the action actually
-// ended on out of the operator's view entirely.
-const firstAttemptNoteMax = 120
+// exhaustedError reports an action that failed every attempt with differing
+// errors. It unwraps to the final attempt's error only.
+type exhaustedError struct {
+	msg  string
+	last error
+}
 
-// oneLine flattens s to a single line and caps it at max runes, so it survives
-// the status document's first-newline cut without crowding out the rest of the
-// message. Blank lines are dropped; the rest are joined with "; ".
-func oneLine(s string, max int) string {
-	// Only the first max runes can ever survive, so never materialize a
-	// pathological error: the kubeadm runner captures stderr into an unbounded
-	// buffer, and splitting tens of MiB into lines before capping allocates
-	// orders of magnitude more than it keeps. Being OOM-killed here would cost
-	// the status write in internal/provider.Run's defer -- losing exactly the
-	// failure report this note exists to deliver. Input past the bound is
-	// deliberately not consulted.
-	const maxInput = 64 << 10
-	if len(s) > maxInput {
-		s = strings.ToValidUTF8(s[:maxInput], "")
+func (e *exhaustedError) Error() string { return e.msg }
+func (e *exhaustedError) Unwrap() error { return e.last }
+
+// summaryMax bounds the one-line summary of an exhausted action. The status
+// Message keeps 256 bytes, and ahead of this summary it carries the action name
+// twice plus the "reconcile: " and "action %q: " wrapping; with the longest
+// action name that prefix is 72 bytes.
+const summaryMax = 176
+
+// summarizeAttempts renders the single-line summary of an action whose first
+// and last attempts failed differently. The two causes share the space left by
+// the fixed text; a short cause hands what it does not use to the other.
+func summarizeAttempts(attempts int, first, last string) string {
+	head := fmt.Sprintf("failed after %d attempts: first attempt: ", attempts)
+	const mid = "; last attempt: "
+	room := summaryMax - len(head) - len(mid)
+	f, l := errorCause(first), errorCause(last)
+	fMax, lMax := room/2, room-room/2
+	if len(f) < fMax {
+		lMax += fMax - len(f)
+	} else if len(l) < lMax {
+		fMax += lMax - len(l)
 	}
-	var kept []string
-	for _, line := range strings.Split(s, "\n") {
-		if line = strings.TrimSpace(strings.TrimSuffix(line, "\r")); line != "" {
-			kept = append(kept, line)
+	return head + capBytes(f, fMax) + mid + capBytes(l, lMax)
+}
+
+// runnerPrefix matches the command description internal/kubeadm's runner puts
+// ahead of a failed command's stderr: "<name> [<args>] failed (exit N): <exec
+// error>: ", plus anything wrapped around it.
+var runnerPrefix = regexp.MustCompile(`^.*? failed \(exit -?\d+\): (?:signal: )?[^:]*: `)
+
+// errorCause reduces an error message to the single line that says what went
+// wrong. The command line kubeadm ran and its progress output are dropped: the
+// cause is kubeadm's own "error ..." line and whatever follows it (for preflight,
+// the [ERROR ...] lines). Without such a line the whole message is kept,
+// flattened. Blank lines are dropped; the rest are joined with "; ".
+func errorCause(s string) string {
+	// Only a few dozen bytes survive, so never split a pathological message:
+	// the kubeadm runner captures stderr into an unbounded buffer, and being
+	// OOM-killed here would cost the status write in internal/provider.Run's
+	// defer. kubeadm prints its error last, so the tail is searched for it and
+	// the head is the fallback.
+	const maxInput = 64 << 10
+	head, tail := s, s
+	if len(s) > maxInput {
+		head = strings.ToValidUTF8(s[:maxInput], "")
+		tail = strings.ToValidUTF8(s[len(s)-maxInput:], "")
+	}
+	lines := causeLines(tail)
+	for i, line := range lines {
+		if strings.HasPrefix(strings.ToLower(line), "error") {
+			cause := strings.Join(lines[i:], "; ")
+			cause = strings.TrimPrefix(cause, "error: ")
+			return strings.TrimPrefix(cause, "error execution phase ")
 		}
 	}
-	out := strings.Join(kept, "; ")
-	if rs := []rune(out); len(rs) > max {
-		out = strings.TrimSpace(string(rs[:max])) + "..."
+	return strings.Join(causeLines(head), "; ")
+}
+
+// causeLines splits s into trimmed, non-empty lines with the runner's command
+// prefix and kubeadm's stack-trace hint removed.
+func causeLines(s string) []string {
+	var kept []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(runnerPrefix.ReplaceAllString(strings.TrimSuffix(line, "\r"), ""))
+		if line == "" || strings.HasPrefix(line, "To see the stack trace") {
+			continue
+		}
+		kept = append(kept, line)
 	}
-	return out
+	return kept
+}
+
+// capBytes cuts s to at most max bytes on a rune boundary, marking the cut.
+func capBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max - len("...")
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(s[:cut]) + "..."
 }
 
 // backoff is a simple linear backoff between attempts.
