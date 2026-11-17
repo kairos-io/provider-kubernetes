@@ -23,7 +23,7 @@ CONTAINERD_COMMIT  ?= 1294c24a7da8e5a793ed378161673abe94118892
 # renovate: datasource=github-releases depName=opencontainers/runc
 RUNC_VERSION       ?= v1.5.2
 # renovate: datasource=github-releases depName=containernetworking/plugins
-CNI_PLUGINS_VERSION ?= v1.9.1
+CNI_PLUGINS_VERSION ?= v1.10.0
 # Kairos OS base the image is built FROM. Defaults to the pure upstream Hadron
 # (musl) OS, which kairos-init transforms into a Kairos system in the final stage
 # (mirroring the canonical Kairos image build). Override to test another base.
