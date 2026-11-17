@@ -48,7 +48,7 @@ jobs:
         run: make build
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           # Pin to the version validated locally against the v2 config. Its
           # bundled golang.org/x/tools must read the export data of the go.mod
