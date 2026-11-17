@@ -167,12 +167,21 @@ const summaryMax = 176
 
 // summarizeAttempts renders the single-line summary of an action whose first
 // and last attempts failed differently. The two causes share the space left by
-// the fixed text; a short cause hands what it does not use to the other.
+// the fixed text; a short cause hands what it does not use to the other. When
+// both do not fit, kubeadm's preflight check failures are shortened to their
+// names before anything is cut.
 func summarizeAttempts(attempts int, first, last string) string {
 	head := fmt.Sprintf("failed after %d attempts: first attempt: ", attempts)
 	const mid = "; last attempt: "
 	room := summaryMax - len(head) - len(mid)
-	f, l := errorCause(first), errorCause(last)
+	fullF, fullL := errorCause(first), errorCause(last)
+	var f, l string
+	for level := 0; level <= maxCompact; level++ {
+		f, l = compactCause(fullF, level), compactCause(fullL, level)
+		if len(f)+len(l) <= room {
+			break
+		}
+	}
 	fMax, lMax := room/2, room-room/2
 	if len(f) < fMax {
 		lMax += fMax - len(f)
@@ -187,11 +196,21 @@ func summarizeAttempts(attempts int, first, last string) string {
 // error>: ", plus anything wrapped around it.
 var runnerPrefix = regexp.MustCompile(`^.*? failed \(exit -?\d+\): (?:signal: )?[^:]*: `)
 
+// underlyingCause matches the lines kubeadm prints ahead of its "error ..." line
+// that say why a wait gave up.
+var underlyingCause = regexp.MustCompile(`(?i)timed out|deadline exceeded|not healthy`)
+
+// genericFailure matches kubeadm "error ..." lines that only say a phase failed,
+// capturing the phase when there is one.
+var genericFailure = regexp.MustCompile(`^(?:([\w-]+): )?(?:(?:couldn't|could not) initialize a Kubernetes cluster|preflight checks failed)$`)
+
 // errorCause reduces an error message to the single line that says what went
-// wrong. The command line kubeadm ran and its progress output are dropped: the
-// cause is kubeadm's own "error ..." line and whatever follows it (for preflight,
-// the [ERROR ...] lines). Without such a line the whole message is kept,
-// flattened. Blank lines are dropped; the rest are joined with "; ".
+// wrong. The command line kubeadm ran, its progress output and its
+// troubleshooting advice are dropped. What stays is kubeadm's own "error ..."
+// line, the [ERROR ...] lines and the line naming why a wait gave up, wherever
+// kubeadm printed them; an "error ..." line that only says the phase failed is
+// cut to the phase name when a more precise cause is there. Without an "error"
+// line the whole message is kept, flattened. The parts are joined with "; ".
 func errorCause(s string) string {
 	// Only a few dozen bytes survive, so never split a pathological message:
 	// the kubeadm runner captures stderr into an unbounded buffer, and being
@@ -205,28 +224,154 @@ func errorCause(s string) string {
 		tail = strings.ToValidUTF8(s[len(s)-maxInput:], "")
 	}
 	lines := causeLines(tail)
+	at := -1
 	for i, line := range lines {
 		if strings.HasPrefix(strings.ToLower(line), "error") {
-			cause := strings.Join(lines[i:], "; ")
-			cause = strings.TrimPrefix(cause, "error: ")
-			return strings.TrimPrefix(cause, "error execution phase ")
+			at = i
+			break
 		}
 	}
-	return strings.Join(causeLines(head), "; ")
+	if at < 0 {
+		return strings.Join(causeLines(head), "; ")
+	}
+	msg := strings.TrimPrefix(lines[at], "error: ")
+	msg = strings.TrimPrefix(msg, "error execution phase ")
+
+	var causes, progress []string
+	for _, line := range lines[:at] {
+		switch {
+		case strings.HasPrefix(line, "[ERROR "):
+			causes = append(causes, line)
+		case underlyingCause.MatchString(line):
+			// "[kubelet-check] ..." progress lines repeat themselves; they only
+			// stand in when nothing better is there.
+			if strings.HasPrefix(line, "[") {
+				progress = append(progress, line)
+			} else {
+				causes = append(causes, line)
+			}
+		}
+	}
+	causes = append(causes, lines[at+1:]...)
+	if len(causes) == 0 && len(progress) > 0 {
+		causes = progress[len(progress)-1:]
+	}
+	causes = dedupe(causes)
+
+	if m := genericFailure.FindStringSubmatch(msg); m != nil && len(causes) > 0 {
+		if m[1] == "" {
+			return strings.Join(causes, "; ")
+		}
+		return m[1] + ": " + strings.Join(causes, "; ")
+	}
+	return strings.Join(append([]string{msg}, causes...), "; ")
+}
+
+// boilerplate lists the starts of the advice lines kubeadm prints around an
+// error. They never name the cause.
+var boilerplate = []string{
+	"- ",
+	"If you are on a systemd-powered system",
+	"Additionally, a control plane component may have crashed",
+	"To troubleshoot, list all containers",
+	"Here is one example",
+	"Once you have found the failing container",
+	"To see the stack trace",
+	"[preflight] If you know what you are doing",
+}
+
+// boilerplateHeaders are advice headers that may carry the cause on the same
+// line, as in "Unfortunately, an error has occurred: timed out ...". Only what
+// follows the first colon is kept.
+var boilerplateHeaders = []string{
+	"Unfortunately, an error has occurred",
+	"This error is likely caused by",
 }
 
 // causeLines splits s into trimmed, non-empty lines with the runner's command
-// prefix and kubeadm's stack-trace hint removed.
+// prefix and kubeadm's advice removed.
 func causeLines(s string) []string {
 	var kept []string
+next:
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(runnerPrefix.ReplaceAllString(strings.TrimSuffix(line, "\r"), ""))
-		if line == "" || strings.HasPrefix(line, "To see the stack trace") {
-			continue
+		for _, p := range boilerplate {
+			if strings.HasPrefix(line, p) {
+				continue next
+			}
 		}
-		kept = append(kept, line)
+		for _, p := range boilerplateHeaders {
+			if strings.HasPrefix(line, p) {
+				_, line, _ = strings.Cut(line, ":")
+				line = strings.TrimSpace(line)
+				break
+			}
+		}
+		if line != "" {
+			kept = append(kept, line)
+		}
 	}
 	return kept
+}
+
+// dedupe drops repeated lines, keeping the first of each.
+func dedupe(lines []string) []string {
+	seen := make(map[string]bool, len(lines))
+	var kept []string
+	for _, line := range lines {
+		if !seen[line] {
+			seen[line] = true
+			kept = append(kept, line)
+		}
+	}
+	return kept
+}
+
+// maxCompact is the strongest level compactCause knows.
+const maxCompact = 2
+
+var (
+	preflightError = regexp.MustCompile(`\[ERROR ([^\]]+)\]:[^;]*`)
+	preflightName  = regexp.MustCompile(`\[ERROR ([^\]]+)\]`)
+)
+
+// compactCause shortens kubeadm's preflight failures in a cause from
+// errorCause. Level 1 keeps only each check's "[ERROR Name]"; level 2 folds a
+// run of them into one "[ERROR Name xN, Other]" token, counting checks of the
+// same kind ("FileAvailable--<path>") together. Other text is left alone.
+func compactCause(cause string, level int) string {
+	if level < 1 {
+		return cause
+	}
+	cause = strings.ReplaceAll(cause, "[preflight] Some fatal errors occurred:; ", "")
+	cause = preflightError.ReplaceAllString(cause, "[ERROR $1]")
+	if level < 2 {
+		return cause
+	}
+	locs := preflightName.FindAllStringSubmatchIndex(cause, -1)
+	if len(locs) < 2 {
+		return cause
+	}
+	for i := 1; i < len(locs); i++ {
+		if cause[locs[i-1][1]:locs[i][0]] != "; " {
+			return cause
+		}
+	}
+	var kinds []string
+	count := map[string]int{}
+	for _, loc := range locs {
+		kind, _, _ := strings.Cut(cause[loc[2]:loc[3]], "--")
+		if count[kind] == 0 {
+			kinds = append(kinds, kind)
+		}
+		count[kind]++
+	}
+	for i, kind := range kinds {
+		if count[kind] > 1 {
+			kinds[i] = fmt.Sprintf("%s x%d", kind, count[kind])
+		}
+	}
+	return cause[:locs[0][0]] + "[ERROR " + strings.Join(kinds, ", ") + "]" + cause[locs[len(locs)-1][1]:]
 }
 
 // capBytes cuts s to at most max bytes on a rune boundary, marking the cut.

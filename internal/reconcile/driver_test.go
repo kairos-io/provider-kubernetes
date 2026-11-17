@@ -209,6 +209,145 @@ func TestReconcilerSummaryDropsKubeadmCommandLine(t *testing.T) {
 	}
 }
 
+// Older kubeadm prints the reason a wait gave up ahead of its error line, among
+// troubleshooting advice, and the error line itself only names the phase.
+const kubeadmOldWaitControlPlane = kubeadmRunnerPrefix +
+	"[wait-control-plane] Waiting for the kubelet to boot up the control plane as static Pods from directory \"/etc/kubernetes/manifests\". This can take up to 4m0s\n" +
+	"[kubelet-check] Initial timeout of 40s passed.\n" +
+	"[kubelet-check] It seems like the kubelet isn't running or healthy.\n" +
+	"[kubelet-check] The HTTP call equal to 'curl -sSL http://localhost:10248/healthz' failed with error: Get \"http://localhost:10248/healthz\": dial tcp 127.0.0.1:10248: connect: connection refused.\n" +
+	"\n" +
+	"Unfortunately, an error has occurred:\n" +
+	"\ttimed out waiting for the condition\n" +
+	"\n" +
+	"This error is likely caused by:\n" +
+	"\t- The kubelet is not running\n" +
+	"\t- The kubelet is unhealthy due to a misconfiguration of the node in some way (required cgroups disabled)\n" +
+	"\n" +
+	"If you are on a systemd-powered system, you can try to troubleshoot the error with the following commands:\n" +
+	"\t- 'systemctl status kubelet'\n" +
+	"\t- 'journalctl -xeu kubelet'\n" +
+	"\n" +
+	"Additionally, a control plane component may have crashed or exited when started by the container runtime.\n" +
+	"To troubleshoot, list all containers using your preferred container runtimes CLI.\n" +
+	"Here is one example how you may list all running Kubernetes containers by using crictl:\n" +
+	"\t- 'crictl --runtime-endpoint unix:///var/run/containerd/containerd.sock ps -a | grep kube | grep -v pause'\n" +
+	"\tOnce you have found the failing container, you can inspect its logs with:\n" +
+	"\t- 'crictl --runtime-endpoint unix:///var/run/containerd/containerd.sock logs CONTAINERID'\n" +
+	"error execution phase wait-control-plane: couldn't initialize a Kubernetes cluster\n" +
+	"To see the stack trace of this error execute with --v=5 or higher\n"
+
+// kubeadm 1.37 prints the failed preflight checks ahead of its error line, which
+// only says that preflight failed. Captured from a retry after a failed init.
+const kubeadm137Preflight = kubeadmRunnerPrefix +
+	"\t[WARNING SystemVerification]: mkdir /sys/fs/cgroup/freezer-test2556986012: read-only file system\n" +
+	"[preflight] Some fatal errors occurred:\n" +
+	"\t[ERROR FileAvailable--etc-kubernetes-manifests-kube-apiserver.yaml]: /etc/kubernetes/manifests/kube-apiserver.yaml already exists\n" +
+	"\t[ERROR FileAvailable--etc-kubernetes-manifests-kube-controller-manager.yaml]: /etc/kubernetes/manifests/kube-controller-manager.yaml already exists\n" +
+	"\t[ERROR FileAvailable--etc-kubernetes-manifests-kube-scheduler.yaml]: /etc/kubernetes/manifests/kube-scheduler.yaml already exists\n" +
+	"\t[ERROR FileAvailable--etc-kubernetes-manifests-etcd.yaml]: /etc/kubernetes/manifests/etcd.yaml already exists\n" +
+	"\t[ERROR CRI]: could not connect to the container runtime: failed to create new CRI runtime service\n" +
+	"\t[ERROR ContainerRuntimeVersion]: could not connect to the container runtime: failed to create new CRI runtime service\n" +
+	"\t[ERROR SystemVerification]: missing required cgroups: freezer\n" +
+	"[preflight] If you know what you are doing, you can make a check non-fatal with `--ignore-preflight-errors=...`\n" +
+	"error: error execution phase preflight: preflight checks failed\n" +
+	"To see the stack trace of this error execute with --v=5 or higher\n"
+
+// The advice header can carry the cause on its own line, after the error line.
+const kubeadmCauseAfterError = kubeadmRunnerPrefix +
+	"[wait-control-plane] Waiting for the kubelet to boot up the control plane as static Pods from directory \"/etc/kubernetes/manifests\"\n" +
+	"[kubelet-check] The kubelet is not healthy after 4m0.000469132s\n" +
+	"error: could not initialize a Kubernetes cluster\n" +
+	"To see the stack trace of this error execute with --v=5 or higher\n" +
+	"Unfortunately, an error has occurred, likely caused by: context deadline exceeded\n"
+
+// With only progress lines to go by, the last one saying why the wait gave up
+// stands in for the cause.
+const kubeadmOnlyProgress = kubeadmRunnerPrefix +
+	"[api-check] Waiting for a healthy API server. This can take up to 4m0s\n" +
+	"[api-check] The API server is not healthy after 4m0.000469132s\n" +
+	"\n" +
+	"Unfortunately, an error has occurred, likely caused by:\n" +
+	"\t- The kubelet is not running\n" +
+	"error: error execution phase wait-control-plane: could not initialize a Kubernetes cluster\n" +
+	"To see the stack trace of this error execute with --v=5 or higher\n"
+
+func TestErrorCauseFindsCausesAroundTheErrorLine(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"old wait-control-plane, cause before the error line", kubeadmOldWaitControlPlane,
+			"wait-control-plane: timed out waiting for the condition"},
+		{"1.37 preflight, ERROR lines before the error line", kubeadm137Preflight,
+			"preflight: " +
+				"[ERROR FileAvailable--etc-kubernetes-manifests-kube-apiserver.yaml]: /etc/kubernetes/manifests/kube-apiserver.yaml already exists; " +
+				"[ERROR FileAvailable--etc-kubernetes-manifests-kube-controller-manager.yaml]: /etc/kubernetes/manifests/kube-controller-manager.yaml already exists; " +
+				"[ERROR FileAvailable--etc-kubernetes-manifests-kube-scheduler.yaml]: /etc/kubernetes/manifests/kube-scheduler.yaml already exists; " +
+				"[ERROR FileAvailable--etc-kubernetes-manifests-etcd.yaml]: /etc/kubernetes/manifests/etcd.yaml already exists; " +
+				"[ERROR CRI]: could not connect to the container runtime: failed to create new CRI runtime service; " +
+				"[ERROR ContainerRuntimeVersion]: could not connect to the container runtime: failed to create new CRI runtime service; " +
+				"[ERROR SystemVerification]: missing required cgroups: freezer"},
+		{"cause on the advice header after the error line", kubeadmCauseAfterError,
+			"context deadline exceeded"},
+		{"only a progress line names the cause", kubeadmOnlyProgress,
+			"wait-control-plane: [api-check] The API server is not healthy after 4m0.000469132s"},
+		{"generic error line with nothing better is kept", kubeadmRunnerPrefix +
+			"error execution phase wait-control-plane: couldn't initialize a Kubernetes cluster\n",
+			"wait-control-plane: couldn't initialize a Kubernetes cluster"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errorCause(tc.in); got != tc.want {
+				t.Fatalf("errorCause() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSummarizeAttemptsKeepsBothKubeadmCauses(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, last string
+		want              []string
+	}{
+		{"old wait-control-plane then 1.37 preflight", kubeadmOldWaitControlPlane, kubeadm137Preflight, []string{
+			"first attempt: wait-control-plane: timed out waiting for the condition; ",
+			"last attempt: preflight: [ERROR FileAvailable x4, CRI, ContainerRuntimeVer",
+		}},
+		{"cause after the error line then 1.37 preflight", kubeadmCauseAfterError, kubeadm137Preflight, []string{
+			"first attempt: context deadline exceeded; ",
+			"last attempt: preflight: [ERROR FileAvailable x4, CRI, ContainerRuntimeVersion, SystemVerification]",
+		}},
+		{"short checks keep their full names", kubeadmOldWaitControlPlane, kubeadmRunnerPrefix +
+			"\t[ERROR Port-6443]: Port 6443 is in use\n" +
+			"\t[ERROR Swap]: running with swap on is not supported\n" +
+			"error: error execution phase preflight: preflight checks failed\n", []string{
+			"first attempt: wait-control-plane: timed out waiting for the condition; ",
+			"last attempt: preflight: [ERROR Port-6443]; [ERROR Swap]",
+		}},
+		{"long check names are folded by kind", kubeadmOldWaitControlPlane, kubeadmRunnerPrefix +
+			"\t[ERROR FileAvailable--etc-kubernetes-manifests-kube-apiserver.yaml]: /etc/kubernetes/manifests/kube-apiserver.yaml already exists\n" +
+			"\t[ERROR Port-6443]: Port 6443 is in use\n" +
+			"error: error execution phase preflight: preflight checks failed\n", []string{
+			"first attempt: wait-control-plane: timed out waiting for the condition; ",
+			"last attempt: preflight: [ERROR FileAvailable, Port-6443]",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summarizeAttempts(2, tc.first, tc.last)
+			if len(got) > summaryMax {
+				t.Fatalf("the summary must fit in %d bytes, got %d: %q", summaryMax, len(got), got)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("summary must contain %q, got %q", want, got)
+				}
+			}
+			for _, noise := range []string{"Unfortunately", "initialize a Kubernetes cluster", "preflight checks failed", "--upload-certs"} {
+				if strings.Contains(got, noise) {
+					t.Fatalf("summary must not spend room on %q, got %q", noise, got)
+				}
+			}
+		})
+	}
+}
+
 func TestErrorCause(t *testing.T) {
 	for _, tc := range []struct{ name, in, want string }{
 		{"plain", "wait-control-plane timed out", "wait-control-plane timed out"},
