@@ -476,3 +476,32 @@ jobs:
             "kairos-kubeadm-e2e-node:${{ steps.ver.outputs.k8s }}" \
             "kairos-kubeadm:${{ steps.ver.outputs.k8s }}" || true
           docker volume prune -f || true
+
+  # Aggregate gate: ONE check whose name never changes, so it can be the required
+  # status check on main (OQ-18-1). The image and e2e jobs are a matrix derived
+  # from kubeadm.SupportedMinors, so their check names (e.g. "e2e (k8s 1.37)")
+  # change every time the supported window rolls -- and a required check that
+  # stops reporting blocks every pull request. Requiring this job instead keeps
+  # the gate meaningful across a window roll. It passes only when every CI job
+  # above succeeded; a skipped or cancelled job is not a pass.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [gates, discover, image, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Assert every CI job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "job results: ${RESULTS}"
+          for r in ${RESULTS}; do
+            if [ "$r" != "success" ]; then
+              echo "a CI job did not succeed: ${r}" >&2
+              exit 1
+            fi
+          done
+          echo "all CI jobs succeeded"
