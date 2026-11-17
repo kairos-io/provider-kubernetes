@@ -29,10 +29,11 @@ CNI_PLUGINS_VERSION ?= v1.10.0
 # (mirroring the canonical Kairos image build). Override to test another base.
 # DIGEST-pinned (kairos#4203); must match the Dockerfile ARG defaults. Re-resolve
 # with `docker buildx imagetools inspect <image:tag>` when bumping the tag.
-KAIROS_BASE_IMAGE  ?= ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940f58d899e72f6776f4d64934cd6f402f4a4186ccc40d4d
-# kairos-init image used in the final stage. Defaults to the Dockerfile's pin
-# (the version Kairos itself uses to build Hadron); override for testing.
-KAIROS_INIT_IMAGE  ?= quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
+KAIROS_BASE_IMAGE  ?= ghcr.io/kairos-io/hadron:v0.6.3@sha256:a5a4722531411b7dec68f5e2dae2ecd777616f6ca459f6e712ff492dfbf3410e
+# kairos-init image used in the final stage. Defaults to the Dockerfile's pin:
+# the kairos-init Kairos itself pairs with this Hadron (now versioned with the
+# kairos monorepo, v4.x); override for testing.
+KAIROS_INIT_IMAGE  ?= quay.io/kairos/kairos-init:v4.5.2@sha256:7de7999e8b8a3d80820968143609ea473da29ede14ff41a3579ea80f5418be3f
 IMAGE              ?= kairos-kubeadm:$(VERSION)
 
 # e2e (ADR-13). The node image FROM-derives the kairos-kubeadm base so it reuses

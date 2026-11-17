@@ -37,10 +37,19 @@
 # right manifest. When bumping a tag, re-resolve the digest
 # (docker buildx imagetools inspect <image:tag>) and update both here and in the
 # Makefile defaults that override these ARGs.
-ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940f58d899e72f6776f4d64934cd6f402f4a4186ccc40d4d
-# kairos-init that matches the version Kairos itself uses to build Hadron. Older
-# pins (e.g. v0.6.0) cannot regenerate Hadron's initramfs (dracut -f ... fails).
-ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
+ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.6.3@sha256:a5a4722531411b7dec68f5e2dae2ecd777616f6ca459f6e712ff492dfbf3410e
+# kairos-init must be the one Kairos itself pairs with this Hadron: a kairos-init
+# older than its base cannot regenerate the initramfs (dracut -f ... fails).
+# This pair is NOT "newest of each" -- it is the pair upstream actually ships.
+# Hadron auto-releases twice a week and runs ahead of Kairos, so resolve the base
+# from the Kairos release instead of taking the newest Hadron tag:
+#   quay.io/kairos/hadron:<hadron>-core-amd64-generic-<kairos-tag>
+# (see kairos-io/kairos .github/public-cloud/resolve-hadron-container-image.sh).
+# Kairos v4.5.2, v4.5.0 and v4.4.0 all resolve to Hadron v0.6.3.
+# NOTE kairos-init's numbering: it moved into the kairos monorepo and now shares
+# the Kairos release version (v4.x). kairos-io/kairos-init is ARCHIVED, its 0.x
+# line ending at v0.17.3 -- do not follow that line.
+ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v4.5.2@sha256:7de7999e8b8a3d80820968143609ea473da29ede14ff41a3579ea80f5418be3f
 # Provider toolchain: its tag MUST match the go.mod `go` directive (enforced by
 # `make verify-pins`), so the image build never drifts from CI.
 ARG GO_BUILDER_IMAGE=golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
