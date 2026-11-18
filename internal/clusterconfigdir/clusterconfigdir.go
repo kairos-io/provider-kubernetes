@@ -2,7 +2,7 @@
 // review 2026-09-18, PROJECT_CONTEXT.md "Security review (2026-09-18,
 // security-architect): D-3 / F-UKIBOOT fix", conditions S-D3-1..S-D3-10).
 //
-// THE DEFECT: kairos-sdk@v0.5.0's clusterplugin.ClusterPlugin.onBoot opens
+// THE DEFECT: kairos-sdk@v0.25.3's clusterplugin.ClusterPlugin.onBoot opens
 // /usr/local/cloud-config/cluster.kairos.yaml with
 // os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600 (clusterplugin/plugin.go:59) and
 // never creates the parent directory. On a UKI node the directory does not
@@ -89,18 +89,20 @@ import (
 	"github.com/kairos-io/provider-kubernetes/version"
 )
 
-// DefaultDir mirrors the directory component of kairos-sdk@v0.5.0
+// DefaultDir mirrors the directory component of kairos-sdk@v0.25.3
 // clusterplugin/plugin.go:14's clusterProviderCloudConfigFile constant
 // ("/usr/local/cloud-config/cluster.kairos.yaml"). S-D3-10's pin-guard test
-// (main_test.go) fails the build if the kairos-sdk dependency moves off
-// v0.5.0, so this hardcoded value is re-verified by hand at any new pin.
+// (main_test.go) fails the build if the kairos-sdk dependency moves off the
+// verified tag, so this hardcoded value is re-verified by hand at any new pin.
+// The constant is unchanged from v0.5.0 through v0.25.3 -- the whole
+// clusterplugin package is byte-identical across those tags.
 const DefaultDir = "/usr/local/cloud-config"
 
-// DefaultFileName is the token-file basename kairos-sdk@v0.5.0 writes at
+// DefaultFileName is the token-file basename kairos-sdk@v0.25.3 writes at
 // DefaultDir when clusterplugin.Cluster.ClusterConfigPath is unset.
 const DefaultFileName = "cluster.kairos.yaml"
 
-// DefaultPath is the full default path, byte-identical to kairos-sdk@v0.5.0's
+// DefaultPath is the full default path, byte-identical to kairos-sdk@v0.25.3's
 // unexported clusterProviderCloudConfigFile constant.
 const DefaultPath = DefaultDir + "/" + DefaultFileName
 
@@ -233,7 +235,7 @@ var failurePhaseReasons = map[Reason]bool{
 // Ensure is the S-D3-1 wrapper's entrypoint. It is invoked from main.go's
 // ClusterProvider wrapper, which runs inside the SDK's onBoot path (called
 // after config.Cluster != nil and strictly before the SDK's OpenFile at
-// kairos-sdk@v0.5.0 clusterplugin/plugin.go:59) and nowhere else -- an
+// kairos-sdk@v0.25.3 clusterplugin/plugin.go:59) and nowhere else -- an
 // init.provider.info or cluster.reset invocation never reaches this
 // function, so it never runs during an image build probe.
 //
@@ -258,7 +260,7 @@ func Ensure(cluster clusterplugin.Cluster) Report {
 }
 
 // targetFileName implements S-D3-7. cluster.ClusterConfigPath mirrors
-// kairos-sdk@v0.5.0 clusterplugin/config.go:70-71 / plugin.go:52-56's
+// kairos-sdk@v0.25.3 clusterplugin/config.go:70-71 / plugin.go:52-56's
 // override: when set, onBoot writes to that exact path instead of
 // DefaultPath. That value arrives on the merged cloud-config kairos-agent
 // scans from {"/oem","/usr/local/cloud-config"} -- a persistent,

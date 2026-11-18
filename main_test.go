@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"reflect"
 	"runtime/debug"
 	"strings"
 	"testing"
 
+	"github.com/kairos-io/kairos-sdk/bus"
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 	"github.com/mudler/go-pluggable"
 	yip "github.com/mudler/yip/pkg/schema"
@@ -376,14 +378,23 @@ func TestWrapProviderNeverReachesEnsureForResetOrProviderInfo(t *testing.T) {
 	}
 }
 
-// TestKairosSDKPinIsV0_5_0 is S-D3-10's pin guard: the wrapper's whole
+// TestKairosSDKPinIsVerified is S-D3-10's pin guard: the wrapper's whole
 // premise (the exact ENOENT-producing OpenFile call and the hardcoded
-// clusterProviderCloudConfigFile path) is re-verified by hand only at
-// kairos-sdk@v0.5.0. If the dependency is bumped, this test fails loudly so
-// the bump is never silent, forcing a re-read of clusterplugin/plugin.go at
-// the new tag before clusterconfigdir.DefaultPath is trusted again.
-func TestKairosSDKPinIsV0_5_0(t *testing.T) {
-	const wantVersion = "v0.5.0"
+// clusterProviderCloudConfigFile path) is re-verified by hand only at the tag
+// named here. If the dependency is bumped, this test fails loudly so the bump
+// is never silent, forcing a re-read of clusterplugin/plugin.go at the new tag
+// before clusterconfigdir.DefaultPath is trusted again.
+//
+// Re-verified at v0.25.3: the whole clusterplugin package is BYTE-IDENTICAL to
+// v0.5.0 (plugin.go, config.go and init.go all match by sha256), so the
+// constant is still "/usr/local/cloud-config/cluster.kairos.yaml", the open is
+// still O_CREATE|O_WRONLY|O_TRUNC with 0600, and there is still no MkdirAll
+// anywhere in the package. The OpenFile call reads filesystem.OpenFile rather
+// than os.OpenFile, but init.go sets filesystem = vfs.OSFS, whose OpenFile is a
+// direct passthrough to os.OpenFile -- so the semantics clusterconfigdir relies
+// on are unchanged.
+func TestKairosSDKPinIsVerified(t *testing.T) {
+	const wantVersion = "v0.25.3"
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
 		t.Fatal("runtime/debug.ReadBuildInfo() returned ok=false; cannot verify the kairos-sdk pin")
@@ -400,4 +411,62 @@ func TestKairosSDKPinIsV0_5_0(t *testing.T) {
 		}
 	}
 	t.Fatal("github.com/kairos-io/kairos-sdk not found in build info deps")
+}
+
+// The two declarations below were hand-copied into main.go because kairos-sdk
+// v0.5.0 did not expose them, with comments requiring that they keep matching
+// upstream exactly. v0.25.3 DOES expose both, so that requirement is now
+// machine-checkable instead of a promise in a comment. These tests are the
+// reason the bump is worth taking: they close the drift window rather than
+// widening it.
+
+// TestEventInitProviderInfoMatchesSDK pins our local event constant to the SDK's.
+// A silent divergence here would make kairos-init's probe miss our handler
+// entirely, and the provider would simply never report its version.
+func TestEventInitProviderInfoMatchesSDK(t *testing.T) {
+	if got, want := string(eventInitProviderInfo), string(bus.InitProviderInfo); got != want {
+		t.Fatalf("eventInitProviderInfo = %q, but kairos-sdk bus.InitProviderInfo = %q;\n"+
+			"kairos-init emits the SDK value, so ours must match it exactly", got, want)
+	}
+}
+
+// TestProviderInfoPayloadMatchesSDK pins the wire shape of our local mirror to
+// bus.ProviderInstalledVersionPayload. kairos-init unmarshals our resp.Data into
+// the upstream struct, so a renamed field or a changed json tag would surface as
+// a silently empty provider or version on the built image rather than an error.
+func TestProviderInfoPayloadMatchesSDK(t *testing.T) {
+	ours := reflect.TypeOf(providerInfoPayload{})
+	theirs := reflect.TypeOf(bus.ProviderInstalledVersionPayload{})
+
+	if ours.NumField() != theirs.NumField() {
+		t.Fatalf("field count differs: ours %d, kairos-sdk %d", ours.NumField(), theirs.NumField())
+	}
+	for i := range theirs.NumField() {
+		want := theirs.Field(i)
+		got, ok := ours.FieldByName(want.Name)
+		if !ok {
+			t.Errorf("providerInfoPayload is missing field %q present upstream", want.Name)
+			continue
+		}
+		if got.Type != want.Type {
+			t.Errorf("field %s: our type %s, upstream %s", want.Name, got.Type, want.Type)
+		}
+		if gt, wt := got.Tag.Get("json"), want.Tag.Get("json"); gt != wt {
+			t.Errorf("field %s: our json tag %q, upstream %q", want.Name, gt, wt)
+		}
+	}
+
+	// Belt and braces: the same values must serialize to byte-identical JSON,
+	// which is what actually crosses the bus.
+	ourJSON, err := json.Marshal(providerInfoPayload{Provider: "kubernetes", Version: "v1.2.3"})
+	if err != nil {
+		t.Fatalf("marshal ours: %v", err)
+	}
+	theirJSON, err := json.Marshal(bus.ProviderInstalledVersionPayload{Provider: "kubernetes", Version: "v1.2.3"})
+	if err != nil {
+		t.Fatalf("marshal upstream: %v", err)
+	}
+	if !bytes.Equal(ourJSON, theirJSON) {
+		t.Errorf("JSON differs:\n  ours:     %s\n  upstream: %s", ourJSON, theirJSON)
+	}
 }
