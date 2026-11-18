@@ -152,7 +152,7 @@
       "enabled": false
     },
     {
-      "description": "Hadron and kairos-init are a matched pair, not two independent pins: the final stage re-runs kairos-init against the Hadron base, and a kairos-init older than that Hadron cannot regenerate its initramfs (dracut -f fails). Keep both images -- all four Dockerfile ARG and Makefile default lines -- in one PR so the pair is reviewed as a single decision. separateMajorMinor=false holds them together even though their version lines now differ: Hadron still ships v0.x, while kairos-init moved to the kairos monorepo's v4.x after kairos-io/kairos-init was archived.",
+      "description": "Hadron and kairos-init are a matched pair, not two independent pins: the final stage re-runs kairos-init against the Hadron base, and a kairos-init older than that Hadron cannot regenerate its initramfs (dracut -f fails). Keep both images -- all four Dockerfile ARG and Makefile default lines -- in one PR so the pair is reviewed as a single decision. separateMajorMinor=false holds them together even though their version lines now differ: Hadron still ships v0.x, while kairos-init moved to the kairos monorepo's v4.x after kairos-io/kairos-init was archived. dependencyDashboardApproval is set because Renovate structurally CANNOT compute the right target here: the correct pin is whatever Kairos release X resolves to, not the newest tag of either image. Hadron auto-releases twice a week (kairos-io/hadron#832) and therefore runs chronically ahead of the Kairos-validated pairing -- Kairos v4.5.2, v4.5.0 and v4.4.0 all build on Hadron v0.6.3, and no Kairos release has ever used v0.6.4 or v0.6.5. An auto-opened PR would be either noise or a trap that looks routine, so a base move must start as a deliberate click on the dependency dashboard.",
       "groupName": "Kairos base images",
       "separateMajorMinor": false,
       "matchDatasources": [
@@ -162,8 +162,16 @@
         "ghcr.io/kairos-io/hadron",
         "quay.io/kairos/kairos-init"
       ],
+      "dependencyDashboardApproval": true,
+      "addLabels": [
+        "base-pair"
+      ],
       "prBodyNotes": [
-        "Hadron and kairos-init move together. Before merging, confirm the kairos-init tag in this PR is at least as new as the Kairos release that built the proposed Hadron, or the image build fails regenerating the initramfs."
+        "DO NOT take the newest tag of either image. Both pins are derived from ONE Kairos release.",
+        "Resolve the Hadron version for the Kairos release you intend to ship (the tag prefix is the Hadron version): curl -fsSL \"https://quay.io/api/v1/repository/kairos/hadron/tag/?onlyActiveTags=true&limit=100&filter_tag_name=like:core-amd64-generic-<kairos-tag>\" -- this is the same lookup kairos-io/kairos does in .github/public-cloud/resolve-hadron-container-image.sh.",
+        "KAIROS_INIT_IMAGE is that same Kairos release tag (kairos-init ships from the kairos monorepo and shares its version; kairos-io/kairos-init is archived, so never follow its 0.x line).",
+        "Re-resolve both digests with docker buildx imagetools inspect and update the Dockerfile ARG and the Makefile default together, or make verify-pins fails.",
+        "Container e2e cannot boot the result: a base move still wants a VM boot test."
       ]
     },
     {
