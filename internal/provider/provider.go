@@ -63,8 +63,11 @@ func Provider(cluster clusterplugin.Cluster) yip.YipConfig {
 	// Serialize the Cluster into a tmpfs path the reconcile subcommand reads.
 	// /run is tmpfs on every supported distro, so this file is wiped on reboot
 	// (OQ-7: no bootstrap secrets persisted across reboots). YAML (not JSON)
-	// because clusterplugin.Role's JSON unmarshal is broken in kairos-sdk v0.5.0
-	// (it preserves literal quotes); the SDK's primary tags are yaml anyway.
+	// because clusterplugin.Role's JSON unmarshal is broken (it does *n =
+	// Role(val) on the raw bytes, so "init" decodes to Role(`"init"`), quotes
+	// included); the SDK's primary tags are yaml anyway. Still broken as of
+	// kairos-sdk v0.25.3 -- clusterplugin is byte-identical to v0.5.0 -- so this
+	// is not a workaround that can be dropped on a bump.
 	clusterYAML, err := yaml.Marshal(cluster)
 	if err != nil {
 		logrus.Errorf("provider-kubernetes: serialize cluster: %v", err)
