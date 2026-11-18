@@ -29,7 +29,7 @@ CNI_PLUGINS_VERSION ?= v1.10.0
 # (mirroring the canonical Kairos image build). Override to test another base.
 # DIGEST-pinned (kairos#4203); must match the Dockerfile ARG defaults. Re-resolve
 # with `docker buildx imagetools inspect <image:tag>` when bumping the tag.
-KAIROS_BASE_IMAGE  ?= ghcr.io/kairos-io/hadron:v0.6.3@sha256:a5a4722531411b7dec68f5e2dae2ecd777616f6ca459f6e712ff492dfbf3410e
+KAIROS_BASE_IMAGE  ?= ghcr.io/kairos-io/hadron:v0.6.5@sha256:a0b12fd9b7ff47d5c25e2564db1cb5810a278eb0cb54cb5306f6a2eb4338f94f
 # kairos-init image used in the final stage. Defaults to the Dockerfile's pin:
 # the kairos-init Kairos itself pairs with this Hadron (now versioned with the
 # kairos monorepo, v4.x); override for testing.
