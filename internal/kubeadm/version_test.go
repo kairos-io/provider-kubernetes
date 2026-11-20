@@ -175,3 +175,25 @@ func TestUpgradePath(t *testing.T) {
 		})
 	}
 }
+
+func TestPinReplacedNote(t *testing.T) {
+	tests := []struct {
+		name, pinned, resolved string
+		wantNote               bool
+	}{
+		{name: "no pin", resolved: "v1.37.2"},
+		{name: "pin equals binary", pinned: "v1.37.2", resolved: "v1.37.2"},
+		{name: "pin with another patch", pinned: "v1.37.0", resolved: "v1.37.2", wantNote: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			note := PinReplacedNote(tt.pinned, tt.resolved)
+			if (note != "") != tt.wantNote {
+				t.Fatalf("PinReplacedNote(%q, %q) = %q, want note=%v", tt.pinned, tt.resolved, note, tt.wantNote)
+			}
+			if tt.wantNote && (!strings.Contains(note, tt.pinned) || !strings.Contains(note, tt.resolved)) {
+				t.Fatalf("note %q must name both %s and %s", note, tt.pinned, tt.resolved)
+			}
+		})
+	}
+}
