@@ -6,7 +6,6 @@ import (
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
 
 	"github.com/kairos-io/provider-kubernetes/internal/reconcile/actualstate"
-	"github.com/kairos-io/provider-kubernetes/internal/reset"
 )
 
 const (
@@ -76,13 +75,8 @@ func NewContext(cluster clusterplugin.Cluster) (Context, error) {
 	if v := cluster.ProviderOptions[providerOptRootPathKey]; v != "" {
 		rootPath = v
 	}
-	clean, err := reset.ValidateRoot(rootPath)
-	if err != nil {
-		return Context{}, fmt.Errorf("cluster_root_path: %w", err)
-	}
-	if !rootPathSupported(clean) {
-		return Context{}, fmt.Errorf("cluster_root_path: only %q is supported, got %q: kubeadm keeps its state in the host's /etc/kubernetes and /var/lib/kubelet",
-			defaultRootPath, rootPath)
+	if err := checkResetRoot(rootPath); err != nil {
+		return Context{}, err
 	}
 
 	return Context{
