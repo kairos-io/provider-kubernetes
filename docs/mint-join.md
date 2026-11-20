@@ -21,7 +21,7 @@ credentials and the cluster CA under `--root-path`).
 | `--role` | `worker` | `worker` or `controlplane`. |
 | `--ttl` | `1h` | Bootstrap token TTL (must be > 0; never unbounded). |
 | `--endpoint` | derived from `admin.conf` | API server endpoint (`host:port`) the joiner targets. For HA, the stable VIP/LB/DNS endpoint. |
-| `--advertise-address` | empty | `controlplane` only: the joining node's own routable IP. Left blank, the rendered config carries a fill-in placeholder and kubeadm falls back to the default-route interface (fine for single-homed nodes). |
+| `--advertise-address` | empty | `controlplane` only: the joining node's own routable IP. Left blank, the rendered config carries an empty `advertiseAddress` and kubeadm falls back to the default-route interface (fine for single-homed nodes). |
 | `--root-path` | `/` | `cluster_root_path`; locates `admin.conf` and `ca.crt`. |
 | `--cluster-token` | empty | The cluster's `cluster_token` to embed in the rendered config (must match the control plane). Left blank, a clearly-marked placeholder is emitted. |
 
