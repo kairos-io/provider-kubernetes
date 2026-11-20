@@ -16,9 +16,10 @@ boot the provider detects the delta and converges the cluster.
   By ADR-3 an operator `kubernetesVersion` pin must equal the bundled minor, so the
   pin and the binary always agree.
 - An upgrade runs **only when you pin** `clusterConfiguration.kubernetesVersion` to
-  the new minor. A newer image **without** a matching pin bump does **not**
-  auto-upgrade - it is a no-op (so a routine image refresh never silently
-  re-versions your cluster).
+  the new minor. A newer image with **no** pin does **not** auto-upgrade - it is
+  a no-op (so a routine image refresh never silently re-versions your cluster).
+  A newer image with the **old** minor still pinned fails every boot with
+  `reason: ConfigInvalid` until you bump the pin to the new minor or remove it.
 - Only **+1 minor** at a time (kubeadm's rule). Skipping a minor (1.35 -> 1.37),
   downgrades, and out-of-window targets are **refused loudly** before anything
   destructive runs.
@@ -322,7 +323,7 @@ failure - it fails loud and leaves the node for you to inspect.
 |---------|-------------|
 | Reconcile logs `refuse-upgrade` | Skip-level, downgrade, or out-of-window pin. Pin only +1 minor within the window. |
 | Upgrade doesn't start | No version pin bump (a newer binary alone won't upgrade). Bump `clusterConfiguration.kubernetesVersion`. |
-| Pin/binary mismatch hard error | The pin minor must equal the bundled image's minor. |
+| `ConfigInvalid`: pinned kubernetesVersion does not match the installed kubeadm binary | The pin minor must equal the bundled image's minor. Bump the pin (or remove it) after booting a newer image. |
 | `etcd-snapshot outcome=` anything other than `taken` | See the outcome table under [etcd backups](#etcd-backups); take a manual backup. |
 | Disk usage grows under `/etc/kubernetes/tmp` | kubeadm's per-upgrade etcd data-dir copies; remove older ones (see [etcd backups](#etcd-backups)). |
 
