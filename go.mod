@@ -1,14 +1,14 @@
 module github.com/kairos-io/provider-kubernetes
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/kairos-io/kairos-sdk v0.5.0
 	github.com/mudler/go-pluggable v0.0.0-20230126220627-7710299a0ae5
 	github.com/mudler/yip v1.16.3
-	github.com/sirupsen/logrus v1.9.4-0.20230606125235-dd1b4c2e81af
-	golang.org/x/mod v0.41.0
-	golang.org/x/sys v0.48.0
+	github.com/sirupsen/logrus v1.10.2
+	golang.org/x/mod v0.43.0
+	golang.org/x/sys v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
 	sigs.k8s.io/yaml v1.6.0
 )
