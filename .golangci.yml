@@ -1,5 +1,15 @@
 version: "2"
 
+# The whole of test/e2e is behind //go:build e2e (and the Tier-2 scenarios behind
+# `e2e && nightly`), and golangci-lint applies no build tags by default, so with
+# these absent every file in that tree is skipped by every linter. The depguard
+# rule below already carries a "!**/test/e2e/**" exemption, which only has an
+# effect once the tree is actually analysed.
+run:
+  build-tags:
+    - e2e
+    - nightly
+
 linters:
   default: none
   enable:

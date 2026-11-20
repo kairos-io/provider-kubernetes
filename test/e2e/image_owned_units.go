@@ -376,15 +376,6 @@ func (nc *nodeContainer) currentMigrateRun(t *testing.T, what string) migrateRun
 
 // --- systemd property helpers -----------------------------------------------
 
-// monotonicProps are the timestamps the boot-ordering proof reads. systemd reports
-// them in CLOCK_MONOTONIC microseconds, the same clock and unit as the journal's
-// __MONOTONIC_TIMESTAMP, so no conversion or log scraping is involved.
-var monotonicProps = []string{
-	"InactiveExitTimestampMonotonic",  // the unit's job started
-	"ActiveEnterTimestampMonotonic",   // it became active (a oneshot: ExecStart returned)
-	"ExecMainStartTimestampMonotonic", // the main process was exec'd
-}
-
 // unitMonotonic returns one monotonic property of a unit, in microseconds. A zero
 // value means "never happened this boot" and is reported as such by the caller.
 func (nc *nodeContainer) unitMonotonic(t *testing.T, unit, prop string) uint64 {
