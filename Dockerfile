@@ -328,7 +328,7 @@ ARG TARGETARCH
 # renovate: datasource=github-releases depName=google/go-containerregistry
 ARG CRANE_VERSION=v0.22.1
 # renovate: datasource=github-releases depName=sigstore/cosign
-ARG COSIGN_VERSION=v2.6.5
+ARG COSIGN_VERSION=v3.1.4
 RUN apk add --no-cache curl ca-certificates
 COPY --from=k8s-binaries /bin/kubeadm /usr/bin/kubeadm
 # Install crane (checksum-verified against the release checksums.txt).
