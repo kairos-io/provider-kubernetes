@@ -35,6 +35,9 @@ jobs:
       - name: verify base-image pins (no digest drift)
         run: make verify-pins
 
+      - name: bundle-images retry helper test
+        run: sh scripts/test-bundle-images-retry.sh
+
       - name: gofmt -s (check only)
         run: make fmt-check
 

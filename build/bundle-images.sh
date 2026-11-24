@@ -77,6 +77,37 @@ case "${TOOLS_DIR%/}/" in
   "${OUT_DIR%/}/"*) echo "FATAL: TOOLS_DIR '${TOOLS_DIR}' must not be OUT_DIR '${OUT_DIR}' or under it" >&2; exit 1 ;;
 esac
 
+# BEGIN retry (extracted by scripts/test-bundle-images-retry.sh)
+# retry <cmd> [args...]: run a read-only registry fetch up to 5 times, sleeping
+# 5, 15, 30, 60 s between tries (times BUNDLE_RETRY_DELAY_SCALE, default 1), so a
+# registry quota error does not fail the build. Notices go to stderr, stdout is
+# the command's own. Returns the last exit status, so it stays fail-closed.
+retry() {
+  rt_scale="${BUNDLE_RETRY_DELAY_SCALE:-1}"
+  case "${rt_scale}" in
+    '' | *[!0-9]*) echo "FATAL: BUNDLE_RETRY_DELAY_SCALE '${rt_scale}' is not a whole number" >&2; return 2 ;;
+  esac
+  rt_n=1
+  while :; do
+    rt_rc=0
+    "$@" || rt_rc=$?
+    if [ "${rt_rc}" -eq 0 ] || [ "${rt_n}" -ge 5 ]; then
+      return "${rt_rc}"
+    fi
+    case "${rt_n}" in
+      1) rt_delay=5 ;;
+      2) rt_delay=15 ;;
+      3) rt_delay=30 ;;
+      *) rt_delay=60 ;;
+    esac
+    rt_delay=$((rt_delay * rt_scale))
+    echo "retry: '$*' failed (exit ${rt_rc}), attempt ${rt_n}/5, next in ${rt_delay}s" >&2
+    sleep "${rt_delay}"
+    rt_n=$((rt_n + 1))
+  done
+}
+# END retry
+
 # lock_string_ok <value>: succeeds only for a non-empty value made of printable ASCII
 # (0x20-0x7e) other than '"' and '\'. images.lock is written with printf below, so
 # this is what keeps each top-level value a plain JSON string, and it is the rule the
@@ -317,7 +348,7 @@ bundle_image() {
     exit 1
   fi
 
-  crane pull --platform "linux/${TARGETARCH}" "${bi_ref}@${bi_digest}" "${bi_work}/raw.tar"
+  retry crane pull --platform "linux/${TARGETARCH}" "${bi_ref}@${bi_digest}" "${bi_work}/raw.tar"
   bi_raw_sha="$(sha256sum "${bi_work}/raw.tar" | cut -d' ' -f1)"
   echo "pulled ${bi_ref}@${bi_digest} (linux/${TARGETARCH}) raw=${bi_raw_sha}"
   validate_image_tar "${bi_work}/raw.tar" "${bi_placeholder}" "${bi_work}" raw
@@ -506,7 +537,7 @@ while IFS= read -r ref; do
   # 1. resolve tag -> digest once; everything after is content-addressed.
   # Exactly sha256:<64 lowercase hex> on one line: it is written into images.lock,
   # whose digest rule the boot importer enforces.
-  digest="$(crane digest "${ref}")"
+  digest="$(retry crane digest "${ref}")"
   if [ "$(printf '%s\n' "${digest}" | wc -l)" != 1 ] \
     || ! printf '%s\n' "${digest}" | grep -Eqx 'sha256:[0-9a-f]{64}'; then
     echo "FATAL: bad digest for ${ref}: '${digest}'" >&2
