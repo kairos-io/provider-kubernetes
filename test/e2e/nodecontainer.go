@@ -103,7 +103,13 @@ func docker(t *testing.T, args ...string) string {
 // dockerErr is the error-returning form used where a non-zero exit is expected
 // or handled by the caller (e.g. teardown best-effort, readiness polling).
 func dockerErr(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), dockerTimeout)
+	return dockerErrTimeout(dockerTimeout, args...)
+}
+
+// dockerErrTimeout is dockerErr with an explicit cap, so the failure-path
+// diagnostics cannot add dockerTimeout per source to an already-failing suite.
+func dockerErrTimeout(timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -184,15 +190,72 @@ func startNode(t *testing.T, name string) *nodeContainer {
 	// container exists so a readiness-wait failure still cleans up.
 	t.Cleanup(func() {
 		if t.Failed() {
-			if logs, err := dockerErr("logs", "--tail", "60", id); err == nil {
-				t.Logf("=== container %s systemd log tail ===\n%s", name, logs)
-			}
+			dumpContainerDiagnostics(t, id, name)
 		}
 		_, _ = dockerErr("rm", "-fv", id)
 	})
 
 	nc.waitReady(t)
 	return nc
+}
+
+// diagTimeout caps each diagnostic source. Four sources, so a failing container
+// adds at most ~1m to teardown instead of 4x dockerTimeout (principle 4).
+const diagTimeout = 15 * time.Second
+
+// diagSource is one thing we try to read off a failed container.
+type diagSource struct {
+	label string
+	args  []string // argv; "logs"/"exec" is the first element
+}
+
+// diagSources is ordered most-specific first: the units that failed, then the
+// unit most node starts wait on, then the boot log, then PID 1's own output.
+//
+// docker logs alone is NOT enough and was the original bug here: these
+// containers run /sbin/init, so systemd logs to the journal and docker logs --
+// which only captures PID 1's stdout/stderr -- came back empty on a real
+// containerd readiness failure. It is kept last because it is the only source
+// that still works when systemd itself never started.
+func diagSources(id string) []diagSource {
+	return []diagSource{
+		{"failed units", []string{"exec", id, "systemctl", "--no-pager", "--no-legend", "list-units", "--state=failed"}},
+		{"containerd journal", []string{"exec", id, "journalctl", "--no-pager", "-u", "containerd", "-n", "100"}},
+		{"boot journal tail", []string{"exec", id, "journalctl", "--no-pager", "-b", "-n", "150"}},
+		{"pid 1 stdout/stderr", []string{"logs", "--tail", "80", id}},
+	}
+}
+
+// formatDiagSection renders one source's result. It is deliberate that an error
+// and an empty success are BOTH reported rather than skipped: the original
+// implementation gated on err == nil and so printed a bare header with no body,
+// leaving no way to tell "captured nothing" from "capture failed".
+func formatDiagSection(label, out string, err error) string {
+	body := strings.TrimRight(out, "\n")
+	switch {
+	case err != nil && body == "":
+		return fmt.Sprintf("--- %s: UNAVAILABLE (%v)", label, err)
+	case err != nil:
+		return fmt.Sprintf("--- %s: UNAVAILABLE (%v); partial output:\n%s", label, err, body)
+	case body == "":
+		return fmt.Sprintf("--- %s: (empty)", label)
+	default:
+		return fmt.Sprintf("--- %s:\n%s", label, body)
+	}
+}
+
+// dumpContainerDiagnostics logs why a node container was unhealthy. Every source
+// is attempted and every outcome reported, so a readiness-wait failure always
+// leaves evidence behind.
+func dumpContainerDiagnostics(t *testing.T, id, name string) {
+	t.Helper()
+	srcs := diagSources(id)
+	sections := make([]string, 0, len(srcs))
+	for _, src := range srcs {
+		out, err := dockerErrTimeout(diagTimeout, src.args...)
+		sections = append(sections, formatDiagSection(src.label, out, err))
+	}
+	t.Logf("=== container %s diagnostics ===\n%s", name, strings.Join(sections, "\n"))
 }
 
 // hostKernelMounts returns read-only bind-mount flags for the host kernel

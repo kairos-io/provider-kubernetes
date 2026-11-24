@@ -88,6 +88,39 @@ func TestResetClusterWritesStatus(t *testing.T) {
 	})
 }
 
+// TestResetClusterRefusesARootConfigValidationRejects: NewContext rejects any
+// cluster_root_path other than "/", and reset must apply the same rule. Under
+// another root `kubeadm reset` would still act on the host's real state while
+// the provider emptied a tree kubeadm never wrote, and ResetOK would be
+// recorded for it.
+func TestResetClusterRefusesARootConfigValidationRejects(t *testing.T) {
+	relaxed := rootPathSupported
+	rootPathSupported = productionRootPathSupported
+	t.Cleanup(func() { rootPathSupported = relaxed })
+
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "etc/kubernetes/admin.conf"), "apiVersion: v1\n")
+	fr := &resetFakeRunner{}
+	sink := &recordingSink{}
+	opts := hermeticResetOptions(fr)
+	opts.Sink = sink
+	cluster := clusterplugin.Cluster{Role: clusterplugin.RoleInit, ProviderOptions: map[string]string{"cluster_root_path": root}}
+
+	err := ResetCluster(context.Background(), cluster, opts)
+	if err == nil || !strings.Contains(err.Error(), "cluster_root_path") {
+		t.Fatalf("ResetCluster err = %v, want one naming cluster_root_path", err)
+	}
+	if len(fr.calls) != 0 {
+		t.Fatalf("reset called kubeadm under a refused root: %v", fr.calls)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "etc/kubernetes/admin.conf")); statErr != nil {
+		t.Fatalf("reset emptied a tree under a refused root: %v", statErr)
+	}
+	if got := sink.only(t); got.Phase != status.PhaseReset || got.Reason != status.ReasonResetFailed {
+		t.Fatalf("recorded phase=%q reason=%q, want %q/%q", got.Phase, got.Reason, status.PhaseReset, status.ReasonResetFailed)
+	}
+}
+
 // TestResetClusterEtcdAdvisoryFollowsTheProbe: on a stacked-etcd control plane
 // the full "member may stay registered" warning is for a node whose apiserver
 // does not answer; when it answers, a "verify the member is gone" line takes

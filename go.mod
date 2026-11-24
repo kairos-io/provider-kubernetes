@@ -5,9 +5,9 @@ go 1.27.4
 require (
 	github.com/kairos-io/kairos-sdk v0.25.3
 	github.com/mudler/go-pluggable v0.0.0-20230126220627-7710299a0ae5
-	github.com/mudler/yip v1.27.0
+	github.com/mudler/yip v1.16.3
 	github.com/sirupsen/logrus v1.10.2
-	golang.org/x/mod v0.42.0
+	golang.org/x/mod v0.43.0
 	golang.org/x/sys v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
 	sigs.k8s.io/yaml v1.6.0
