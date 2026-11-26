@@ -62,7 +62,7 @@ func Resolve(detected, pinned string) (string, error) {
 			return "", fmt.Errorf("pinned kubernetesVersion %q is not valid semver", pinned)
 		}
 		if Minor(pinned) != Minor(detected) {
-			return "", fmt.Errorf("pinned kubernetesVersion %s (minor %s) does not match the installed kubeadm binary %s (minor %s)", pinned, Minor(pinned), detected, Minor(detected))
+			return "", fmt.Errorf("pinned kubernetesVersion %s (minor %s) does not match the installed kubeadm binary %s (minor %s); set clusterConfiguration.kubernetesVersion to %s or remove the pin", pinned, Minor(pinned), detected, Minor(detected), detected)
 		}
 	}
 	return detected, nil
@@ -134,4 +134,16 @@ func minorNum(version string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// PinReplacedNote returns an operator-facing note when Resolve kept a pinned
+// kubernetesVersion's minor but targets the bundled binary's different patch
+// (e.g. pin v1.37.0, binary v1.37.2). Only the minor of a pin is enforced, so
+// this is not an error, but the cluster comes up at the binary's version and
+// the operator should know. It returns "" when there is nothing to report.
+func PinReplacedNote(pinned, resolved string) string {
+	if pinned == "" || semver.Compare(pinned, resolved) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("pinned kubernetesVersion %s is replaced by the bundled kubeadm version %s (only the minor of a pin is enforced)", pinned, resolved)
 }

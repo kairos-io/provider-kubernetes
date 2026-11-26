@@ -17,10 +17,15 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"sigs.k8s.io/yaml"
 
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadm"
 	"github.com/kairos-io/provider-kubernetes/internal/kubeadmconfig"
@@ -155,11 +160,14 @@ func (m Minter) UploadCerts(ctx context.Context, certKey string) error {
 		return fmt.Errorf("upload-certs: certKey must not be empty")
 	}
 
-	// Build a minimal InitConfiguration carrying only the certificateKey. This is
-	// the only field upload-certs reads from the config (it ignores all other
-	// InitConfiguration fields when run as a standalone phase).
+	// Build a minimal InitConfiguration carrying the certificateKey and this
+	// node's own API endpoint. upload-certs only needs the key, but kubeadm
+	// defaults the whole InitConfiguration first, and an empty advertiseAddress
+	// makes it pick the default-route interface, which fails on a node without
+	// a default route.
 	initCfg := kubeadmconfig.NewInitConfiguration()
 	initCfg.CertificateKey = certKey
+	initCfg.LocalAPIEndpoint = m.localAPIEndpoint()
 
 	content, err := kubeadmconfig.Marshal(initCfg)
 	if err != nil {
@@ -186,6 +194,87 @@ func (m Minter) UploadCerts(ctx context.Context, certKey string) error {
 	return nil
 }
 
+// apiserverAdvertiseAnnotation is the annotation kubeadm puts on the
+// kube-apiserver static pod with this node's localAPIEndpoint as "ip:port".
+const apiserverAdvertiseAnnotation = "kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint"
+
+// localAPIEndpoint returns this control plane's own API endpoint for the
+// transient upload-certs config. It prefers the kube-apiserver static pod
+// annotation, which kubeadm writes from this node's localAPIEndpoint, and falls
+// back to the admin.conf server host. admin.conf names controlPlaneEndpoint,
+// whose port may be a load balancer's rather than this apiserver's, so only the
+// address is taken from it. That endpoint is often a DNS name: kubeadm only
+// accepts an IP as advertiseAddress, so a name (or no usable source) yields an
+// empty endpoint and kubeadm keeps its own default-route detection.
+func (m Minter) localAPIEndpoint() kubeadmconfig.APIEndpoint {
+	k8sDir := filepath.Join(m.RootPath, "etc", "kubernetes")
+	if data, err := os.ReadFile(filepath.Join(k8sDir, "manifests", "kube-apiserver.yaml")); err == nil {
+		var pod struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
+		}
+		if yaml.Unmarshal(data, &pod) == nil {
+			if ep, ok := apiEndpointFromHostPort(pod.Metadata.Annotations[apiserverAdvertiseAnnotation]); ok {
+				return ep
+			}
+		}
+	}
+	if data, err := os.ReadFile(m.adminConf()); err == nil {
+		var kc struct {
+			Clusters []struct {
+				Cluster struct {
+					Server string `json:"server"`
+				} `json:"cluster"`
+			} `json:"clusters"`
+		}
+		if yaml.Unmarshal(data, &kc) == nil && len(kc.Clusters) > 0 {
+			if u, err := url.Parse(kc.Clusters[0].Cluster.Server); err == nil {
+				if ep, ok := apiEndpointFromHostPort(u.Host); ok {
+					return kubeadmconfig.APIEndpoint{AdvertiseAddress: ep.AdvertiseAddress}
+				}
+			}
+		}
+	}
+	return kubeadmconfig.APIEndpoint{}
+}
+
+// apiEndpointFromHostPort turns "ip:port" into an APIEndpoint. ok is false
+// unless the host is an IP literal that can serve as an advertiseAddress; the
+// port is kept only if valid.
+func apiEndpointFromHostPort(hostPort string) (kubeadmconfig.APIEndpoint, bool) {
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(hostPort))
+	if err != nil {
+		return kubeadmconfig.APIEndpoint{}, false
+	}
+	ip := net.ParseIP(host)
+	if !usableAdvertiseIP(ip) {
+		return kubeadmconfig.APIEndpoint{}, false
+	}
+	ep := kubeadmconfig.APIEndpoint{AdvertiseAddress: ip.String()}
+	if port, err := strconv.ParseUint(portStr, 10, 16); err == nil && port > 0 {
+		ep.BindPort = int32(port)
+	}
+	return ep, true
+}
+
+// usableAdvertiseIP reports whether ip can stand in as this control plane's
+// advertiseAddress. Unspecified, loopback, link-local, multicast and broadcast
+// addresses cannot: they do not identify this node to the rest of the cluster,
+// which is why kubeadmconfig.buildJoinConfiguration warns about a loopback
+// advertiseAddress. admin.conf in particular may name a local proxy on
+// 127.0.0.1, and substituting that here would be worse than leaving the field
+// empty -- empty is what makes kubeadm fall back to its own default-route
+// detection, and the caller relies on that fallback.
+//
+// IsGlobalUnicast is exactly that union, so it is used rather than a hand-kept
+// list: it unmaps IPv4-in-IPv6 first (::ffff:127.0.0.1 is rejected) and keeps
+// RFC1918, ULA and CGNAT addresses usable, since a private address is still how
+// nodes reach each other. It reports false for a nil IP.
+func usableAdvertiseIP(ip net.IP) bool {
+	return ip.IsGlobalUnicast()
+}
+
 // MintJoinMaterial assembles fresh join material on a control-plane node (ADR-10
 // N3 auto-propagation): a bounded-TTL bootstrap token, the cluster CA SPKI pin
 // computed from the local ca.crt, and (for control-plane joins) a fresh
@@ -199,15 +288,24 @@ func (m Minter) UploadCerts(ctx context.Context, certKey string) error {
 // matching upload would cause CP-join to fail or use a stale key. The 2h kubeadm-
 // certs expiry is preserved (B3; no TTL:0 / expiry-strip). The cert-key is never
 // passed on argv (B1) and is not reused (B2: fresh per CP-join call).
-func (m Minter) MintJoinMaterial(ctx context.Context, controlPlane bool, ttl time.Duration) (*JoinMaterial, error) {
-	token, _, err := m.CreateToken(ctx, ttl)
-	if err != nil {
-		return nil, err
-	}
+//
+// The CA hash is read before the token is created, and a failure after `token
+// create` deletes that token again (best effort), so a failed mint never leaves
+// a live token on the cluster that nobody received.
+func (m Minter) MintJoinMaterial(ctx context.Context, controlPlane bool, ttl time.Duration) (_ *JoinMaterial, err error) {
 	hash, err := m.CACertHashFromFile()
 	if err != nil {
 		return nil, err
 	}
+	token, _, err := m.CreateToken(ctx, ttl)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			m.deleteToken(ctx, token)
+		}
+	}()
 	jm := &JoinMaterial{Token: token, CACertHashes: []string{hash}}
 	if controlPlane {
 		key, err := m.GenerateCertificateKey(ctx)
@@ -223,6 +321,19 @@ func (m Minter) MintJoinMaterial(ctx context.Context, controlPlane bool, ttl tim
 		jm.CertificateKey = key
 	}
 	return jm, nil
+}
+
+// tokenDeleteTimeout bounds the best-effort revoke of a token from a failed mint.
+const tokenDeleteTimeout = 30 * time.Second
+
+// deleteToken revokes a bootstrap token by its ID, best effort. Only the ID goes
+// on argv, never the secret. It runs even when ctx is already canceled, since a
+// canceled mint is one of the failures that must not leave the token behind.
+func (m Minter) deleteToken(ctx context.Context, token string) {
+	id, _, _ := strings.Cut(token, ".")
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tokenDeleteTimeout)
+	defer cancel()
+	_, _ = m.Runner.Run(ctx, "token", "delete", id, "--kubeconfig", m.adminConf())
 }
 
 // CACertHashFromFile computes the SPKI pin of the cluster CA at the default path

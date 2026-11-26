@@ -1,10 +1,12 @@
 package status
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	sigsyaml "sigs.k8s.io/yaml"
 
@@ -102,10 +104,10 @@ func TestBuildStatusTerminalCases(t *testing.T) {
 			wantTerm:   true,
 		},
 		{
-			name:       "RunJoin terminal",
+			name:       "RunJoin terminal -> ConfigInvalid",
 			action:     reconcile.ActionRunJoin,
 			err:        termErr,
-			wantReason: ReasonJoinTimeout,
+			wantReason: ReasonConfigInvalid,
 			wantPhase:  PhaseFailed,
 			wantTerm:   true,
 		},
@@ -156,9 +158,9 @@ func TestBuildStatusBudgetExhausted(t *testing.T) {
 			wantReason: ReasonControlPlaneUnreachable,
 		},
 		{
-			name:       "RunJoin exhausted",
+			name:       "RunJoin exhausted -> JoinTimeout",
 			action:     reconcile.ActionRunJoin,
-			wantReason: ReasonControlPlaneUnreachable,
+			wantReason: ReasonJoinTimeout,
 		},
 		{
 			name:       "WaitForClusterUpgrade exhausted",
@@ -913,6 +915,77 @@ func TestBuildStatusResetKeptMountsMessage(t *testing.T) {
 			}
 			if strings.Contains(name, "another") && !strings.Contains(s.Message, "permission denied") {
 				t.Fatalf("message %q dropped the other failure", s.Message)
+			}
+		})
+	}
+}
+
+// kubeadmRetryExec fails the way `kubeadm init` does through the kubeadm
+// runner, command line first: the first attempt times out in
+// wait-control-plane, and every retry trips over the manifests and the port it
+// left behind.
+type kubeadmRetryExec struct{ calls int }
+
+const kubeadmRunnerPrefix = "kubeadm init: kubeadm [init --config /run/kubeadm-1234567.yaml --upload-certs] failed (exit 1): exit status 1: "
+
+func (e *kubeadmRetryExec) Execute(_ context.Context, _ reconcile.Action) error {
+	e.calls++
+	if e.calls == 1 {
+		return errors.New(kubeadmRunnerPrefix +
+			"[init] Using Kubernetes version: v1.36.2\n" +
+			"[preflight] Running pre-flight checks\n" +
+			"[wait-control-plane] Waiting for the kubelet to boot up the control plane as static Pods from directory \"/etc/kubernetes/manifests\"\n" +
+			"[kubelet-check] Waiting for a healthy kubelet at http://127.0.0.1:10248/healthz. This can take up to 4m0s\n" +
+			"error: error execution phase wait-control-plane: failed while waiting for the kubelet to start: context deadline exceeded\n" +
+			"To see the stack trace of this error execute with --v=5 or higher\n")
+	}
+	return errors.New(kubeadmRunnerPrefix +
+		"[init] Using Kubernetes version: v1.36.2\n" +
+		"[preflight] Running pre-flight checks\n" +
+		"error: error execution phase preflight: [preflight] Some fatal errors occurred:\n" +
+		"\t[ERROR Port-6443]: Port 6443 is in use\n" +
+		"\t[ERROR FileAvailable--etc-kubernetes-manifests-kube-apiserver.yaml]: /etc/kubernetes/manifests/kube-apiserver.yaml already exists\n" +
+		"To see the stack trace of this error execute with --v=5 or higher\n")
+}
+
+// The operator reads reconcile failures through the status document, and
+// sanitize() cuts Message at the first newline and then to 256 bytes. This is
+// the assertion that matters for kairos-io/kairos#6031: both the first
+// attempt's cause and the retry's have to survive that cut, with the wrapping
+// internal/provider.Run adds.
+func TestBuildStatusMessageKeepsBothAttemptCauses(t *testing.T) {
+	for _, a := range []reconcile.Action{reconcile.ActionRunInit, reconcile.ActionWaitForClusterUpgrade} {
+		t.Run(string(a), func(t *testing.T) {
+			r := reconcile.Reconciler{
+				Budget: reconcile.Budget{PerAttempt: time.Second, MaxAttempts: 3, Total: time.Minute},
+				Exec:   &kubeadmRetryExec{},
+				Sleep:  func(time.Duration) {}, // do not actually wait in tests
+			}
+			res, err := r.RunWithResult(context.Background(), []reconcile.Action{a})
+			if err == nil {
+				t.Fatal("expected the reconcile to fail after exhausting the budget")
+			}
+
+			p := baseParams()
+			p.Role = actualstate.RoleInit
+			p.LastAction = a
+			p.Err = fmt.Errorf("reconcile: %w", err)
+			p.Result = res
+			s := BuildStatus(p)
+
+			if s.Phase != PhaseFailed {
+				t.Fatalf("expected phase %q, got %q", PhaseFailed, s.Phase)
+			}
+			if strings.ContainsAny(s.Message, "\n\r") {
+				t.Fatalf("Message must be single-line, got %q", s.Message)
+			}
+			for _, want := range []string{
+				"first attempt: wait-control-plane: failed while waiting for the kubelet",
+				"last attempt: preflight:",
+			} {
+				if !strings.Contains(s.Message, want) {
+					t.Fatalf("the status message must carry %q; got %q", want, s.Message)
+				}
 			}
 		})
 	}

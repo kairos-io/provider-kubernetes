@@ -48,6 +48,15 @@ func ResetCluster(ctx context.Context, cluster clusterplugin.Cluster, opts Reset
 	}
 	role := actualstate.Role(string(cluster.Role))
 
+	// Reset follows the same cluster_root_path rule as NewContext. kubeadm
+	// reset acts on the host's real /etc/kubernetes and /var/lib/kubelet, so
+	// resetting under any other root would empty the wrong tree and still
+	// record ResetOK.
+	if err := checkResetRoot(rootPath); err != nil {
+		writeResetStatus(opts.Sink, role, err)
+		return err
+	}
+
 	// Best-effort: the CRI socket, the node name for the HA-5 advisory and
 	// the apiserver port come from the user config; reset proceeds without.
 	var criSocket, nodeName string
@@ -74,6 +83,20 @@ func ResetCluster(ctx context.Context, cluster clusterplugin.Cluster, opts Reset
 	})
 	writeResetStatus(opts.Sink, role, resetErr)
 	return resetErr
+}
+
+// checkResetRoot applies the cluster_root_path rule NewContext enforces:
+// a clean path that rootPathSupported accepts.
+func checkResetRoot(rootPath string) error {
+	clean, err := reset.ValidateRoot(rootPath)
+	if err != nil {
+		return fmt.Errorf("cluster_root_path: %w", err)
+	}
+	if !rootPathSupported(clean) {
+		return fmt.Errorf("cluster_root_path: only %q is supported, got %q: kubeadm keeps its state in the host's /etc/kubernetes and /var/lib/kubelet",
+			defaultRootPath, rootPath)
+	}
+	return nil
 }
 
 // maxResetPayloadBytes caps the event payload size before unmarshaling, to bound

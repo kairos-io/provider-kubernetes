@@ -3,6 +3,8 @@ package provider
 import (
 	"strings"
 	"testing"
+
+	yamlv3 "gopkg.in/yaml.v3"
 )
 
 func TestRenderJoinCloudConfig_Worker(t *testing.T) {
@@ -94,6 +96,8 @@ func TestRenderJoinCloudConfig_Rejects(t *testing.T) {
 		{"no hashes", JoinSnippet{Role: "worker", Endpoint: "x:6443", Token: "t"}},
 		{"blank hashes", JoinSnippet{Role: "worker", Endpoint: "x:6443", Token: "t", CACertHashes: []string{"  "}}},
 		{"cp without cert key", JoinSnippet{Role: "controlplane", Endpoint: "x:6443", Token: "t", CACertHashes: []string{"sha256:a"}}},
+		{"short cluster token", JoinSnippet{Role: "worker", Endpoint: "x:6443", Token: "t", CACertHashes: []string{"sha256:a"}, ClusterToken: "short"}},
+		{"short cluster token after trim", JoinSnippet{Role: "worker", Endpoint: "x:6443", Token: "t", CACertHashes: []string{"sha256:a"}, ClusterToken: "  short-token    "}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -140,7 +144,7 @@ func TestRenderJoinCloudConfig_CPWithAdvertiseAddress(t *testing.T) {
 	}
 }
 
-func TestRenderJoinCloudConfig_CPWithoutAdvertiseAddressHasPlaceholder(t *testing.T) {
+func TestRenderJoinCloudConfig_CPWithoutAdvertiseAddressIsEmpty(t *testing.T) {
 	out, err := RenderJoinCloudConfig(JoinSnippet{
 		Role:           "controlplane",
 		Endpoint:       "vip.example.test:6443",
@@ -152,9 +156,13 @@ func TestRenderJoinCloudConfig_CPWithoutAdvertiseAddressHasPlaceholder(t *testin
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Must contain the placeholder indicating operator must fill this in.
-	if !strings.Contains(out, "FILL-IN-THIS-NODE-IP") {
-		t.Errorf("expected placeholder when advertiseAddress is empty, got:\n%s", out)
+	// An empty address lets kubeadm fall back to the default-route interface.
+	// A placeholder string is not an IP, so kubeadm would reject the join.
+	if !strings.Contains(out, "advertiseAddress: \"\"\n") {
+		t.Errorf("expected an empty advertiseAddress when none is given, got:\n%s", out)
+	}
+	if strings.Contains(out, "FILL-IN-THIS-NODE-IP") {
+		t.Errorf("rendered a placeholder kubeadm rejects as advertiseAddress:\n%s", out)
 	}
 }
 
@@ -172,5 +180,149 @@ func TestEndpointFromKubeconfig_Errors(t *testing.T) {
 				t.Errorf("expected error for %s, got nil", tc.name)
 			}
 		})
+	}
+}
+
+func parseJoinCloudConfig(t *testing.T, out string) (outer, inner map[string]any) {
+	t.Helper()
+	if err := yamlv3.Unmarshal([]byte(out), &outer); err != nil {
+		t.Fatalf("outer cloud-config does not parse: %v\n---\n%s", err, out)
+	}
+	cluster, ok := outer["cluster"].(map[string]any)
+	if !ok {
+		t.Fatalf("outer cloud-config has no cluster map:\n%s", out)
+	}
+	cfg, ok := cluster["config"].(string)
+	if !ok {
+		t.Fatalf("cluster.config is not a string:\n%s", out)
+	}
+	if err := yamlv3.Unmarshal([]byte(cfg), &inner); err != nil {
+		t.Fatalf("cluster.config does not parse: %v\n---\n%s", err, cfg)
+	}
+	return outer, inner
+}
+
+func dig(t *testing.T, m map[string]any, path ...string) any {
+	t.Helper()
+	var cur any = m
+	for _, k := range path {
+		mm, ok := cur.(map[string]any)
+		if !ok {
+			t.Fatalf("path %v: %q is not under a map (got %T)", path, k, cur)
+		}
+		cur = mm[k]
+	}
+	return cur
+}
+
+func TestRenderJoinCloudConfig_ValuesRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		s    JoinSnippet
+	}{
+		{"ordinary values", JoinSnippet{
+			Endpoint: "10.0.0.5:6443", Token: "FAKE-token.0123456789abcdef",
+			CACertHashes: []string{"sha256:FAKE-hash"}, CertificateKey: "FAKE-certkey",
+			ClusterToken: "FAKE-cluster-token-0123456789", Device: "/dev/vda", AdvertiseAddress: "10.0.0.6",
+		}},
+		{"token with a double quote", JoinSnippet{
+			Endpoint: "10.0.0.5:6443", Token: `FAKE-token"quoted`,
+			CACertHashes: []string{"sha256:FAKE-hash"}, CertificateKey: "FAKE-certkey",
+			ClusterToken: `FAKE-cluster"token-0123456789`, AdvertiseAddress: "10.0.0.6",
+		}},
+		{"token with literal backslash sequences", JoinSnippet{
+			Endpoint: "10.0.0.5:6443", Token: `FAKE-token\t\x41\\end\`,
+			CACertHashes: []string{`sha256:FAKE\hash`}, CertificateKey: `FAKE-certkey\n`,
+			ClusterToken: `FAKE-cluster-token\x41\t-0123456789`, Device: `C:\dev\vda`, AdvertiseAddress: "10.0.0.6",
+		}},
+		{"endpoint with a trailing quote", JoinSnippet{
+			Endpoint: `FAKE-endpoint.test:6443"`, Token: "FAKE-token.0123456789abcdef",
+			CACertHashes: []string{"sha256:FAKE-hash"}, CertificateKey: "FAKE-certkey",
+			ClusterToken: "FAKE-cluster-token-0123456789", AdvertiseAddress: "10.0.0.6",
+		}},
+		{"advertise address with a quote", JoinSnippet{
+			Endpoint: "10.0.0.5:6443", Token: "FAKE-token.0123456789abcdef",
+			CACertHashes: []string{"sha256:FAKE-hash"}, CertificateKey: "FAKE-certkey",
+			ClusterToken: "FAKE-cluster-token-0123456789", AdvertiseAddress: `10.0.0."6`,
+		}},
+		{"line breaks and YAML syntax", JoinSnippet{
+			Endpoint: "FAKE-endpoint.test:6443\"\n  role: controlplane", Token: "FAKE-token\r\n# comment: x\t\u2028\u0085\x7f",
+			CACertHashes: []string{"sha256:FAKE\"\n- injected", "sha256:FAKE-two"}, CertificateKey: "FAKE-cert'key: {x}",
+			ClusterToken: "FAKE-cluster-token\n  role: worker", AdvertiseAddress: "10.0.0.6\"\n  bindPort: 1",
+		}},
+		{"non-ASCII", JoinSnippet{
+			Endpoint: "FAKE-ñandú.test:6443", Token: "FAKE-token-\U0001F511-\ufeff",
+			CACertHashes: []string{"sha256:FAKE-hash"}, CertificateKey: "FAKE-certkey",
+			ClusterToken: "FAKE-cluster-token-ü-0123456789", AdvertiseAddress: "10.0.0.6",
+		}},
+	}
+	for _, tc := range cases {
+		for _, role := range []string{"worker", "controlplane"} {
+			t.Run(tc.name+"/"+role, func(t *testing.T) {
+				s := tc.s
+				s.Role = role
+				out, err := RenderJoinCloudConfig(s)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				outer, inner := parseJoinCloudConfig(t, out)
+
+				wantDevice := s.Device
+				if wantDevice == "" {
+					wantDevice = "auto"
+				}
+				type check struct {
+					where string
+					got   any
+					want  string
+				}
+				checks := []check{
+					{"install.device", dig(t, outer, "install", "device"), wantDevice},
+					{"cluster.cluster_token", dig(t, outer, "cluster", "cluster_token"), s.ClusterToken},
+					{"cluster.control_plane_host", dig(t, outer, "cluster", "control_plane_host"), s.Endpoint},
+					{"cluster.role", dig(t, outer, "cluster", "role"), role},
+					{"bootstrapToken.token", dig(t, inner, "joinConfiguration", "discovery", "bootstrapToken", "token"), s.Token},
+					{"bootstrapToken.apiServerEndpoint", dig(t, inner, "joinConfiguration", "discovery", "bootstrapToken", "apiServerEndpoint"), s.Endpoint},
+				}
+				if role == "controlplane" {
+					checks = append(checks,
+						check{"controlPlane.certificateKey", dig(t, inner, "joinConfiguration", "controlPlane", "certificateKey"), s.CertificateKey},
+						check{"localAPIEndpoint.advertiseAddress", dig(t, inner, "joinConfiguration", "controlPlane", "localAPIEndpoint", "advertiseAddress"), s.AdvertiseAddress},
+					)
+				} else if _, ok := inner["joinConfiguration"].(map[string]any)["controlPlane"]; ok {
+					t.Errorf("worker config grew a controlPlane block:\n%s", out)
+				}
+				for _, c := range checks {
+					if c.got != c.want {
+						t.Errorf("%s = %q, want %q\n---\n%s", c.where, c.got, c.want, out)
+					}
+				}
+
+				hashes, _ := dig(t, inner, "joinConfiguration", "discovery", "bootstrapToken", "caCertHashes").([]any)
+				if len(hashes) != len(s.CACertHashes) {
+					t.Fatalf("caCertHashes = %q, want %q\n---\n%s", hashes, s.CACertHashes, out)
+				}
+				for i, h := range hashes {
+					if h != s.CACertHashes[i] {
+						t.Errorf("caCertHashes[%d] = %q, want %q", i, h, s.CACertHashes[i])
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRenderJoinCloudConfig_RejectsInvalidUTF8(t *testing.T) {
+	_, err := RenderJoinCloudConfig(JoinSnippet{
+		Role:         "worker",
+		Endpoint:     "10.0.0.5:6443",
+		Token:        "FAKE-token-\xff",
+		CACertHashes: []string{"sha256:FAKE-hash"},
+	})
+	if err == nil {
+		t.Fatal("expected an error for a token that is not valid UTF-8")
+	}
+	if strings.Contains(err.Error(), "FAKE-token") {
+		t.Errorf("error leaks the token: %v", err)
 	}
 }

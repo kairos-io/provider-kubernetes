@@ -24,16 +24,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           check-latest: false
 
       - name: verify base-image pins (no digest drift)
         run: make verify-pins
+
+      - name: bundle-images retry helper test
+        run: sh scripts/test-bundle-images-retry.sh
 
       - name: gofmt -s (check only)
         run: make fmt-check
@@ -64,11 +67,12 @@ jobs:
           echo "binary SBOM: CycloneDX $(jq -r .specVersion "${sbom}"), $(jq '.components | length' "${sbom}") components"
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          # Pin to the version validated locally against the v2 config. Must be
-          # built with a Go >= the go.mod `go` directive (v2.13.2: go1.27.0).
-          version: v2.13.2
+          # Pin to the version validated locally against the v2 config. Its
+          # bundled golang.org/x/tools must read the export data of the go.mod
+          # `go` version (v2.14.0 and later ship an x/tools new enough for go1.27).
+          version: v2.15.0
 
   # Derive the image-build matrix from the single source of truth for the
   # supported Kubernetes window: kubeadm.SupportedMinors in version.go (ADR-3).
@@ -81,7 +85,7 @@ jobs:
       minors: ${{ steps.minors.outputs.minors }}
     steps:
       - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Extract SupportedMinors -> JSON matrix
         id: minors
@@ -117,7 +121,7 @@ jobs:
         minor: ${{ fromJSON(needs.discover.outputs.minors) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve Kubernetes patch + commit + crictl versions
         id: ver
@@ -409,10 +413,10 @@ jobs:
         minor: ${{ fromJSON(needs.discover.outputs.minors) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           check-latest: false
@@ -485,3 +489,32 @@ jobs:
             "kairos-kubeadm-e2e-node:${{ steps.ver.outputs.k8s }}" \
             "kairos-kubeadm:${{ steps.ver.outputs.k8s }}" || true
           docker volume prune -f || true
+
+  # Aggregate gate: ONE check whose name never changes, so it can be the required
+  # status check on main (OQ-18-1). The image and e2e jobs are a matrix derived
+  # from kubeadm.SupportedMinors, so their check names (e.g. "e2e (k8s 1.37)")
+  # change every time the supported window rolls -- and a required check that
+  # stops reporting blocks every pull request. Requiring this job instead keeps
+  # the gate meaningful across a window roll. It passes only when every CI job
+  # above succeeded; a skipped or cancelled job is not a pass.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [gates, discover, image, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Assert every CI job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "job results: ${RESULTS}"
+          for r in ${RESULTS}; do
+            if [ "$r" != "success" ]; then
+              echo "a CI job did not succeed: ${r}" >&2
+              exit 1
+            fi
+          done
+          echo "all CI jobs succeeded"

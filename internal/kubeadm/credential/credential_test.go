@@ -290,3 +290,238 @@ func TestGenerateCertificateKey(t *testing.T) {
 		t.Fatalf("key value must not appear in argv: %v", fr.lastArgs)
 	}
 }
+
+// uploadCertsConfig runs UploadCerts against root and returns the transient
+// --config content kubeadm would read, captured before it is shredded.
+func uploadCertsConfig(t *testing.T, root string) string {
+	t.Helper()
+	var cfg string
+	rr := respondRunner{respond: func(args []string) (kubeadm.Result, error) {
+		for i, a := range args {
+			if a == "--config" && i+1 < len(args) {
+				data, err := os.ReadFile(args[i+1])
+				if err != nil {
+					t.Fatalf("read transient config: %v", err)
+				}
+				cfg = string(data)
+			}
+		}
+		return kubeadm.Result{}, nil
+	}}
+	m := Minter{Runner: rr, RootPath: root, RunDir: t.TempDir()}
+	if err := m.UploadCerts(context.Background(), strings.Repeat("a", 64)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg == "" {
+		t.Fatal("upload-certs was not called with a --config file")
+	}
+	return cfg
+}
+
+func writeK8sFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, "etc", "kubernetes", rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const testAPIServerManifest = `apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint: %s
+  name: kube-apiserver
+  namespace: kube-system
+`
+
+const testAdminConf = `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://%s
+  name: kubernetes
+`
+
+func TestUploadCerts_AdvertiseAddressFromAPIServerManifest(t *testing.T) {
+	root := t.TempDir()
+	writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "10.0.0.5:6444"))
+	writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "cp.example.com:443"))
+
+	cfg := uploadCertsConfig(t, root)
+	if !strings.Contains(cfg, "advertiseAddress: 10.0.0.5") || !strings.Contains(cfg, "bindPort: 6444") {
+		t.Fatalf("transient config must carry the node's own API endpoint, got:\n%s", cfg)
+	}
+}
+
+func TestUploadCerts_AdvertiseAddressIPv6(t *testing.T) {
+	root := t.TempDir()
+	writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "'[fd00::5]:6443'"))
+
+	cfg := uploadCertsConfig(t, root)
+	if !strings.Contains(cfg, "advertiseAddress: fd00::5") || !strings.Contains(cfg, "bindPort: 6443") {
+		t.Fatalf("transient config must carry the IPv6 API endpoint, got:\n%s", cfg)
+	}
+}
+
+func TestUploadCerts_AdvertiseAddressFallsBackToAdminConfIP(t *testing.T) {
+	root := t.TempDir()
+	writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "192.168.1.10:8443"))
+
+	cfg := uploadCertsConfig(t, root)
+	if !strings.Contains(cfg, "advertiseAddress: 192.168.1.10") {
+		t.Fatalf("transient config must carry the admin.conf server IP, got:\n%s", cfg)
+	}
+	if strings.Contains(cfg, "bindPort") {
+		t.Fatalf("admin.conf port may be a load balancer's; bindPort must stay unset, got:\n%s", cfg)
+	}
+}
+
+func TestUploadCerts_NoAdvertiseAddressForHostnameOrMissing(t *testing.T) {
+	cases := map[string]func(t *testing.T, root string){
+		"nothing on disk": func(*testing.T, string) {},
+		"admin.conf hostname": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "cp.example.com:6443"))
+		},
+		"manifest without annotation, unspecified admin.conf IP": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", "apiVersion: v1\nkind: Pod\nmetadata:\n  name: kube-apiserver\n")
+			writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "0.0.0.0:6443"))
+		},
+		// A loopback advertiseAddress does not identify this node to the rest of
+		// the cluster, so it must not be substituted for kubeadm's own detection.
+		// admin.conf naming a local proxy on 127.0.0.1 is the realistic case.
+		"loopback in the apiserver manifest": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "127.0.0.1:6443"))
+		},
+		"loopback in admin.conf": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "127.0.0.1:6443"))
+		},
+		"IPv6 loopback": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "'[::1]:6443'"))
+		},
+		"link-local": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "169.254.1.1:6443"))
+		},
+		"multicast": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "224.0.0.1:6443"))
+		},
+		"IPv4 broadcast": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "255.255.255.255:6443"))
+		},
+		"IPv4-mapped IPv6 loopback": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "'[::ffff:127.0.0.1]:6443'"))
+		},
+		"unparseable files": func(t *testing.T, root string) {
+			writeK8sFile(t, root, "manifests/kube-apiserver.yaml", ":::not yaml")
+			writeK8sFile(t, root, "admin.conf", ":::not yaml")
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			setup(t, root)
+			cfg := uploadCertsConfig(t, root)
+			if strings.Contains(cfg, "advertiseAddress") || strings.Contains(cfg, "bindPort") {
+				t.Fatalf("no usable IP: the API endpoint must be left to kubeadm, got:\n%s", cfg)
+			}
+			if !strings.Contains(cfg, "certificateKey:") {
+				t.Fatalf("transient config must still carry the certificate key, got:\n%s", cfg)
+			}
+		})
+	}
+}
+
+// An unusable address in the preferred source must not end the search: the
+// admin.conf fallback still has to be consulted.
+func TestUploadCerts_LoopbackManifestFallsBackToAdminConf(t *testing.T) {
+	root := t.TempDir()
+	writeK8sFile(t, root, "manifests/kube-apiserver.yaml", fmt.Sprintf(testAPIServerManifest, "127.0.0.1:6443"))
+	writeK8sFile(t, root, "admin.conf", fmt.Sprintf(testAdminConf, "10.10.0.7:6443"))
+
+	cfg := uploadCertsConfig(t, root)
+	if !strings.Contains(cfg, "advertiseAddress: 10.10.0.7") {
+		t.Fatalf("a loopback manifest annotation must fall through to admin.conf, got:\n%s", cfg)
+	}
+	if strings.Contains(cfg, "bindPort") {
+		t.Fatalf("the admin.conf port may be a load balancer's; bindPort must stay unset, got:\n%s", cfg)
+	}
+}
+
+// TestMintJoinMaterialFailureDeletesToken: a mint that fails after `token
+// create` must revoke the token it created, so it does not stay live for the
+// whole TTL with nobody holding it. A missing ca.crt must fail before any token
+// exists at all. Only the token ID goes on argv, never the secret.
+func TestMintJoinMaterialFailureDeletesToken(t *testing.T) {
+	const tok = "abcdef.0123456789abcdef"
+	writeCA := func(t *testing.T, root string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, "etc/kubernetes/pki"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "etc/kubernetes/pki/ca.crt"), selfSignedPEM(t), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name       string
+		withCA     bool
+		failOn     string // first two argv words joined by a space
+		wantCalls  []string
+		wantDelete bool
+	}{
+		{name: "ca.crt missing", withCA: false,
+			wantCalls: nil},
+		{name: "certificate-key fails", withCA: true, failOn: "certs certificate-key",
+			wantCalls: []string{"token create", "certs certificate-key", "token delete"}, wantDelete: true},
+		{name: "upload-certs fails", withCA: true, failOn: "init phase",
+			wantCalls: []string{"token create", "certs certificate-key", "init phase", "token delete"}, wantDelete: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tc.withCA {
+				writeCA(t, root)
+			}
+			var calls []string
+			var deleteArgs []string
+			rr := respondRunner{respond: func(args []string) (kubeadm.Result, error) {
+				verb := strings.Join(args[:2], " ")
+				calls = append(calls, verb)
+				if verb == "token delete" {
+					deleteArgs = args
+				}
+				if verb == tc.failOn {
+					return kubeadm.Result{}, fmt.Errorf("exit 1")
+				}
+				switch verb {
+				case "token create":
+					return kubeadm.Result{Stdout: tok + "\n"}, nil
+				case "certs certificate-key":
+					return kubeadm.Result{Stdout: strings.Repeat("a", 64) + "\n"}, nil
+				}
+				return kubeadm.Result{}, nil
+			}}
+			m := Minter{Runner: rr, RootPath: root, RunDir: t.TempDir()}
+
+			jm, err := m.MintJoinMaterial(context.Background(), true, time.Hour)
+			if err == nil || jm != nil {
+				t.Fatalf("expected a failed mint, got jm=%v err=%v", jm, err)
+			}
+			if strings.Join(calls, ",") != strings.Join(tc.wantCalls, ",") {
+				t.Fatalf("kubeadm calls = %q, want %q", calls, tc.wantCalls)
+			}
+			if !tc.wantDelete {
+				return
+			}
+			if len(deleteArgs) < 3 || deleteArgs[2] != "abcdef" {
+				t.Fatalf("token delete must name the token ID, got %q", deleteArgs)
+			}
+			if strings.Contains(strings.Join(deleteArgs, " "), "0123456789abcdef") {
+				t.Fatalf("token secret must not appear on argv: %q", deleteArgs)
+			}
+		})
+	}
+}

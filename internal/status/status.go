@@ -392,6 +392,23 @@ func MergeReportOnly(prev Status, existing bool, reason Reason, message, bootID,
 	return s, true
 }
 
+// BuildReconciling is the in-progress status Run writes before its first
+// kubeadm action, so a pass that takes minutes (init, join, an upgrade) is
+// visible as running rather than as nothing or the previous boot's result.
+// Outcome stays empty: the pass has neither succeeded nor failed yet. The
+// completion status from BuildStatus replaces it. Pure, like BuildStatus.
+func BuildReconciling(role actualstate.Role, membership actualstate.Membership, now, bootID, version string) Status {
+	return Status{
+		APIVersion: APIVersion,
+		Phase:      PhaseReconciling,
+		Role:       string(role),
+		Membership: string(membership),
+		UpdatedAt:  now,
+		BootID:     bootID,
+		Version:    version,
+	}
+}
+
 // degradedReason maps a degraded member verdict to its closed Reason and a
 // fixed operator message. Each verdict has its own reason because each needs
 // a different response: a stopped kubelet is investigated on the node, an
@@ -460,7 +477,7 @@ func deriveReason(a reconcile.Action, err error, result reconcile.RunResult) Rea
 		case reconcile.ActionRefuseUpgrade:
 			return ReasonUpgradeRefused
 		case reconcile.ActionRunJoin:
-			return ReasonJoinTimeout
+			return ReasonConfigInvalid
 		default:
 			return ReasonKubeadmError
 		}
@@ -469,9 +486,9 @@ func deriveReason(a reconcile.Action, err error, result reconcile.RunResult) Rea
 	// Budget exhaustion: the driver retried MaxAttempts times.
 	if result.BudgetExhausted {
 		switch a {
-		case reconcile.ActionWaitForControlPlane, reconcile.ActionRunJoin:
+		case reconcile.ActionWaitForControlPlane:
 			return ReasonControlPlaneUnreachable
-		case reconcile.ActionWaitForClusterUpgrade:
+		case reconcile.ActionRunJoin, reconcile.ActionWaitForClusterUpgrade:
 			return ReasonJoinTimeout
 		default:
 			return ReasonBudgetExhausted

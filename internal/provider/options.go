@@ -1,7 +1,11 @@
 package provider
 
 import (
+	"fmt"
+
 	"github.com/kairos-io/kairos-sdk/clusterplugin"
+
+	"github.com/kairos-io/provider-kubernetes/internal/reconcile/actualstate"
 )
 
 const (
@@ -47,18 +51,32 @@ type Context struct {
 	TokenWarning string
 }
 
+// rootPathSupported reports whether NewContext accepts a validated, cleaned
+// cluster_root_path. kubeadm init, join and upgrade write /etc/kubernetes and
+// /var/lib/kubelet on the host whatever the root is, so "/" is the only root
+// under which the prober, the join minter and reset find that state. Tests
+// swap it to run the pipeline against a temporary root.
+var rootPathSupported = func(root string) bool { return root == defaultRootPath }
+
 // NewContext parses and validates a Cluster into a provider Context. It fails
-// fast on invalid input (e.g. an empty/too-short cluster_token) so the provider
-// never proceeds on bad configuration.
+// fast on invalid input (e.g. an empty/too-short cluster_token, a role other
+// than init, controlplane or worker, or a cluster_root_path other than "/") so the provider never proceeds on bad
+// configuration.
 func NewContext(cluster clusterplugin.Cluster) (Context, error) {
 	warning, err := ValidateClusterToken(cluster.ClusterToken)
 	if err != nil {
+		return Context{}, err
+	}
+	if err := validateRole(cluster.Role); err != nil {
 		return Context{}, err
 	}
 
 	rootPath := defaultRootPath
 	if v := cluster.ProviderOptions[providerOptRootPathKey]; v != "" {
 		rootPath = v
+	}
+	if err := checkResetRoot(rootPath); err != nil {
+		return Context{}, err
 	}
 
 	return Context{
@@ -72,4 +90,16 @@ func NewContext(cluster clusterplugin.Cluster) (Context, error) {
 		ClusterConfigPath: cluster.ClusterConfigPath,
 		TokenWarning:      warning,
 	}, nil
+}
+
+// validateRole accepts only the exact role names the reconcile planner acts on.
+// Anything else (empty, "master", "control-plane", "Worker", ...) would plan no
+// action at all and leave the node looking converged.
+func validateRole(role clusterplugin.Role) error {
+	switch actualstate.Role(role) {
+	case actualstate.RoleInit, actualstate.RoleControlPlane, actualstate.RoleWorker:
+		return nil
+	}
+	return fmt.Errorf("unsupported cluster role %q: must be one of %q, %q or %q",
+		string(role), actualstate.RoleInit, actualstate.RoleControlPlane, actualstate.RoleWorker)
 }

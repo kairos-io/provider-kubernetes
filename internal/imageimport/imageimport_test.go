@@ -81,6 +81,8 @@ type fakeRunner struct {
 	mu      sync.Mutex
 	calls   []fakeRunCall
 	failFor map[string]string // tarball basename -> stderr to fail with
+	failErr error             // error returned for failFor entries; default "ctr images import failed"
+	waitCtx bool              // block until ctx is done, then fail with failErr
 }
 
 type fakeRunCall struct {
@@ -89,7 +91,7 @@ type fakeRunCall struct {
 	name   string
 }
 
-func (r *fakeRunner) RunStdin(_ context.Context, stdin *os.File, args ...string) (kubeadm.Result, error) {
+func (r *fakeRunner) RunStdin(ctx context.Context, stdin *os.File, args ...string) (kubeadm.Result, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -97,8 +99,16 @@ func (r *fakeRunner) RunStdin(_ context.Context, stdin *os.File, args ...string)
 	base := filepath.Base(stdin.Name())
 	r.calls = append(r.calls, fakeRunCall{args: append([]string{}, args...), devIno: [2]uint64{dev, ino}, name: base})
 
+	failErr := r.failErr
+	if failErr == nil {
+		failErr = errors.New("ctr images import failed")
+	}
+	if r.waitCtx {
+		<-ctx.Done()
+		return kubeadm.Result{}, failErr
+	}
 	if stderr, fail := r.failFor[base]; fail {
-		return kubeadm.Result{Stderr: stderr}, errors.New("ctr images import failed")
+		return kubeadm.Result{Stderr: stderr}, failErr
 	}
 	return kubeadm.Result{}, nil
 }
@@ -452,6 +462,98 @@ func TestDoImportCtrFailureIsSanitizedAndCapped(t *testing.T) {
 	}
 	if !strings.Contains(out, "reason=ctr-failed") || !strings.Contains(out, "[REDACTED-TOKEN]") {
 		t.Errorf("log output missing sanitized ctr-failed line:\n%s", out)
+	}
+}
+
+func TestDoImportRunFailureDetail(t *testing.T) {
+	ref := "registry.k8s.io/pause:3.10.2"
+	tb := tarballForRef(ref)
+
+	cases := []struct {
+		name       string
+		runner     *fakeRunner
+		timeout    time.Duration
+		wantReason Reason
+		wantDetail []string
+		notDetail  []string
+	}{
+		{
+			name:       "deadline hit while ctr runs",
+			runner:     &fakeRunner{waitCtx: true, failErr: errors.New("signal: killed")},
+			timeout:    20 * time.Millisecond,
+			wantReason: ReasonDeadline,
+			wantDetail: []string{"context deadline exceeded", "signal: killed"},
+		},
+		{
+			name: "ctr binary missing, empty stderr",
+			runner: &fakeRunner{
+				failFor: map[string]string{tb: ""},
+				failErr: errors.New("fork/exec /usr/bin/ctr: no such file or directory"),
+			},
+			wantReason: ReasonCtrFailed,
+			wantDetail: []string{"fork/exec /usr/bin/ctr: no such file or directory"},
+		},
+		{
+			name: "ctr stderr kept with the exit error",
+			runner: &fakeRunner{
+				failFor: map[string]string{tb: "ctr: content digest mismatch near token abcdef.0123456789abcdef\n"},
+				failErr: errors.New("exit status 1"),
+			},
+			wantReason: ReasonCtrFailed,
+			wantDetail: []string{"ctr: content digest mismatch", "[REDACTED-TOKEN]", "exit status 1"},
+			notDetail:  []string{"abcdef.0123456789abcdef"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lockBytes, dir := buildLockAndDir(t, []string{ref}, -1)
+			fb := &fakeBundle{lockData: lockBytes, dir: dir}
+			logs := captureLogs(t)
+
+			ctx := context.Background()
+			if tc.timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.timeout)
+				defer cancel()
+			}
+
+			res := doImport(ctx, tc.runner, false, func() (preparedBundle, error) { return fb, nil })
+
+			if res.Failed != 1 || res.Imported != 0 || res.Refused != 0 || res.Outcome != OutcomeFailed {
+				t.Fatalf("res = %+v", res)
+			}
+			if len(tc.runner.calls) != 1 {
+				t.Fatalf("want 1 RunStdin call, got %d", len(tc.runner.calls))
+			}
+
+			var line string
+			for _, m := range logs.messages {
+				if strings.HasPrefix(m, "image-import: failed ") {
+					line = m
+				}
+			}
+			if line == "" {
+				t.Fatalf("no failed line logged:\n%s", logs.joined())
+			}
+			if !strings.Contains(line, "reason="+string(tc.wantReason)+" ") {
+				t.Errorf("want reason=%s in %q", tc.wantReason, line)
+			}
+			if strings.Contains(line, `detail=""`) {
+				t.Errorf("detail is empty: %q", line)
+			}
+			for _, want := range tc.wantDetail {
+				if !strings.Contains(line, want) {
+					t.Errorf("detail missing %q: %q", want, line)
+				}
+			}
+			for _, bad := range tc.notDetail {
+				if strings.Contains(line, bad) {
+					t.Errorf("detail leaked %q: %q", bad, line)
+				}
+			}
+			assertSummaryIsLastLine(t, logs)
+		})
 	}
 }
 

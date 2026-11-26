@@ -1,6 +1,7 @@
 package securefile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,4 +95,119 @@ func TestSweepRunDirRemovesTransientFiles(t *testing.T) {
 func TestSweepRunDirNonExistentDir(t *testing.T) {
 	// Must not panic or fail.
 	SweepRunDir("/tmp/does-not-exist-sweep-test-12345")
+}
+
+func TestWriteTransientRemovesFileWhenWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	orig := writeContent
+	t.Cleanup(func() { writeContent = orig })
+	writeContent = func(f *os.File, content string) error {
+		// Write part of the content, then fail like a full tmpfs would.
+		_, _ = f.WriteString(content[:4])
+		return errors.New("no space left on device")
+	}
+
+	path, err := WriteTransient(dir, "secret: value\n")
+	if err == nil {
+		t.Fatal("expected an error when the write fails")
+	}
+	if path != "" {
+		t.Fatalf("expected an empty path on error, got %q", path)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no leftover files, found %d", len(entries))
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertContent(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if string(data) != want {
+		t.Fatalf("%s content changed: got %q, want %q", path, string(data), want)
+	}
+}
+
+func TestShredRemovesSymlinkWithoutTouchingTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target.conf")
+	writeFile(t, target, "placeholder-target-content")
+	link := filepath.Join(dir, "kubeadm-link.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	Shred(link)
+
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("expected symlink removed, lstat err=%v", err)
+	}
+	assertContent(t, target, "placeholder-target-content")
+}
+
+func TestShredLeavesDirectoryAlone(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "kubeadm-dir.yaml")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(dir, "inner")
+	writeFile(t, inner, "placeholder-inner-content")
+
+	Shred(dir)
+
+	assertContent(t, inner, "placeholder-inner-content")
+}
+
+func TestSweepRunDirOnlyMatchesTransientNames(t *testing.T) {
+	dir := t.TempDir()
+	transient := filepath.Join(dir, "kubeadm-x.yaml")
+	writeFile(t, transient, "placeholder-transient-content")
+	keep := map[string]string{
+		"kubeadmcfg.yaml":   "placeholder-kubeadmcfg",
+		"kubeadm-.yaml":     "placeholder-empty-random",
+		"kubeadm-x.yaml.bk": "placeholder-backup",
+		"kubeadm.yaml":      "placeholder-plain",
+	}
+	for name, content := range keep {
+		writeFile(t, filepath.Join(dir, name), content)
+	}
+
+	SweepRunDir(dir)
+
+	if _, err := os.Lstat(transient); !os.IsNotExist(err) {
+		t.Fatalf("expected %s removed, lstat err=%v", transient, err)
+	}
+	for name, content := range keep {
+		assertContent(t, filepath.Join(dir, name), content)
+	}
+}
+
+func TestSweepRunDirDoesNotFollowSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "kubeadmcfg.yaml")
+	writeFile(t, target, "placeholder-target-content")
+	link := filepath.Join(dir, "kubeadm-link.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	SweepRunDir(dir)
+
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("expected symlink removed, lstat err=%v", err)
+	}
+	assertContent(t, target, "placeholder-target-content")
 }

@@ -174,7 +174,7 @@ func (e *KubeadmExecutor) runInit(ctx context.Context) error {
 
 func (e *KubeadmExecutor) runJoin(ctx context.Context) error {
 	if e.Join == nil {
-		return fmt.Errorf("join requires delivered join material, but none was provided")
+		return fmt.Errorf("%w: join requires delivered join material, but none was provided", reconcile.ErrTerminal)
 	}
 
 	in := e.Input
@@ -234,9 +234,13 @@ func (e *KubeadmExecutor) waitForControlPlane(ctx context.Context) error {
 // waitForCPHealthy polls https://<endpoint>/readyz with a 5s per-probe timeout
 // until the CP reports healthy or ctx expires. This is the HA-4 bounded health
 // gate before a CP join. No distributed lock: the operator delivers one CP-join
-// cloud-config at a time (ADR-11 #4).
+// cloud-config at a time (ADR-11 #4). The endpoint is the one kubeadm join
+// dials: the join-scoped apiServerEndpoint when set, else controlPlaneEndpoint.
 func (e *KubeadmExecutor) waitForCPHealthy(ctx context.Context) error {
-	endpoint := e.Input.ControlPlaneEndpoint
+	endpoint := strings.TrimSpace(e.Input.JoinAPIServerEndpoint)
+	if endpoint == "" {
+		endpoint = e.Input.ControlPlaneEndpoint
+	}
 	if endpoint == "" {
 		// No endpoint configured; skip and let kubeadm report the error.
 		return nil

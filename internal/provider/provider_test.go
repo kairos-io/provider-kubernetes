@@ -88,9 +88,105 @@ func TestNewContextHonorsClusterRootPath(t *testing.T) {
 	}
 }
 
+func TestNewContextValidatesClusterRootPath(t *testing.T) {
+	cluster := func(root string) clusterplugin.Cluster {
+		return clusterplugin.Cluster{
+			Role:            clusterplugin.RoleInit,
+			ClusterToken:    validToken(),
+			ProviderOptions: map[string]string{"cluster_root_path": root},
+		}
+	}
+	for _, root := range []string{"relative/dir", "/srv/../etc", ".."} {
+		if _, err := NewContext(cluster(root)); err == nil {
+			t.Errorf("NewContext(cluster_root_path=%q): want an error, got nil", root)
+		}
+	}
+	for _, root := range []string{"/srv/k8s..root", "/srv/..hidden", "/"} {
+		ctx, err := NewContext(cluster(root))
+		if err != nil {
+			t.Errorf("NewContext(cluster_root_path=%q): unexpected error: %v", root, err)
+			continue
+		}
+		if ctx.RootPath != root {
+			t.Errorf("RootPath = %q, want %q", ctx.RootPath, root)
+		}
+	}
+}
+
+// TestNewContextAcceptsOnlyTheHostRoot runs the production root check that
+// TestMain relaxes: kubeadm writes the host's /etc/kubernetes whatever the
+// root is, so a root the prober would look under instead must be refused.
+func TestNewContextAcceptsOnlyTheHostRoot(t *testing.T) {
+	relaxed := rootPathSupported
+	rootPathSupported = productionRootPathSupported
+	t.Cleanup(func() { rootPathSupported = relaxed })
+
+	cluster := func(root string) clusterplugin.Cluster {
+		return clusterplugin.Cluster{
+			Role:            clusterplugin.RoleInit,
+			ClusterToken:    validToken(),
+			ProviderOptions: map[string]string{"cluster_root_path": root},
+		}
+	}
+	for _, root := range []string{"/persistent/root", "/srv/k8s..root", "/tmp"} {
+		_, err := NewContext(cluster(root))
+		if err == nil {
+			t.Errorf("NewContext(cluster_root_path=%q): want an error, got nil", root)
+			continue
+		}
+		if !strings.Contains(err.Error(), "cluster_root_path") {
+			t.Errorf("NewContext(cluster_root_path=%q): error %q does not name cluster_root_path", root, err)
+		}
+	}
+	for _, root := range []string{"", "/", "//", "/."} {
+		if _, err := NewContext(cluster(root)); err != nil {
+			t.Errorf("NewContext(cluster_root_path=%q): unexpected error: %v", root, err)
+		}
+	}
+}
+
 func TestNewContextRejectsBadToken(t *testing.T) {
 	if _, err := NewContext(clusterplugin.Cluster{Role: clusterplugin.RoleInit}); err == nil {
 		t.Fatal("expected error for empty cluster_token")
+	}
+}
+
+func TestNewContextValidatesRole(t *testing.T) {
+	tests := []struct {
+		role    clusterplugin.Role
+		wantErr bool
+	}{
+		{role: "init"},
+		{role: "controlplane"},
+		{role: "worker"},
+		{role: "", wantErr: true},
+		{role: "control-plane", wantErr: true},
+		{role: "master", wantErr: true},
+		{role: "Worker", wantErr: true},
+		{role: "INIT", wantErr: true},
+		{role: " worker", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.role), func(t *testing.T) {
+			ctx, err := NewContext(clusterplugin.Cluster{Role: tc.role, ClusterToken: validToken()})
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if ctx.Role != string(tc.role) {
+					t.Fatalf("Role = %q, want %q", ctx.Role, tc.role)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected an error for role %q", tc.role)
+			}
+			for _, valid := range []string{"init", "controlplane", "worker"} {
+				if !strings.Contains(err.Error(), valid) {
+					t.Errorf("error %q does not list valid role %q", err, valid)
+				}
+			}
+		})
 	}
 }
 
@@ -105,8 +201,37 @@ func TestProviderReturnsPromptlyAndNamed(t *testing.T) {
 	if bad.Name == "" {
 		t.Fatal("expected a named YipConfig on bad input")
 	}
-	if len(bad.Stages) != 0 {
-		t.Fatal("Provider must NOT emit stages on invalid input")
+	if len(bad.Stages[reconcileStageKey]) == 0 {
+		t.Fatal("Provider must emit a reconcile stage on invalid input so ConfigInvalid is recorded")
+	}
+}
+
+func TestProviderInvalidConfigEmitsReconcileOnly(t *testing.T) {
+	for name, c := range map[string]clusterplugin.Cluster{
+		"empty token": {Role: clusterplugin.RoleInit},
+		"short token": {Role: clusterplugin.RoleInit, ClusterToken: "short"},
+		"bad role":    {Role: "master", ClusterToken: validToken()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Provider(c)
+			stages := cfg.Stages[reconcileStageKey]
+			if len(stages) != 2 {
+				t.Fatalf("expected write + reconcile stages, got %+v", stages)
+			}
+			if len(stages[0].Files) != 1 || stages[0].Files[0].Path != ClusterStatePath || stages[0].Files[0].Permissions != 0o600 {
+				t.Fatalf("first stage must write %s at 0600, got %+v", ClusterStatePath, stages[0].Files)
+			}
+			if len(stages[1].Commands) != 1 || !strings.Contains(stages[1].Commands[0], ProviderBinaryPath+" reconcile --cluster-file="+ClusterStatePath) {
+				t.Fatalf("second stage must run reconcile, got %+v", stages[1].Commands)
+			}
+			for _, st := range stages {
+				for _, cmd := range st.Commands {
+					if strings.Contains(cmd, "import-images") {
+						t.Fatalf("invalid config must not import images: %q", cmd)
+					}
+				}
+			}
+		})
 	}
 }
 

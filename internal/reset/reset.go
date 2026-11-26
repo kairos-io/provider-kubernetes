@@ -63,7 +63,7 @@ type Options struct {
 // authoritativeArtifacts are the paths whose presence the actualstate prober
 // treats as cluster membership. Removing them makes the next boot read
 // "uninitialized" so the reconcile re-converges cleanly. Pre-condition: root is
-// already validated (absolute, no traversal) by validateRoot.
+// already validated (absolute, no traversal) by ValidateRoot.
 func authoritativeArtifacts(root string) []string {
 	return []string{
 		filepath.Join(root, "etc", "kubernetes"), // confs + pki (shreds CA key)
@@ -72,14 +72,20 @@ func authoritativeArtifacts(root string) []string {
 	}
 }
 
-// validateRoot enforces that RootPath is absolute, free of traversal segments,
+// ValidateRoot enforces that RootPath is absolute, free of traversal segments,
 // and cleaned. Empty -> "/" default (defense-in-depth: do not rely on callers).
-func validateRoot(root string) (string, error) {
+// Only a ".." path segment counts as traversal; a name that merely contains two
+// dots, such as "/srv/k8s..root", is a valid directory. The provider applies
+// the same check when it reads cluster_root_path, so a bad value fails at
+// configuration time instead of only when a reset runs.
+func ValidateRoot(root string) (string, error) {
 	if root == "" {
 		root = defaultRootPath
 	}
-	if strings.Contains(root, "..") {
-		return "", fmt.Errorf("reset: RootPath must not contain traversal segments: %q", root)
+	for _, seg := range strings.Split(root, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("reset: RootPath must not contain traversal segments: %q", root)
+		}
 	}
 	clean := filepath.Clean(root)
 	if !filepath.IsAbs(clean) {
@@ -156,7 +162,7 @@ func isStackedEtcdCP(root string) bool {
 // doubtful, or a line asking the operator to verify. No etcdctl is run. A sweep
 // of RunDir for leftover transient kubeadm-*.yaml files also runs.
 func Run(ctx context.Context, opts Options) error {
-	root, err := validateRoot(opts.RootPath)
+	root, err := ValidateRoot(opts.RootPath)
 	if err != nil {
 		return err
 	}

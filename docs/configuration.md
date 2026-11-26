@@ -49,9 +49,14 @@ role differs by node role:
 
 ### `providerConfig.cluster_root_path`
 
-Filesystem root the provider operates under (default `/`). It locates
-`etc/kubernetes/...`, `var/lib/kubelet`, etc. Honored everywhere, including the
-reset path, which validates it (absolute, no traversal) before removing artifacts.
+Filesystem root the provider reads `etc/kubernetes/...`, `var/lib/kubelet` and
+`var/lib/etcd` under (default `/`). Only `/` is supported: `kubeadm init`,
+`join` and `upgrade` always keep their state in the host's `/etc/kubernetes` and
+`/var/lib/kubelet`, so any other root would hide that state from the provider on
+the next boot. A value other than `/` is rejected when the config is read and
+recorded as `ConfigInvalid`. The value must also be absolute and must not
+contain a `..` segment; the reset path checks this again before it removes any
+artifact.
 
 ### `config:` - the kubeadm v1beta4 surface
 
@@ -116,8 +121,9 @@ Notes:
   `control_plane_host`; `mint-join` writes the same value in both places.
 - For a control-plane join, set `controlPlane.localAPIEndpoint.advertiseAddress`
   to the joining node's own routable IP, especially on multi-homed nodes. The
-  minting control plane cannot know it; `mint-join` leaves a placeholder you fill
-  in (or pass `--advertise-address`).
+  minting control plane cannot know it; `mint-join` leaves it empty, so kubeadm
+  uses the default-route interface, unless you fill it in (or pass
+  `--advertise-address`).
 - Token discovery **requires** `caCertHashes`; the provider refuses to emit a
   join config without a CA anchor and never sets `unsafeSkipCAVerification`.
 - `bindPort` defaults to kubeadm's 6443. If you move it, give

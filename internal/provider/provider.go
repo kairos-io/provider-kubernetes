@@ -36,10 +36,9 @@ const reconcileStageKey = "network.after"
 // reconciles the node to the desired role. Provider itself is side-effect-free
 // and returns promptly (#4099-1); the actual reconciliation runs later, inside
 // the reconcile subcommand the emitted stage invokes.
-// InertConfig returns the same inert, no-Stages configuration-error shape
-// Provider itself falls back to on validation failure (see the
-// "configuration error" / "serialization error" returns below), extended
-// with a reason string. It carries no Stages and therefore no Commands and
+// InertConfig returns the same inert, no-Stages shape Provider itself falls
+// back to when it cannot serialize the cluster (the "serialization error"
+// return below), extended with a reason string. It carries no Stages and therefore no Commands and
 // no cluster_token (S-D3-5, the D-3 / F-UKIBOOT security review, 2026-09-18):
 // the main.go wrapper composed around Provider returns this instead of the
 // real config when internal/clusterconfigdir finds the
@@ -54,24 +53,48 @@ func InertConfig(reason string) yip.YipConfig {
 
 func Provider(cluster clusterplugin.Cluster) yip.YipConfig {
 	// Validate input early so an invalid cluster never reaches the boot stage.
-	pctx, err := NewContext(cluster)
-	if err != nil {
-		logrus.Errorf("provider-kubernetes: invalid cluster configuration: %v", err)
-		return yip.YipConfig{Name: "provider-kubernetes (configuration error)"}
-	}
-	if pctx.TokenWarning != "" {
+	pctx, ctxErr := NewContext(cluster)
+	if ctxErr != nil {
+		logrus.Errorf("provider-kubernetes: invalid cluster configuration: %v", ctxErr)
+	} else if pctx.TokenWarning != "" {
 		logrus.Warnf("provider-kubernetes: %s", pctx.TokenWarning)
 	}
 
 	// Serialize the Cluster into a tmpfs path the reconcile subcommand reads.
 	// /run is tmpfs on every supported distro, so this file is wiped on reboot
 	// (OQ-7: no bootstrap secrets persisted across reboots). YAML (not JSON)
-	// because clusterplugin.Role's JSON unmarshal is broken in kairos-sdk v0.5.0
-	// (it preserves literal quotes); the SDK's primary tags are yaml anyway.
+	// because clusterplugin.Role's JSON unmarshal is broken (it does *n =
+	// Role(val) on the raw bytes, so "init" decodes to Role(`"init"`), quotes
+	// included); the SDK's primary tags are yaml anyway. Still broken as of
+	// kairos-sdk v0.25.3 -- clusterplugin is byte-identical to v0.5.0 -- so this
+	// is not a workaround that can be dropped on a bump.
 	clusterYAML, err := yaml.Marshal(cluster)
 	if err != nil {
 		logrus.Errorf("provider-kubernetes: serialize cluster: %v", err)
 		return yip.YipConfig{Name: "provider-kubernetes (serialization error)"}
+	}
+
+	writeState := yip.Stage{
+		Name: "provider-kubernetes: write cluster state",
+		Files: []yip.File{{
+			Path:        ClusterStatePath,
+			Permissions: 0o600,
+			Owner:       0,
+			Group:       0,
+			Content:     string(clusterYAML),
+		}},
+	}
+
+	if ctxErr != nil {
+		// Still run reconcile: it rejects the same config and records the
+		// Failed/ConfigInvalid status, which Provider cannot write itself
+		// without breaking its side-effect-free contract. No image import.
+		return yip.YipConfig{
+			Name: "provider-kubernetes (configuration error)",
+			Stages: map[string][]yip.Stage{
+				reconcileStageKey: {writeState, reconcileStage()},
+			},
+		}
 	}
 
 	logrus.Infof("provider-kubernetes: emitting %s stage for role %q", reconcileStageKey, pctx.Role)
@@ -79,16 +102,7 @@ func Provider(cluster clusterplugin.Cluster) yip.YipConfig {
 	return yip.YipConfig{
 		Name: "provider-kubernetes",
 		Stages: map[string][]yip.Stage{
-			reconcileStageKey: {{
-				Name: "provider-kubernetes: write cluster state",
-				Files: []yip.File{{
-					Path:        ClusterStatePath,
-					Permissions: 0o600,
-					Owner:       0,
-					Group:       0,
-					Content:     string(clusterYAML),
-				}},
-			}, {
+			reconcileStageKey: {writeState, {
 				Name: "provider-kubernetes: import pre-bundled images",
 				Commands: []string{
 					// ADR-16: import the pre-bundled control-plane images into
@@ -101,18 +115,22 @@ func Provider(cluster clusterplugin.Cluster) yip.YipConfig {
 					// continues to reconcile, which surfaces any missing image).
 					ProviderBinaryPath + " import-images >>" + ImportLogPath + " 2>&1 || true",
 				},
-			}, {
-				Name: "provider-kubernetes: reconcile",
-				Commands: []string{
-					// argv would be cleaner than a shell, but yip Commands run via
-					// /bin/sh -c. Each token is a literal path/flag (no operator
-					// data interpolated), so there is no shell-injection surface.
-					// stdout/stderr is sanitized by the kubeadm Runner before it
-					// reaches logs (ADR-2 secret hygiene).
-					ProviderBinaryPath + " reconcile --cluster-file=" + ClusterStatePath +
-						" >>" + ReconcileLogPath + " 2>&1",
-				},
-			}},
+			}, reconcileStage()},
+		},
+	}
+}
+
+func reconcileStage() yip.Stage {
+	return yip.Stage{
+		Name: "provider-kubernetes: reconcile",
+		Commands: []string{
+			// argv would be cleaner than a shell, but yip Commands run via
+			// /bin/sh -c. Each token is a literal path/flag (no operator
+			// data interpolated), so there is no shell-injection surface.
+			// stdout/stderr is sanitized by the kubeadm Runner before it
+			// reaches logs (ADR-2 secret hygiene).
+			ProviderBinaryPath + " reconcile --cluster-file=" + ClusterStatePath +
+				" >>" + ReconcileLogPath + " 2>&1",
 		},
 	}
 }

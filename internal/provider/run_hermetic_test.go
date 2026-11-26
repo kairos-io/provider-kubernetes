@@ -23,6 +23,11 @@ const productionStatusSinkGuard = "provider tests: Run built the production stat
 // host's kubectl against whatever API server it can reach. The guard panics
 // before either is built, failing the offending test by name.
 //
+// It lets NewContext accept any valid cluster_root_path, so the pipeline tests
+// can point the prober and the minter at a temporary root instead of the
+// host's /etc/kubernetes. The production check is kept in
+// productionRootPathSupported.
+//
 // It also shortens the control-plane grace period (controlplanehealth.go) for
 // the whole package, so a test that reaches the ControlPlaneUnhealthy path
 // without meaning to costs milliseconds, not three minutes. The production
@@ -31,10 +36,16 @@ func TestMain(m *testing.M) {
 	newDefaultStatusSink = func(string) (status.StatusSink, *status.NodeAnnotationSink) {
 		panic(productionStatusSinkGuard)
 	}
+	productionRootPathSupported = rootPathSupported
+	rootPathSupported = func(string) bool { return true }
 	productionControlPlaneGrace, productionControlPlanePoll = controlPlaneGrace, controlPlanePoll
 	controlPlaneGrace, controlPlanePoll = 300*time.Millisecond, 10*time.Millisecond
 	os.Exit(m.Run())
 }
+
+// productionRootPathSupported holds the package's real cluster_root_path
+// check, captured by TestMain before it relaxes it.
+var productionRootPathSupported func(string) bool
 
 // productionControlPlaneGrace and productionControlPlanePoll hold the
 // package's real values, captured by TestMain before it shortens them.
@@ -50,14 +61,21 @@ func (r *recordingSink) Record(_ context.Context, s status.Status) {
 	r.records = append(r.records, s)
 }
 
-// only returns the status Run recorded, failing the test unless exactly one was
-// recorded (ADR-4-S: every Run exit path records once).
+// only returns the completion status Run recorded, failing the test unless
+// exactly one was recorded (ADR-4-S: every Run exit path records once). The
+// in-progress Reconciling status written before the first action is skipped.
 func (r *recordingSink) only(t *testing.T) status.Status {
 	t.Helper()
-	if len(r.records) != 1 {
-		t.Fatalf("recorded %d statuses, want exactly 1: %+v", len(r.records), r.records)
+	var final []status.Status
+	for _, s := range r.records {
+		if s.Phase != status.PhaseReconciling {
+			final = append(final, s)
+		}
 	}
-	return r.records[0]
+	if len(final) != 1 {
+		t.Fatalf("recorded %d completion statuses, want exactly 1: %+v", len(final), r.records)
+	}
+	return final[0]
 }
 
 // hermeticRunOptions returns Run options that keep a test off the host: the

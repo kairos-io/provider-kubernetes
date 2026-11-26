@@ -322,8 +322,10 @@ booting the node, and never reuse a key across joins. See
 ### Pin/binary mismatch: version is a hard error
 
 `clusterConfiguration.kubernetesVersion` must be within the supported window and
-match the `kubeadm` binary in the image. A mismatch fails fast by design. Use the
-image tag for the minor you want, or adjust the pin. See
+match the minor of the `kubeadm` binary in the image. A minor mismatch fails fast
+by design. Use the image tag for the minor you want, or adjust the pin. A pin with
+only another patch is not an error: the node runs the bundled version and logs
+`pinned kubernetesVersion ... is replaced by the bundled kubeadm version ...`. See
 [Lifecycle](./lifecycle.md#supported-version-window).
 
 ### `fork/exec /usr/bin/<tool>: no such file or directory`
@@ -494,7 +496,7 @@ bundle as a whole (a directory, the provider binary used as the reference, or
 | `missing`, `symlink`, `not-regular`, `owner`, `mode`, `size` | The tarball (or, on a `bundle refused` line, `images.lock`) is absent, a symlink, not a regular file, not owned by root, writable by group or others, or outside the size limits. |
 | `device` | The file is not on the same filesystem as the provider binary, for example because something is bind-mounted over the bundle directory (including a `CUSTOM_BIND_MOUNTS` entry). |
 | `tar-structure`, `manifest`, `config-digest` | The tarball is not the expected image archive, names a different reference, or its image config does not match its name. |
-| `ctr-failed`, `deadline` | containerd rejected the import, or the 5 minute bound ran out. |
+| `ctr-failed`, `deadline` | `ctr` could not run or containerd rejected the import, or the 5 minute bound ran out. The `detail` carries the `ctr` error and its output. |
 
 Files in the bundle directory that are not in `images.lock` are never opened; they
 are reported as `unlisted`. The import never blocks boot. A refused image is not
@@ -520,7 +522,10 @@ read.
 
 - **Nothing happened after booting a newer image.** An upgrade runs only when you
   bump `clusterConfiguration.kubernetesVersion` to the new minor; a newer binary
-  alone is a no-op by design.
+  with no pin is a no-op by design.
+- **Every boot fails with `reason: ConfigInvalid` after booting a newer image.**
+  The old minor is still pinned. Set `clusterConfiguration.kubernetesVersion` to
+  the new minor (this starts the upgrade) or remove the pin.
 - **Reconcile logs `refuse-upgrade`.** The pin is a downgrade, skip-level
   (e.g. 1.35 -> 1.37), or out-of-window. Upgrade one minor at a time within the
   window.

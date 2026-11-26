@@ -51,10 +51,17 @@ func TestPlan(t *testing.T) {
 			wantVerdict: VerdictOK,
 		},
 		{
-			name:        "controlplane join when CP reachable",
+			name:        "controlplane join when CP reachable still passes the readyz gate",
 			desired:     actualstate.RoleControlPlane,
 			state:       actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: true},
-			want:        []Action{ActionRunJoin},
+			want:        []Action{ActionWaitForControlPlane, ActionRunJoin},
+			wantVerdict: VerdictOK,
+		},
+		{
+			name:        "controlplane waits for CP when unreachable",
+			desired:     actualstate.RoleControlPlane,
+			state:       actualstate.State{Membership: actualstate.Uninitialized, ControlPlaneReachable: false},
+			want:        []Action{ActionWaitForControlPlane, ActionRunJoin},
 			wantVerdict: VerdictOK,
 		},
 	}
@@ -325,10 +332,12 @@ func TestPlanUpgrade(t *testing.T) {
 			want:  []Action{ActionWaitForClusterUpgrade, ActionUpgradeNode},
 		},
 		{
-			name:    "worker broken kubelet -> repair, wait, node",
+			// #5802: kubelet-start fails on a joined worker, and upgrade node
+			// repairs the kubelet config itself, so there is no repair step.
+			name:    "worker broken kubelet -> wait, node (no repair)",
 			desired: actualstate.RoleWorker, target: t135,
 			state: actualstate.State{Membership: actualstate.Joined, KubeletHealthy: false, ClusterVersion: t135, RunningKubeletVersion: "v1.34.8"},
-			want:  []Action{ActionRepairKubeletConfig, ActionWaitForClusterUpgrade, ActionUpgradeNode},
+			want:  []Action{ActionWaitForClusterUpgrade, ActionUpgradeNode},
 		},
 		{
 			name:    "worker converged -> no-op",

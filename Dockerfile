@@ -37,14 +37,26 @@
 # right manifest. When bumping a tag, re-resolve the digest
 # (docker buildx imagetools inspect <image:tag>) and update both here and in the
 # Makefile defaults that override these ARGs.
-ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.4.0@sha256:1e19d9cd5a70dfc6940f58d899e72f6776f4d64934cd6f402f4a4186ccc40d4d
-# kairos-init that matches the version Kairos itself uses to build Hadron. Older
-# pins (e.g. v0.6.0) cannot regenerate Hadron's initramfs (dracut -f ... fails).
-ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v0.14.6@sha256:e53eb7e5ada035e7e192f072f9e041ca5d60440ecf8c766c32e7d95253b293e7
+ARG KAIROS_BASE_IMAGE=ghcr.io/kairos-io/hadron:v0.6.3@sha256:a5a4722531411b7dec68f5e2dae2ecd777616f6ca459f6e712ff492dfbf3410e
+# kairos-init must be the one Kairos itself pairs with this Hadron: a kairos-init
+# older than its base cannot regenerate the initramfs (dracut -f ... fails).
+# This pair is NOT "newest of each" -- it is the pair upstream actually ships.
+# Hadron auto-releases twice a week and runs ahead of Kairos, so resolve the base
+# from the Kairos release instead of taking the newest Hadron tag:
+#   quay.io/kairos/hadron:<hadron>-core-amd64-generic-<kairos-tag>
+# (see kairos-io/kairos .github/public-cloud/resolve-hadron-container-image.sh).
+# Kairos v4.5.2, v4.5.0 and v4.4.0 all resolve to Hadron v0.6.3.
+# NOTE kairos-init's numbering: it moved into the kairos monorepo and now shares
+# the Kairos release version (v4.x). kairos-io/kairos-init is ARCHIVED, its 0.x
+# line ending at v0.17.3 -- do not follow that line.
+ARG KAIROS_INIT_IMAGE=quay.io/kairos/kairos-init:v4.5.2@sha256:7de7999e8b8a3d80820968143609ea473da29ede14ff41a3579ea80f5418be3f
 # Provider toolchain: its tag MUST match the go.mod `go` directive (enforced by
 # `make verify-pins`), so the image build never drifts from CI.
-ARG GO_BUILDER_IMAGE=golang:1.27.1-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125
-ARG TARGETARCH=amd64
+ARG GO_BUILDER_IMAGE=golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
+# TARGETARCH is BuildKit's automatic platform arg. It MUST NOT get a default:
+# a default overrides the --platform value, and an arm64 build would then fetch
+# and build amd64 Kubernetes binaries.
+ARG TARGETARCH
 
 # containerd and kubelet are ALWAYS built fully static from source: Hadron is
 # musl, so the glibc-linked official releases cannot exec. A fully static binary
@@ -56,7 +68,7 @@ ARG TARGETARCH=amd64
 # latest patch, rather than the provider's Go: kubelet is upstream code, so it is
 # compiled with the toolchain upstream qualifies it against. Move it to a newer
 # Go minor only once upstream release branches do.
-ARG STATIC_BUILDER_IMAGE=golang:1.26.8@sha256:3c3e25a4da13fd0478eed2df1eb35a0e667094a7124d3993a6a1d30f71c17e79
+ARG STATIC_BUILDER_IMAGE=golang:1.26.11@sha256:6e59e17a20f13c102e49d82dffab66d41cffe6c266b225d82794328aea859ab5
 
 # Kubernetes (must be within the supported window the provider enforces at
 # runtime: 1.35 / 1.36 / 1.37 as of September 2026).
@@ -74,9 +86,9 @@ ARG CONTAINERD_VERSION=2.3.5
 # the static from-source containerd build).
 ARG CONTAINERD_COMMIT=1294c24a7da8e5a793ed378161673abe94118892
 # renovate: datasource=github-releases depName=opencontainers/runc
-ARG RUNC_VERSION=v1.5.1
+ARG RUNC_VERSION=v1.5.3
 # renovate: datasource=github-releases depName=containernetworking/plugins
-ARG CNI_PLUGINS_VERSION=v1.9.1
+ARG CNI_PLUGINS_VERSION=v1.10.0
 ARG CRICTL_VERSION=v1.37.0
 
 # Provider build version (injected into the binary via -ldflags).
@@ -113,7 +125,7 @@ RUN go build \
 # kubeadm/kubectl/crictl are already static and run on musl unchanged. kubelet is
 # NOT downloaded here -- it is built static from source (see kubelet-build).
 # ----------------------------------------------------------------------------
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS k8s-binaries
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a AS k8s-binaries
 ARG KUBERNETES_VERSION
 ARG CRICTL_VERSION
 ARG TARGETARCH
@@ -156,7 +168,7 @@ RUN set -eu; \
 # (runc, CNI). containerd is built static from source (see containerd-build);
 # runc and the CNI plugins are already static and run on musl unchanged.
 # ----------------------------------------------------------------------------
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS runtime-binaries
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a AS runtime-binaries
 ARG RUNC_VERSION
 ARG CNI_PLUGINS_VERSION
 ARG TARGETARCH
@@ -308,15 +320,15 @@ RUN set -eux; \
 # TARGETARCH is passed explicitly: crane pull selects that platform from each
 # verified multi-arch index (crane's implicit default is linux/amd64).
 # ----------------------------------------------------------------------------
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS image-bundler
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a AS image-bundler
 ARG KUBERNETES_VERSION
 ARG TARGETARCH
 # crane + cosign are static Go binaries that run on musl; both are version-pinned
 # and checksum-verified at install, matching the rest of the binary supply chain.
 # renovate: datasource=github-releases depName=google/go-containerregistry
-ARG CRANE_VERSION=v0.20.3
+ARG CRANE_VERSION=v0.22.1
 # renovate: datasource=github-releases depName=sigstore/cosign
-ARG COSIGN_VERSION=v2.6.5
+ARG COSIGN_VERSION=v3.1.4
 RUN apk add --no-cache curl ca-certificates
 COPY --from=k8s-binaries /bin/kubeadm /usr/bin/kubeadm
 # Install crane (checksum-verified against the release checksums.txt).
@@ -617,9 +629,10 @@ RUN echo "BUNDLED_KUBERNETES_VERSION=${KUBERNETES_VERSION}" >> /etc/os-release
 # wires the installer machinery; without it kairos-installer.service exits 1 and
 # auto-install does not fire on the LiveCD.
 #
-# kairos-init's --version is strict semver. PROVIDER_VERSION can be a git SHA or
-# 'dev', so we lift it into a synthesized semver (the SHA/string is preserved as
-# semver build metadata after '+').
+# kairos-init's --version is strict semver. A release passes its tag (v0.4.0),
+# which is used as is so KAIROS_VERSION reports the release. Anything else (a
+# git SHA, 'dev') is lifted into a synthesized semver, with the SHA/string kept
+# as semver build metadata after '+'.
 ARG PROVIDER_VERSION
 # OCI provenance: links the published package back to the repo + records the
 # provider/Kubernetes versions baked in. Applied to every build (local, CI, release).
@@ -629,7 +642,24 @@ LABEL org.opencontainers.image.source="https://github.com/kairos-io/provider-kub
       org.opencontainers.image.licenses="Apache-2.0"
 RUN --mount=type=bind,from=kairos-init,src=/kairos-init,dst=/kairos-init \
     set -eux; \
-    sanitized=$(printf '%s' "${PROVIDER_VERSION}" | tr -c 'A-Za-z0-9-' '-' | sed 's/^-*//; s/-*$//'); \
-    image_version="v0.0.0-dev+${sanitized:-unset}"; \
+    semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; \
+    if printf '%s' "${PROVIDER_VERSION}" | grep -Eq "${semver}"; then \
+      image_version="${PROVIDER_VERSION}"; \
+    else \
+      sanitized=$(printf '%s' "${PROVIDER_VERSION}" | tr -c 'A-Za-z0-9-' '-' | sed 's/^-*//; s/-*$//'); \
+      image_version="v0.0.0-dev+${sanitized:-unset}"; \
+    fi; \
     /kairos-init -l debug -s install -m generic -t false --version "${image_version}"; \
     /kairos-init -l debug -s init    -m generic -t false --version "${image_version}"
+
+# Provenance labels the Hadron base would otherwise leak into this image: its
+# revision, created, title and url point at kairos-io/hadron, so set our own.
+# They come last so a new commit or build date does not invalidate the
+# kairos-init layer above. An unset PROVIDER_REVISION/BUILD_DATE leaves the
+# label empty rather than inheriting Hadron's value.
+ARG PROVIDER_REVISION=""
+ARG BUILD_DATE=""
+LABEL org.opencontainers.image.revision="${PROVIDER_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.title="provider-kubernetes" \
+      org.opencontainers.image.url="https://github.com/kairos-io/provider-kubernetes"

@@ -39,15 +39,17 @@ import (
 	"github.com/kairos-io/provider-kubernetes/version"
 )
 
-// eventInitProviderInfo is the event emitted by kairos-init (v0.14+) to discover
-// the provider name and version during the image build phase.
-// Defined locally because kairos-sdk v0.5.0 does not yet expose this constant;
-// the value must match the string used by kairos-init / kairos-sdk >=v0.17.
+// eventInitProviderInfo is the event emitted by kairos-init to discover the
+// provider name and version during the image build phase. kairos-sdk v0.25.3
+// exposes this as bus.InitProviderInfo; the local constant is kept so this
+// wiring reads in one place, and TestEventInitProviderInfoMatchesSDK fails if
+// the two ever diverge.
 const eventInitProviderInfo pluggable.EventType = "init.provider.info"
 
-// providerInfoPayload mirrors the bus.ProviderInstalledVersionPayload from
-// kairos-sdk >=v0.17. kairos-init unmarshals resp.Data into this type.
-// Fields must remain JSON-tagged exactly as the upstream struct.
+// providerInfoPayload mirrors bus.ProviderInstalledVersionPayload, which
+// kairos-init unmarshals resp.Data into. Fields must stay JSON-tagged exactly
+// as the upstream struct; TestProviderInfoPayloadMatchesSDK enforces that
+// against the real SDK type by reflection and by comparing serialized JSON.
 type providerInfoPayload struct {
 	Provider string `json:"provider"`
 	Version  string `json:"version"`
@@ -81,7 +83,7 @@ func handleProviderInfo(_ *pluggable.Event) pluggable.EventResponse {
 // wrapProvider is the D-3 / F-UKIBOOT fix's seam (S-D3-1, security review
 // 2026-09-18). It composes ensure (production: clusterconfigdir.Ensure) with
 // next (production: provider.Provider) into the single
-// clusterplugin.ClusterProvider kairos-sdk@v0.5.0's ClusterPlugin.Run calls.
+// clusterplugin.ClusterProvider kairos-sdk@v0.25.3's ClusterPlugin.Run calls.
 // That call happens inside clusterplugin.ClusterPlugin.onBoot
 // (clusterplugin/plugin.go:50), strictly AFTER the boot payload is parsed and
 // config.Cluster is confirmed non-nil, and strictly BEFORE the SDK's own
@@ -214,6 +216,19 @@ func runMintJoin(args []string) int {
 	if roleNorm != "worker" && roleNorm != "controlplane" {
 		fmt.Fprintf(os.Stderr, "role must be worker or controlplane, got %q\n", *role)
 		return 2
+	}
+	// Check the cluster_token before minting, so a value the joining node would
+	// refuse at boot does not leave a bootstrap token behind. Empty is allowed:
+	// the rendered config then carries a placeholder to fill in.
+	if tok := strings.TrimSpace(*clusterToken); tok != "" {
+		warning, err := provider.ValidateClusterToken(tok)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		if warning != "" {
+			fmt.Fprintln(os.Stderr, "warning:", warning)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

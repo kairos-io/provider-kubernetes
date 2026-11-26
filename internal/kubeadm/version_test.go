@@ -51,11 +51,14 @@ func TestResolve(t *testing.T) {
 		pinned    string
 		want      string
 		wantError bool
+		// wantMsg, when set, must appear in the error.
+		wantMsg string
 	}{
 		{name: "supported no pin", detected: "v1.35.2", want: "v1.35.2"},
 		{name: "supported matching pin", detected: "v1.36.0", pinned: "v1.36.3", want: "v1.36.0"},
 		{name: "newest minor supported", detected: "v1.37.0", want: "v1.37.0"},
-		{name: "pin minor mismatch", detected: "v1.35.2", pinned: "v1.36.0", wantError: true},
+		{name: "pin minor mismatch", detected: "v1.35.2", pinned: "v1.36.0", wantError: true,
+			wantMsg: "set clusterConfiguration.kubernetesVersion to v1.35.2 or remove the pin"},
 		{name: "detected dropped minor 1.34", detected: "v1.34.11", wantError: true},
 		{name: "detected out of window", detected: "v1.30.0", wantError: true},
 		{name: "detected invalid", detected: "nope", wantError: true},
@@ -67,6 +70,9 @@ func TestResolve(t *testing.T) {
 			if tt.wantError {
 				if err == nil {
 					t.Fatalf("expected error, got nil (result %q)", got)
+				}
+				if tt.wantMsg != "" && !strings.Contains(err.Error(), tt.wantMsg) {
+					t.Fatalf("error %q does not contain %q", err, tt.wantMsg)
 				}
 				return
 			}
@@ -171,6 +177,28 @@ func TestUpgradePath(t *testing.T) {
 			}
 			if d.Due && d.Target != c.wantTgt {
 				t.Fatalf("Target = %q, want %q", d.Target, c.wantTgt)
+			}
+		})
+	}
+}
+
+func TestPinReplacedNote(t *testing.T) {
+	tests := []struct {
+		name, pinned, resolved string
+		wantNote               bool
+	}{
+		{name: "no pin", resolved: "v1.37.2"},
+		{name: "pin equals binary", pinned: "v1.37.2", resolved: "v1.37.2"},
+		{name: "pin with another patch", pinned: "v1.37.0", resolved: "v1.37.2", wantNote: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			note := PinReplacedNote(tt.pinned, tt.resolved)
+			if (note != "") != tt.wantNote {
+				t.Fatalf("PinReplacedNote(%q, %q) = %q, want note=%v", tt.pinned, tt.resolved, note, tt.wantNote)
+			}
+			if tt.wantNote && (!strings.Contains(note, tt.pinned) || !strings.Contains(note, tt.resolved)) {
+				t.Fatalf("note %q must name both %s and %s", note, tt.pinned, tt.resolved)
 			}
 		})
 	}

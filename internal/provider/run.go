@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -98,7 +99,9 @@ type Options struct {
 // work is bounded by the reconcile Budget (issue #4099-1).
 //
 // Every return path (success AND failure) records a structured status to the
-// Layer-1 local channel (ADR-4-S, S4). The status write is best-effort: it is
+// Layer-1 local channel (ADR-4-S, S4). A pass that runs any action other than
+// the converged no-op records a Reconciling status first, which that final
+// status replaces. The status write is best-effort: it is
 // bounded to 2s per path, errors are logged and swallowed, and the real reconcile
 // exit code is never masked.
 func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error {
@@ -151,21 +154,31 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 		// suppress a would-be Converged status, never mask a real error --
 		// BuildStatus only consults it on the p.Err == nil path.
 		finalVerdict reconcile.Verdict
+		// finalConfigInvalid marks a failure the operator's config caused, found
+		// before any retry budget was spent, so the status says ConfigInvalid
+		// (terminal) instead of a generic KubeadmError or BudgetExhausted.
+		finalConfigInvalid bool
 	)
+	configInvalid := func(err error) error {
+		finalErr = err
+		finalConfigInvalid = true
+		return err
+	}
 	// Defer record-then-return: runs exactly once on every exit path.
 	defer func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		sink.Record(sctx, status.BuildStatus(status.BuildParams{
-			Role:       role,
-			Membership: finalState.Membership,
-			LastAction: finalLastAction,
-			Err:        finalErr,
-			Result:     finalResult,
-			Verdict:    finalVerdict,
-			Now:        time.Now().UTC().Format(time.RFC3339),
-			BootID:     bootID,
-			Version:    providerVersion,
+			Role:          role,
+			Membership:    finalState.Membership,
+			LastAction:    finalLastAction,
+			Err:           finalErr,
+			Result:        finalResult,
+			Verdict:       finalVerdict,
+			ConfigInvalid: finalConfigInvalid,
+			Now:           time.Now().UTC().Format(time.RFC3339),
+			BootID:        bootID,
+			Version:       providerVersion,
 		}))
 	}()
 
@@ -176,18 +189,29 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	}
 	uc, err := ParseUserConfig(pctx.UserOptions)
 	if err != nil {
-		finalErr = err
-		return err
+		return configInvalid(err)
 	}
-	resolved, err := kubeadm.Resolve(detected, uc.ClusterConfiguration.KubernetesVersion)
+	resolved, err := kubeadm.Resolve(detected, "")
 	if err != nil {
 		finalErr = err
 		return err
+	}
+	// The binary alone resolves, so a failure now comes from the pin.
+	if pin := uc.ClusterConfiguration.KubernetesVersion; pin != "" {
+		if resolved, err = kubeadm.Resolve(detected, pin); err != nil {
+			return configInvalid(err)
+		}
 	}
 	in, endpointWarn, err := BuildInput(pctx, uc, resolved)
 	if err != nil {
-		finalErr = err
-		return err
+		return configInvalid(err)
+	}
+	// Init and the kubelet-config repair pin clusterDNS from serviceSubnet; a
+	// subnet too small to hold it fails every attempt the same way.
+	if role == actualstate.RoleInit || role == actualstate.RoleControlPlane {
+		if _, err := kubeadmconfig.BuildKubeletConfiguration(in); err != nil {
+			return configInvalid(err)
+		}
 	}
 	// Finding D: wire the kubeadm NodeRegistration.Name into the annotation sink
 	// now that BuildInput has resolved it. The deferred sink.Record (and any
@@ -200,6 +224,9 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	// HA-1: log any non-fatal endpoint advisory returned by BuildInput.
 	if endpointWarn != "" {
 		logrus.Warnf("provider-kubernetes: %s", endpointWarn)
+	}
+	if note := kubeadm.PinReplacedNote(uc.ClusterConfiguration.KubernetesVersion, resolved); note != "" {
+		logrus.Warnf("provider-kubernetes: %s", note)
 	}
 
 	// HA-3: inject a bounded CP reachability probe for all roles, including init,
@@ -310,8 +337,11 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	var join *credential.JoinMaterial
 	if role == actualstate.RoleWorker || role == actualstate.RoleControlPlane {
 		if join, err = BuildJoinMaterial(pctx, uc); err != nil {
-			finalErr = err
-			return err
+			return configInvalid(err)
+		}
+		if join == nil && slices.Contains(actions, reconcile.ActionRunJoin) {
+			return configInvalid(fmt.Errorf("role %s must join the cluster, but no join material was provided "+
+				"(set joinConfiguration.discovery.bootstrapToken or joinConfiguration.discovery.file)", role))
 		}
 	}
 
@@ -357,6 +387,13 @@ func Run(ctx context.Context, cluster clusterplugin.Cluster, opts Options) error
 	}
 
 	logrus.Infof("provider-kubernetes: reconciling role=%q membership=%q actions=%v", role, state.Membership, actions)
+	// The converged fast path (a lone ActionNone) finishes at once; anything
+	// else may run kubeadm for minutes, so say the pass is in progress first.
+	if len(actions) != 1 || actions[0] != reconcile.ActionNone {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sink.Record(sctx, status.BuildReconciling(role, state.Membership, time.Now().UTC().Format(time.RFC3339), bootID, providerVersion))
+		cancel()
+	}
 	reconciler := reconcile.Reconciler{Budget: budget, Exec: exec}
 	result, reconcileErr := reconciler.RunWithResult(ctx, actions)
 	finalResult = result
