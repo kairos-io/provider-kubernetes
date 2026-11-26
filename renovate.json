@@ -137,7 +137,7 @@
       "matchCurrentValue": "/-alpine$/"
     },
     {
-      "description": "STATIC_BUILDER_IMAGE (plain golang tag) compiles upstream kubelet and containerd and tracks the Go minor upstream Kubernetes builds with: take patches only, move minors by hand (the kubelet-build stage fails if upstream's .go-version is newer).",
+      "description": "STATIC_BUILDER_IMAGE (plain golang tag) compiles upstream kubelet and containerd and tracks the Go minor upstream Kubernetes builds with: take patches only, move minors by hand (the kubelet-build stage fails if upstream's .go-version is newer). separateMinorPatch is REQUIRED for that to work: without it Renovate collapses the golang image to its newest version only, which is a newer MINOR that this rule disables, so the 1.26.x patch stream is never offered at all. That is how Go 1.26.11 arrived as a red image build on every PR instead of as a routine patch PR -- upstream moved .go-version to 1.26.11 on release-1.35, -1.36 and -1.37 while this stayed on 1.26.10.",
       "matchDatasources": [
         "docker"
       ],
@@ -145,6 +145,7 @@
         "golang"
       ],
       "matchCurrentValue": "/^\\d+\\.\\d+\\.\\d+$/",
+      "separateMinorPatch": true,
       "matchUpdateTypes": [
         "major",
         "minor"
