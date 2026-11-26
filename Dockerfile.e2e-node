@@ -34,8 +34,9 @@ ENV container=docker
 
 # --- kind systemd-in-container tweaks -------------------------------------
 # 1. Mask units that are meaningless or harmful inside a container (they try to
-#    touch real hardware / the host kernel and would fail or hang). This is the
-#    same set kind masks in its node image entrypoint.
+#    touch real hardware / the host kernel and would fail or hang). This started
+#    as the set kind masks in its node image entrypoint, plus the audit units
+#    below, which kind does not need because it does not ship auditd.
 # 2. Ensure the journal goes to a writable location and systemd does not try to
 #    set up a separate cgroup hierarchy (we run cgroup v2 unified, delegated).
 #
@@ -55,11 +56,35 @@ RUN set -eux; \
       sys-kernel-config.mount \
       sys-kernel-debug.mount \
       sys-kernel-tracing.mount \
-      systemd-journald-audit.socket ; do \
+      systemd-journald-audit.socket \
+      auditd.service \
+      audit-rules.service ; do \
         systemctl mask "$unit" || true; \
     done; \
     # Do not let getty/console units spin.
     systemctl mask getty.target console-getty.service || true
+
+# Why auditd.service and audit-rules.service are masked above (R-E2E-CONTAINERD).
+# The kernel audit subsystem is host-global, so a container cannot enable it:
+# auditd logs "Unable to set initial audit startup state to 'enable', exiting",
+# and has been seen to segfault. On most boots it fails fast and nothing notices
+# -- a healthy e2e node reports auditd.service and audit-rules.service in
+# `systemctl list-units --state=failed` while containerd runs normally.
+#
+# Intermittently it does NOT fail fast. It hangs for its whole TimeoutStartSec
+# and systemd logs "auditd.service: start operation timed out. Terminating.",
+# and containerd's start job sits queued behind it for that window. That is what
+# made `waitFor("containerd admin API ready", 90s)` in test/e2e/nodecontainer.go
+# time out on a container whose containerd journal was "-- No entries --":
+# containerd had never been started, so it was never slow. It cost roughly one
+# e2e leg in three, on a different Kubernetes minor each time.
+#
+# Masking is the fix rather than a larger readiness budget, because the units can
+# never do anything useful here and already fail on every boot. Deliberately NOT
+# masked: systemd-networkd-wait-online.service, which also shows up failed. It is
+# a wait-online unit, so masking it would let network-online.target be reached
+# immediately and could start containerd or the kubelet before networking is
+# ready -- trading this flake for a subtler one.
 
 # The kubelet must not be gated on swap; kind passes failSwapOn=false via the
 # kubelet config. kubeadm in the supported window handles swap by default, but a privileged

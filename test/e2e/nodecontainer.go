@@ -199,8 +199,8 @@ func startNode(t *testing.T, name string) *nodeContainer {
 	return nc
 }
 
-// diagTimeout caps each diagnostic source. Four sources, so a failing container
-// adds at most ~1m to teardown instead of 4x dockerTimeout (principle 4).
+// diagTimeout caps each diagnostic source. Five sources, so a failing container
+// adds at most ~75s to teardown instead of 5x dockerTimeout (principle 4).
 const diagTimeout = 15 * time.Second
 
 // diagSource is one thing we try to read off a failed container.
@@ -209,8 +209,15 @@ type diagSource struct {
 	args  []string // argv; "logs"/"exec" is the first element
 }
 
-// diagSources is ordered most-specific first: the units that failed, then the
-// unit most node starts wait on, then the boot log, then PID 1's own output.
+// diagSources is ordered most-specific first: what is still queued, then the
+// units that failed, then the unit most node starts wait on, then the boot log,
+// then PID 1's own output.
+//
+// "queued jobs" leads because a readiness wait that times out usually means the
+// unit never STARTED rather than started slowly, and list-jobs is the only source
+// that names what it is waiting behind. R-E2E-CONTAINERD had to be inferred from
+// an empty containerd journal plus an auditd timeout buried in the boot log;
+// list-jobs would have shown containerd queued behind auditd.service directly.
 //
 // docker logs alone is NOT enough and was the original bug here: these
 // containers run /sbin/init, so systemd logs to the journal and docker logs --
@@ -219,6 +226,7 @@ type diagSource struct {
 // that still works when systemd itself never started.
 func diagSources(id string) []diagSource {
 	return []diagSource{
+		{"queued jobs", []string{"exec", id, "systemctl", "--no-pager", "--no-legend", "list-jobs"}},
 		{"failed units", []string{"exec", id, "systemctl", "--no-pager", "--no-legend", "list-units", "--state=failed"}},
 		{"containerd journal", []string{"exec", id, "journalctl", "--no-pager", "-u", "containerd", "-n", "100"}},
 		{"boot journal tail", []string{"exec", id, "journalctl", "--no-pager", "-b", "-n", "150"}},
