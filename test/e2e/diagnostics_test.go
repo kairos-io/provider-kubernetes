@@ -92,6 +92,7 @@ func TestDiagSourcesCoverTheJournalAndPID1(t *testing.T) {
 
 	var labels []string
 	journalBefore, sawDockerLogs, sawContainerdUnit := false, false, false
+	sawQueuedJobs := false
 	for i, s := range srcs {
 		labels = append(labels, s.label)
 		if s.label == "" {
@@ -113,6 +114,9 @@ func TestDiagSourcesCoverTheJournalAndPID1(t *testing.T) {
 			if strings.Contains(joined, "journalctl") && strings.Contains(joined, "-u containerd") {
 				sawContainerdUnit = true
 			}
+			if strings.Contains(joined, "list-jobs") {
+				sawQueuedJobs = true
+			}
 		case "logs":
 			sawDockerLogs = true
 			if s.args[len(s.args)-1] != "deadbeef" {
@@ -130,6 +134,10 @@ func TestDiagSourcesCoverTheJournalAndPID1(t *testing.T) {
 		}
 	}
 
+	if !sawQueuedJobs {
+		t.Errorf("no source runs `systemctl list-jobs`; a readiness timeout usually means the unit never\n"+
+			"started, and list-jobs is the only source that names what it is queued behind\nlabels: %v", labels)
+	}
 	if !sawContainerdUnit {
 		t.Errorf("no source reads the containerd unit journal; that is the wait that times out\nlabels: %v", labels)
 	}
