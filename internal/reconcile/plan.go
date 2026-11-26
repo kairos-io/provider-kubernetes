@@ -135,7 +135,11 @@ func Plan(desired actualstate.Role, target string, s actualstate.State) ([]Actio
 
 	case actualstate.RoleControlPlane, actualstate.RoleWorker:
 		if s.Membership == actualstate.Uninitialized {
-			if !s.ControlPlaneReachable {
+			// HA-4: a control-plane join always passes the bounded /readyz gate
+			// in ActionWaitForControlPlane. The reachability probe only needs
+			// /version to answer, which it still does when /readyz fails (etcd
+			// quorum lost), so a reachable endpoint must not skip the gate.
+			if !s.ControlPlaneReachable || desired == actualstate.RoleControlPlane {
 				return []Action{ActionWaitForControlPlane, ActionRunJoin}, VerdictOK
 			}
 			return []Action{ActionRunJoin}, VerdictOK
