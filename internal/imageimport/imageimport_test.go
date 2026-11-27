@@ -115,20 +115,18 @@ func (r *fakeRunner) RunStdin(ctx context.Context, stdin *os.File, args ...strin
 
 // --- test infra: build a valid tar for a ref, capture logrus output ---
 
-// tarBytesForRef builds a minimal, valid three-member docker-save tarball
-// (config, one layer, manifest.json) naming ref, reusing tarcheck_test.go's
-// buildTar/tarMember/sha256Hex helpers (same package).
+// tarBytesForRef builds a minimal, valid canonical-OCI-layout tarball (one
+// config, one layer) naming ref, reusing tarcheck_test.go's ociFixture. The
+// fixture is deterministic in (ref, layerSeed), so manifestDigestForRef
+// returns the manifest digest the lock must pin for it.
 func tarBytesForRef(t testing.TB, ref, layerSeed string) []byte {
-	configContent := []byte("config-for-" + ref)
-	configName := "sha256:" + sha256Hex(configContent)
-	layerName := sha256Hex([]byte("layer-"+layerSeed)) + strings.Repeat("0", 0) // 64 hex chars already
-	layerName = layerName[:64] + ".tar.gz"
-	manifest := []byte(`[{"Config":"` + configName + `","RepoTags":["` + ref + `"],"Layers":["` + layerName + `"]}]`)
-	return buildTar(t, []tarMember{
-		{name: configName, content: configContent},
-		{name: layerName, content: []byte("layer-blob-" + layerSeed)},
-		{name: manifestName, content: manifest},
-	})
+	return newOCIFixture(ref, layerSeed, 1).tar(t)
+}
+
+// manifestDigestForRef is the lock manifestDigest matching tarBytesForRef
+// (ref, layerSeed).
+func manifestDigestForRef(ref, layerSeed string) string {
+	return newOCIFixture(ref, layerSeed, 1).manifestDigest()
 }
 
 func fdIdentity(f *os.File) (dev, ino uint64) {
@@ -219,7 +217,8 @@ func buildLockAndDir(t *testing.T, refs []string, missingIdx int) (lockBytes []b
 	for i, ref := range refs {
 		tb := tarballForRef(ref)
 		l.Images = append(l.Images, lockImage{
-			Ref: ref, Digest: "sha256:" + sha256Hex([]byte(ref)), Tarball: tb, Verified: true, VerifyReason: "",
+			Ref: ref, Digest: "sha256:" + sha256Hex([]byte(ref)), ManifestDigest: manifestDigestForRef(ref, ref),
+			Tarball: tb, Verified: true, VerifyReason: "",
 		})
 		if i == missingIdx {
 			continue
@@ -404,6 +403,13 @@ func TestDoImportStructurallyInvalidTarballIsRefusedNotImported(t *testing.T) {
 		{
 			name:       "manifest names another ref",
 			content:    func(t *testing.T) []byte { return tarBytesForRef(t, "registry.k8s.io/pause:e2e-other", "pause") },
+			wantReason: ReasonManifest,
+		},
+		{
+			name: "manifest is not the one the lock pins",
+			content: func(t *testing.T) []byte {
+				return tarBytesForRef(t, "registry.k8s.io/pause:3.10.2", "a-different-build")
+			},
 			wantReason: ReasonManifest,
 		},
 		{

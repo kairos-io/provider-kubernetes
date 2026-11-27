@@ -240,7 +240,7 @@ jobs:
         with:
           subject-name: ${{ steps.build.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
-          predicate-type: https://kairos.io/attestations/bundled-control-plane-images/v1
+          predicate-type: https://kairos.io/attestations/bundled-control-plane-images/v2
           predicate-path: images.lock
           push-to-registry: true
 
