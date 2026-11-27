@@ -64,8 +64,9 @@ func ResetCluster(ctx context.Context, cluster clusterplugin.Cluster, opts Reset
 	if uc, err := ParseUserConfig(cluster.Options); err != nil {
 		logrus.Warnf("provider-kubernetes: reset could not parse user config (continuing without it): %v", err)
 	} else {
-		criSocket = uc.InitConfiguration.NodeRegistration.CRISocket
-		nodeName = uc.InitConfiguration.NodeRegistration.Name
+		nr := nodeRegistration(role, uc)
+		criSocket = nr.CRISocket
+		nodeName = nr.Name
 		bindPort = localBindPort(role, uc)
 	}
 	reachable := opts.ControlPlaneReachable
