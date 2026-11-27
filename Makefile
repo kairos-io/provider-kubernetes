@@ -115,6 +115,18 @@ verify-pins:
 	  case "$$img" in '$${'*) : ;; *) printf '%s\n' "$$img" | grep -Eq '@sha256:[a-f0-9]{64}$$' \
 	    || { echo "FAIL: Dockerfile FROM $$img is not digest-pinned"; fail=1; } ;; esac; \
 	done; \
+	bare="$$(grep -c 'curl -fsSL -o' Dockerfile || true)"; \
+	if [ "$$bare" != 0 ]; then \
+	  echo "FAIL: $$bare Dockerfile curl(s) fetch without --retry; a transient 429/504 then fails the whole build"; \
+	  grep -n 'curl -fsSL -o' Dockerfile; fail=1; \
+	else \
+	  echo "ok: all $$(grep -c 'curl -fsSL --retry' Dockerfile) Dockerfile downloads retry transient errors"; \
+	fi; \
+	if grep -q curl scripts/install-syft.sh && ! grep -q -e --retry scripts/install-syft.sh; then \
+	  echo "FAIL: scripts/install-syft.sh fetches without --retry"; fail=1; \
+	else \
+	  echo "ok: install-syft.sh download retries transient errors"; \
+	fi; \
 	if grep -Eq '^toolchain[[:space:]]' go.mod; then echo "FAIL: go.mod has a toolchain directive; the go directive is the single Go pin"; fail=1; fi; \
 	gomod="$$(sed -n 's/^go[[:space:]][[:space:]]*//p' go.mod | head -1)"; \
 	gob="$$(sed -n 's/^ARG GO_BUILDER_IMAGE=golang:\([0-9][0-9.]*\).*/\1/p' Dockerfile | head -1)"; \
