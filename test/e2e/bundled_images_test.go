@@ -10,6 +10,8 @@ package e2e
 // ADR-16-A2 tests share.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -26,7 +28,7 @@ const (
 	// importJournalTimeout bounds the wait for the boot run's summary line to
 	// reach the journal after the unit has settled.
 	importJournalTimeout = time.Minute
-	// tarballReadTimeout bounds streaming manifest.json out of one image tarball.
+	// tarballReadTimeout bounds streaming one member out of an image tarball.
 	tarballReadTimeout = 2 * time.Minute
 	// bundleImageRepository is the repository the image bundles from, and the one
 	// kubeadm's own image list is taken against.
@@ -269,24 +271,48 @@ func checkImportedImage(t *testing.T, nc *nodeContainer, img imagesLockItem, ctr
 	ok := true
 
 	// parseImagesLock allows only a plain *.tar file name, so this stays inside
-	// the bundle directory.
+	// the bundle directory. Two steps reach the config digest: index.json names
+	// the manifest, and the manifest names the config.
 	tarPath := hostexec.BundleDir + "/" + img.Tarball
-	manifest, tarStderr, err := nc.ExecStdoutTimeout(tarballReadTimeout, binTar, "-xOf", tarPath, "manifest.json")
 	var configID string
 	var tarTags []string
+	indexRaw, tarStderr, err := nc.ExecStdoutTimeout(tarballReadTimeout, binTar, "-xOf", tarPath, "index.json")
 	if err != nil {
-		t.Errorf("IR-9 (c) %s: read manifest.json from %s: %v\n%s", img.Ref, tarPath, err, strings.TrimSpace(tarStderr))
+		t.Errorf("IR-9 (c) %s: read index.json from %s: %v\n%s", img.Ref, tarPath, err, strings.TrimSpace(tarStderr))
 		ok = false
-	} else if configID, tarTags, err = parseDockerSaveManifest(manifest); err != nil {
-		t.Errorf("IR-9 (c) %s: %s: %v\n%s", img.Ref, tarPath, err, trimForLog(manifest))
+	} else if idx, perr := parseOCIIndex(indexRaw); perr != nil {
+		t.Errorf("IR-9 (c) %s: %s: %v\n%s", img.Ref, tarPath, perr, trimForLog(indexRaw))
 		ok = false
+	} else {
+		tarTags = []string{idx.RefName}
+		if idx.RefName != img.Ref {
+			t.Errorf("IR-9 (c) %s: %s names the image %s", img.Ref, img.Tarball, idx.RefName)
+			ok = false
+		}
+		if idx.ManifestDigest != img.ManifestDigest {
+			t.Errorf("IR-9 (c) %s: %s's index.json names manifest %s, images.lock pins %s", img.Ref, img.Tarball, idx.ManifestDigest, img.ManifestDigest)
+			ok = false
+		}
+		manifestRaw, mStderr, merr := nc.ExecStdoutTimeout(tarballReadTimeout, binTar, "-xOf", tarPath, ociBlobPrefix+strings.TrimPrefix(idx.ManifestDigest, "sha256:"))
+		if merr != nil {
+			t.Errorf("IR-9 (c) %s: read the manifest blob from %s: %v\n%s", img.Ref, tarPath, merr, strings.TrimSpace(mStderr))
+			ok = false
+		} else if sum := sha256.Sum256([]byte(manifestRaw)); "sha256:"+hex.EncodeToString(sum[:]) != idx.ManifestDigest {
+			t.Errorf("IR-9 (c) %s: the manifest blob in %s does not hash to %s", img.Ref, tarPath, idx.ManifestDigest)
+			ok = false
+		} else if m, perr := parseOCIManifest(manifestRaw); perr != nil {
+			t.Errorf("IR-9 (c) %s: %s: %v\n%s", img.Ref, tarPath, perr, trimForLog(manifestRaw))
+			ok = false
+		} else {
+			configID = m.ConfigID
+		}
 	}
 
 	status, crictlStderr, err := nc.ExecStdoutTimeout(dockerTimeout, binCrictl,
 		"--runtime-endpoint", criEndpoint, "--image-endpoint", criEndpoint,
 		"inspecti", "-o", "json", img.Ref)
 	if err != nil {
-		t.Errorf("IR-9 (c) %s: crictl inspecti by the exact ref failed, so kubeadm would try to pull it (tarball RepoTags %v): %v\n%s",
+		t.Errorf("IR-9 (c) %s: crictl inspecti by the exact ref failed, so kubeadm would try to pull it (tarball ref.name %v): %v\n%s",
 			img.Ref, tarTags, err, strings.TrimSpace(crictlStderr))
 		ok = false
 	} else {
@@ -313,7 +339,7 @@ func checkImportedImage(t *testing.T, nc *nodeContainer, img imagesLockItem, ctr
 	}
 
 	if ok {
-		t.Logf("IR-9 (c) %s: CRI id %s == config of %s (tarball RepoTags %v); in CRI repoTags; in ctr k8s.io", img.Ref, configID, img.Tarball, tarTags)
+		t.Logf("IR-9 (c) %s: CRI id %s == config of %s (tarball ref.name %v); in CRI repoTags; in ctr k8s.io", img.Ref, configID, img.Tarball, tarTags)
 	}
 	return ok
 }
