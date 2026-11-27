@@ -425,3 +425,89 @@ func TestJoinDialEndpoint(t *testing.T) {
 		t.Errorf("worker probe target without a join endpoint = %q, want the controlPlaneEndpoint", got)
 	}
 }
+
+// A join reads joinConfiguration.nodeRegistration, field by field, and falls
+// back to initConfiguration.nodeRegistration for anything it leaves unset.
+func TestBuildInputNodeRegistrationByRole(t *testing.T) {
+	const both = `
+initConfiguration:
+  nodeRegistration:
+    name: init-node
+    criSocket: unix:///run/init.sock
+    kubeletExtraArgs:
+    - name: node-labels
+      value: role=init
+    taints:
+    - key: init
+      effect: NoSchedule
+joinConfiguration:
+  nodeRegistration:
+    name: join-node
+    criSocket: unix:///run/join.sock
+    kubeletExtraArgs:
+    - name: node-labels
+      value: role=worker
+    taints:
+    - key: join
+      effect: NoExecute
+`
+	const joinOnly = `
+joinConfiguration:
+  nodeRegistration:
+    name: join-node
+    kubeletExtraArgs:
+    - name: node-labels
+      value: role=worker
+    taints:
+    - key: join
+      effect: NoExecute
+`
+	const partial = `
+initConfiguration:
+  nodeRegistration:
+    name: init-node
+    criSocket: unix:///run/init.sock
+    taints:
+    - key: init
+      effect: NoSchedule
+joinConfiguration:
+  nodeRegistration:
+    kubeletExtraArgs:
+    - name: node-labels
+      value: role=worker
+`
+	for _, tc := range []struct {
+		name, role, raw              string
+		wantName, wantCRI, wantLabel string
+		wantTaint                    string
+	}{
+		{"init ignores join block", "init", both, "init-node", "unix:///run/init.sock", "role=init", "init"},
+		{"worker prefers join block", "worker", both, "join-node", "unix:///run/join.sock", "role=worker", "join"},
+		{"controlplane prefers join block", "controlplane", both, "join-node", "unix:///run/join.sock", "role=worker", "join"},
+		{"worker with join block only", "worker", joinOnly, "join-node", defaultCRISocket, "role=worker", "join"},
+		{"worker falls back per field", "worker", partial, "init-node", "unix:///run/init.sock", "role=worker", "init"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uc, err := ParseUserConfig(tc.raw)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			in, _, err := BuildInput(Context{Role: tc.role, ControlPlaneHost: "vip.example.test:6443"}, uc, "v1.37.0")
+			if err != nil {
+				t.Fatalf("BuildInput: %v", err)
+			}
+			if in.NodeName != tc.wantName {
+				t.Errorf("NodeName = %q, want %q", in.NodeName, tc.wantName)
+			}
+			if in.CRISocket != tc.wantCRI {
+				t.Errorf("CRISocket = %q, want %q", in.CRISocket, tc.wantCRI)
+			}
+			if len(in.KubeletExtraArgs) != 1 || in.KubeletExtraArgs[0].Value != tc.wantLabel {
+				t.Errorf("KubeletExtraArgs = %+v, want node-labels=%s", in.KubeletExtraArgs, tc.wantLabel)
+			}
+			if len(in.Taints) != 1 || in.Taints[0].Key != tc.wantTaint {
+				t.Errorf("Taints = %+v, want key %s", in.Taints, tc.wantTaint)
+			}
+		})
+	}
+}

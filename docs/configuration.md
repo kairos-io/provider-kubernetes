@@ -100,6 +100,15 @@ config: |
       localAPIEndpoint:
         advertiseAddress: 10.0.0.11      # the joining node's own IP
         bindPort: 6443
+    nodeRegistration:                   # this joining node's registration
+      criSocket: unix:///run/containerd/containerd.sock
+      kubeletExtraArgs:
+        - name: node-labels
+          value: node-role.example.test/storage=true
+      taints:
+        - key: dedicated
+          value: storage
+          effect: NoSchedule
 ```
 
 Notes:
@@ -124,6 +133,11 @@ Notes:
   minting control plane cannot know it; `mint-join` leaves it empty, so kubeadm
   uses the default-route interface, unless you fill it in (or pass
   `--advertise-address`).
+- A join (`controlplane` or `worker`) reads `joinConfiguration.nodeRegistration`
+  for `name`, `criSocket`, `kubeletExtraArgs` and `taints`. Each field it leaves
+  out comes from `initConfiguration.nodeRegistration`, so a config shared by
+  every node keeps working. An `init` node reads only
+  `initConfiguration.nodeRegistration`.
 - Token discovery **requires** `caCertHashes`; the provider refuses to emit a
   join config without a CA anchor and never sets `unsafeSkipCAVerification`.
 - `bindPort` defaults to kubeadm's 6443. If you move it, give

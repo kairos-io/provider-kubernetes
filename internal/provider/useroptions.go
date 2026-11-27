@@ -41,12 +41,7 @@ type UserConfig struct {
 			AdvertiseAddress string `json:"advertiseAddress,omitempty"`
 			BindPort         int32  `json:"bindPort,omitempty"`
 		} `json:"localAPIEndpoint,omitempty"`
-		NodeRegistration struct {
-			Name             string                `json:"name,omitempty"`
-			CRISocket        string                `json:"criSocket,omitempty"`
-			KubeletExtraArgs []kubeadmconfig.Arg   `json:"kubeletExtraArgs,omitempty"`
-			Taints           []kubeadmconfig.Taint `json:"taints,omitempty"`
-		} `json:"nodeRegistration,omitempty"`
+		NodeRegistration NodeRegistration `json:"nodeRegistration,omitempty"`
 	} `json:"initConfiguration,omitempty"`
 
 	// JoinConfiguration carries the operator-delivered join material (ADR-10:
@@ -73,7 +68,42 @@ type UserConfig struct {
 				BindPort         int32  `json:"bindPort,omitempty"`
 			} `json:"localAPIEndpoint,omitempty"`
 		} `json:"controlPlane,omitempty"`
+		NodeRegistration NodeRegistration `json:"nodeRegistration,omitempty"`
 	} `json:"joinConfiguration,omitempty"`
+}
+
+// NodeRegistration is the kubeadm nodeRegistration block the provider reads,
+// under initConfiguration or joinConfiguration.
+type NodeRegistration struct {
+	Name             string                `json:"name,omitempty"`
+	CRISocket        string                `json:"criSocket,omitempty"`
+	KubeletExtraArgs []kubeadmconfig.Arg   `json:"kubeletExtraArgs,omitempty"`
+	Taints           []kubeadmconfig.Taint `json:"taints,omitempty"`
+}
+
+// nodeRegistration returns the nodeRegistration that applies to role. A join
+// (controlplane or worker) takes each field from
+// joinConfiguration.nodeRegistration when set there and from
+// initConfiguration.nodeRegistration otherwise; init uses the init block only.
+func nodeRegistration(role actualstate.Role, uc UserConfig) NodeRegistration {
+	nr := uc.InitConfiguration.NodeRegistration
+	if role != actualstate.RoleControlPlane && role != actualstate.RoleWorker {
+		return nr
+	}
+	j := uc.JoinConfiguration.NodeRegistration
+	if j.Name != "" {
+		nr.Name = j.Name
+	}
+	if j.CRISocket != "" {
+		nr.CRISocket = j.CRISocket
+	}
+	if len(j.KubeletExtraArgs) > 0 {
+		nr.KubeletExtraArgs = j.KubeletExtraArgs
+	}
+	if len(j.Taints) > 0 {
+		nr.Taints = j.Taints
+	}
+	return nr
 }
 
 // ParseUserConfig parses the raw `cluster.config` YAML string. An empty string
@@ -144,7 +174,8 @@ func BuildInput(ctx Context, uc UserConfig, resolvedVersion string) (kubeadmconf
 		dnsDomain = defaultDNSDomain
 	}
 
-	criSocket := uc.InitConfiguration.NodeRegistration.CRISocket
+	nr := nodeRegistration(actualstate.Role(ctx.Role), uc)
+	criSocket := nr.CRISocket
 	if criSocket == "" {
 		criSocket = defaultCRISocket
 	}
@@ -173,10 +204,10 @@ func BuildInput(ctx Context, uc UserConfig, resolvedVersion string) (kubeadmconf
 		ServiceSubnet:        uc.ClusterConfiguration.Networking.ServiceSubnet,
 		DNSDomain:            dnsDomain,
 		CertSANs:             sans,
-		NodeName:             uc.InitConfiguration.NodeRegistration.Name,
+		NodeName:             nr.Name,
 		CRISocket:            criSocket,
-		KubeletExtraArgs:     uc.InitConfiguration.NodeRegistration.KubeletExtraArgs,
-		Taints:               uc.InitConfiguration.NodeRegistration.Taints,
+		KubeletExtraArgs:     nr.KubeletExtraArgs,
+		Taints:               nr.Taints,
 		AdvertiseAddress:     advertiseAddress,
 		BindPort:             bindPort,
 
