@@ -39,6 +39,16 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	// Leaked --internal networks from a crashed IR-11 run. Harmless in
+	// themselves, but they accumulate and docker refuses to reuse the name.
+	// Removal fails while a container is still attached, which is why this runs
+	// after the container sweep above.
+	if out, err := dockerErr("network", "ls", "-q", "--filter", "label="+labelKey+"="+labelValue); err == nil {
+		for _, id := range strings.Fields(out) {
+			_, _ = dockerErr("network", "rm", id)
+		}
+	}
+
 	// Phase 1: wait until Docker no longer lists any labeled containers.
 	dockerDeadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(dockerDeadline) {
