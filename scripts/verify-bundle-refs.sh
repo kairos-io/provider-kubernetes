@@ -7,12 +7,14 @@
 # importer accepts the bundle. CI runs it on every supported minor and the release
 # workflow runs it before `docker push`, so both gates run the same checks.
 #
-# `ctr images import` names each bundled image from its docker-save RepoTags, and
-# kubeadm (CRI ImageStatus) and containerd's sandbox_image look images up by the
-# EXACT ref, so an air-gap first boot needs every tarball named exactly as kubeadm
-# expects. At boot, `import-images` imports only the images.lock entries and
-# refuses a bundle or tarball whose path, owner, mode, file type, filesystem or
-# structure is wrong. Asserted against the SHIPPED image:
+# Each tarball is a canonical single-platform OCI image LAYOUT (ADR-16-A3), never
+# docker-save: `ctr images import` names the image from index.json's
+# org.opencontainers.image.ref.name annotation, and kubeadm (CRI ImageStatus) and
+# containerd's sandbox_image look images up by the EXACT ref, so an air-gap first
+# boot needs every archive to carry exactly the ref kubeadm expects. At boot,
+# `import-images` imports only the images.lock entries, pins each archive to that
+# entry's manifestDigest, and refuses a bundle or tarball whose path, owner, mode,
+# file type, filesystem or structure is wrong. Asserted against the SHIPPED image:
 #   (0) /opt/provider-kubernetes does not exist (the bundle is image-only, and /opt
 #       is persistent on Kairos); every directory the importer walks (/, /system,
 #       /system/providers, /system/provider-kubernetes and its images/) is a
@@ -24,18 +26,28 @@
 #   (2) images.lock refs == the bundled kubeadm's image list for this release;
 #   (3) the *.tar files == the images.lock tarballs (nothing else present);
 #   (4) containerd's sandbox_image is one of the bundled refs;
-#   (5) each tarball has unique, regular members (one sha256:<hex> config,
-#       <hex>.tar.gz layers, manifest.json last) and its manifest.json bytes are
-#       exactly [{"Config":"<config>","RepoTags":["<lock ref>"],"Layers":[...]}];
-#   (6) the "i-was-a-digest" placeholder appears nowhere;
+#   (5) each tarball is one canonical OCI image layout: unique, allowlisted,
+#       regular members in the fixed order oci-layout, index.json, manifest,
+#       config, layers, on the canonical profile (uid/gid 0, mode 0644, mtime
+#       epoch 0); byte-exact oci-layout and index.json; index.json names exactly
+#       the lock's manifestDigest; and the index -> manifest -> config/layers
+#       closure holds, with every member's size equal to its descriptor's;
+#   (6) index.json names the lock's ref in its one
+#       org.opencontainers.image.ref.name annotation, and no docker-save artefact
+#       (a manifest.json member, RepoTags bytes) exists anywhere in the bundle;
 #   (7) the bundle stays within HALF of every boot importer bound;
 #   (8) the image's own `import-images --verify-only` exits 0, and its last output
 #       line is the summary with outcome=verified and entries == images.lock's.
 # Exact bytes, never a JSON projection: containerd's importer matches keys
-# case-insensitively and does not bind member bytes to member names. jq only reads
+# case-insensitively, does not bind member bytes to member names, keys members on
+# path.Clean(name) where a later duplicate silently overwrites, and takes the OCI
+# branch (returning early) whenever oci-layout is present. jq only reads
 # images.lock, which the build itself generates. (8) adds what only the Go importer
-# checks: PAX/sparse headers, the config member's sha256, the lock's canonical
-# bytes and the filesystem of every file.
+# checks: PAX/sparse headers, the lock's canonical bytes and the filesystem of
+# every file. Layer blobs are deliberately NOT hashed here, as at boot: the
+# content store is keyed by the COMPUTED digest, so a layer whose bytes do not
+# match its path is unreachable and the import fails closed. The build
+# (build/bundle-images.sh) does hash every layer, once, where the bytes arrive.
 #
 # Requires: bash, docker, jq, GNU tar, GNU coreutils/findutils/sed (ubuntu-latest).
 set -euo pipefail
@@ -60,8 +72,24 @@ readonly MIN_TARBALL_BYTES=2560                      # importer: 2560 bytes
 readonly MAX_TARBALL_BYTES=$((512 * 1024 * 1024))    # importer: 1 GiB
 readonly MAX_TOTAL_BYTES=$((2 * 1024 * 1024 * 1024)) # importer: 4 GiB
 readonly MIN_MEMBERS=3 MAX_MEMBERS=128               # importer: 3..256
+readonly MAX_INDEX_BYTES=$((4 * 1024))               # importer: 8 KiB
 readonly MAX_MANIFEST_BYTES=$((32 * 1024))           # importer: 64 KiB
 readonly MAX_CONFIG_BYTES=$((512 * 1024))            # importer: 1 MiB
+
+# The canonical archive's fixed bytes and names (ADR-16-A3). These MUST equal
+# internal/imageimport/tarcheck.go's and build/bundle-images.sh's.
+readonly OCI_LAYOUT_BYTES='{
+    "imageLayoutVersion": "1.0.0"
+}'
+readonly MEDIA_TYPE_OCI_INDEX='application/vnd.oci.image.index.v1+json'
+readonly MEDIA_TYPE_DOCKER_INDEX='application/vnd.docker.distribution.manifest.list.v2+json'
+readonly MEDIA_TYPE_OCI_MANIFEST='application/vnd.oci.image.manifest.v1+json'
+readonly MEDIA_TYPE_DOCKER_MANIFEST='application/vnd.docker.distribution.manifest.v2+json'
+readonly ANNOTATION_REF_NAME='org.opencontainers.image.ref.name'
+# containerd's imageName() reads this annotation FIRST and only falls back to
+# ref.name, so an archive carrying it would choose the imported record's NAME
+# itself while a ref.name-only check reported success.
+readonly ANNOTATION_CONTAINERD_NAME='io.containerd.image.name'
 
 # parse_sandbox_image <config.toml>: print containerd's sandbox_image, or explain on
 # stderr and return 1. This is the rule test/e2e/bundled_images.go parseSandboxImage
@@ -292,67 +320,239 @@ echo "ok: images.lock and ${entries} tarballs are root:root 0644 regular files; 
 sandbox="$(parse_sandbox_image "$work/config.toml")" || fail "could not take sandbox_image from containerd config.toml (reason above)"
 grep -qxF -- "$sandbox" "$work/lock.refs" || fail "sandbox_image ${sandbox} is not a bundled image ref"
 
-# (5) + (7) members, manifest.json and config sizes.
-layers_re='^"[0-9a-f]{64}\.tar\.gz"(,"[0-9a-f]{64}\.tar\.gz")*$'
+# The architecture the bundle must be built for. Taken from the IMAGE itself, not
+# from the runner, so an amd64 bundle inside an arm64 image is caught: images.lock
+# is ARCH-SPECIFIC under ADR-16-A3 (its manifestDigest is the per-platform child).
+img_arch="$(docker image inspect --format '{{.Architecture}}' "$IMG")"
+[[ "$img_arch" =~ ^(amd64|arm64)$ ]] || fail "the image reports architecture '${img_arch}', want amd64 or arm64"
+
+# clean_names <names file>: the member names as containerd keys them,
+# path.Clean-style (leading "./" stripped, "//" collapsed, trailing "/" dropped).
+# ".." is refused outright below, which is the one element this cannot resolve.
+clean_names() { sed -e 's#^\(\./\)*##' -e 's#//*#/#g' -e 's#/$##' "$1"; }
+
+# render_index <mediaType> <size> <digest> <arch> <ref>: the ONE canonical
+# index.json rendering -- compact, NO trailing newline. Byte-identical to
+# build/bundle-images.sh's render_index and internal/imageimport's renderIndex.
+render_index() {
+  printf '{"schemaVersion":2,"mediaType":"%s","manifests":[{"mediaType":"%s","size":%s,"digest":"%s","platform":{"architecture":"%s","os":"linux"},"annotations":{"%s":"%s"}}]}' \
+    "$MEDIA_TYPE_OCI_INDEX" "$1" "$2" "$3" "$4" "$ANNOTATION_REF_NAME" "$5"
+}
+
+# json_slice <flat json> <key> <open> <close>: the body of the (single) object or
+# array named by <key>, up to the first <close>, so it holds no nested object or
+# array of that kind. Pure parameter expansion: no regex escaping of braces.
+json_slice() {
+  local s="$1" rest
+  rest="${s#*\""$2"\":"$3"}"
+  [ "$rest" != "$s" ] || return 1
+  printf '%s' "${rest%%"$4"*}"
+}
+
+# count_matches <string> <ERE>: how many times the pattern occurs in the string.
+count_matches() { grep -Eo -e "$2" <<<"$1" | grep -c . || true; }
+
+# one_field <string> <key ERE>: the single occurrence of "<key>":<value>, or "".
+# Returns non-zero unless it occurs exactly once.
+one_field() {
+  local got
+  got="$(grep -Eo -e "$2" <<<"$1" || true)"
+  [ "$(grep -c . <<<"$got")" -eq 1 ] || return 1
+  printf '%s' "$got"
+}
+
+# (5) + (6) + (7): the canonical OCI image layout, member by member, byte for
+# byte, from the archive's own bytes -- plus the pin to images.lock's
+# manifestDigest, the one runtime link between the bundle and what cosign
+# verified at build time.
 n=0
-while IFS=$'\t' read -r ref tarball; do
+while IFS=$'\t' read -r ref manifest_digest tarball; do
   t="$work/images/${tarball}"
+  [[ "$manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || fail "${tarball}: images.lock manifestDigest '${manifest_digest}' is not sha256:<64 lowercase hex>"
+  mhex="${manifest_digest#sha256:}"
   run_tar "$work/names" -tf "$t"
-  run_tar "$work/listing" -tvf "$t"
+  # --numeric-owner: assert uid/gid 0 as NUMBERS, whatever uname/gname the
+  # headers carry. GNU tar -tv: "<mode> <owner/group> <size> <date> <time> <name>".
+  run_tar "$work/listing" -tvf "$t" --numeric-owner
   members="$(wc -l < "$work/names")"
   [ "$members" -eq "$(wc -l < "$work/listing")" ] || fail "${tarball}: member listings disagree"
   if [ "$members" -lt "$MIN_MEMBERS" ] || [ "$members" -gt "$MAX_MEMBERS" ]; then
     fail "${tarball}: ${members} members, want ${MIN_MEMBERS}..${MAX_MEMBERS} (half-bound)"
   fi
-  if grep -Evx 'manifest\.json|sha256:[0-9a-f]{64}|[0-9a-f]{64}\.tar\.gz' "$work/names" >&2; then
+  [ "$(tr -d '\000' < "$work/names" | wc -c)" -eq "$(wc -c < "$work/names")" ] \
+    || fail "${tarball}: a member name contains a NUL byte"
+  # Format confusion: containerd takes the OCI branch and returns EARLY when
+  # oci-layout is present, so an archive carrying BOTH oci-layout and
+  # manifest.json would validate as docker-save and import as OCI.
+  if clean_names "$work/names" | grep -qx 'manifest\.json'; then
+    fail "${tarball}: a manifest.json member is present; an OCI layout must never carry one"
+  fi
+  if grep -E '^/|^\./|//|/$|\\|(^|/)\.\.?($|/)' "$work/names" >&2; then
+    fail "${tarball}: the member name(s) above are absolute, aliasing, or a directory (trailing '/')"
+  fi
+  if grep -Evx 'oci-layout|index\.json|blobs/sha256/[0-9a-f]{64}' "$work/names" >&2; then
     fail "${tarball}: unexpected member name(s) above"
   fi
   [ -z "$(sort "$work/names" | uniq -d)" ] || fail "${tarball}: duplicate member names"
-  # GNU tar -tv: "<mode> <owner/group> <size> <date> <time> <name>"; names are
-  # validated above, so a regular member is exactly six fields.
+  # ... and no two names that collide after path.Clean: "index.json" and
+  # "./index.json" are ONE key to containerd, where a later member silently
+  # OVERWRITES an earlier one, and two distinct strings to a naive seen-set.
+  [ -z "$(clean_names "$work/names" | sort | uniq -d)" ] \
+    || fail "${tarball}: member names that collide after path.Clean"
   if awk 'NF != 6 || substr($1, 1, 1) != "-"' "$work/listing" | grep . >&2; then
     fail "${tarball}: non-regular or unexpected member listing(s) above"
   fi
   awk '{ print $6 }' "$work/listing" | cmp -s - "$work/names" || fail "${tarball}: tar -tv names differ from tar -t"
-  if [ "$(grep -cx 'manifest\.json' "$work/names")" -ne 1 ] || [ "$(tail -n 1 "$work/names")" != manifest.json ]; then
-    fail "${tarball}: manifest.json must be present exactly once, as the last member"
+  # The canonical profile: mode 0644, uid/gid 0, mtime epoch 0 (GNU tar -tv
+  # prints the minute, not the second).
+  if awk '$1 != "-rw-r--r--" || $2 != "0/0" || $4 != "1970-01-01" || $5 != "00:00"' "$work/listing" | grep . >&2; then
+    fail "${tarball}: the member(s) above are not uid/gid 0, mode 0644, mtime epoch 0"
   fi
-  [ "$(grep -cEx 'sha256:[0-9a-f]{64}' "$work/names")" -eq 1 ] || fail "${tarball}: want exactly one sha256:<hex> config member"
-  cfg="$(grep -Ex 'sha256:[0-9a-f]{64}' "$work/names")"
-  cfg_bytes="$(awk -v n="$cfg" '$6 == n { print $3 }' "$work/listing")"
-  if ! [[ "$cfg_bytes" =~ ^[0-9]+$ ]] || [ "$cfg_bytes" -gt "$MAX_CONFIG_BYTES" ]; then
-    fail "${tarball}: config member ${cfg} is '${cfg_bytes}' bytes, half-bound ${MAX_CONFIG_BYTES}"
+
+  # Fixed order, and the manifest member is the one images.lock pins.
+  [ "$(sed -n 1p "$work/names")" = oci-layout ] || fail "${tarball}: member 1 is not oci-layout"
+  [ "$(sed -n 2p "$work/names")" = index.json ] || fail "${tarball}: member 2 is not index.json"
+  [ "$(sed -n 3p "$work/names")" = "blobs/sha256/${mhex}" ] \
+    || fail "${tarball}: member 3 is $(sed -n 3p "$work/names"), want the manifest blobs/sha256/${mhex} images.lock pins"
+
+  # oci-layout: exact bytes, never parsed.
+  run_tar "$work/oci-layout" -xOf "$t" oci-layout
+  printf '%s' "$OCI_LAYOUT_BYTES" | cmp -s - "$work/oci-layout" \
+    || fail "${tarball}: oci-layout is not the exact $(printf '%s' "$OCI_LAYOUT_BYTES" | wc -c) canonical bytes"
+
+  # index.json: bounded, then held to the canonical rendering byte for byte,
+  # rebuilt from the ARCHIVE's own manifest member and the LOCK's digest and ref.
+  run_tar "$work/index.json" -xOf "$t" index.json
+  idx_bytes="$(stat -c %s "$work/index.json")"
+  [ "$idx_bytes" -le "$MAX_INDEX_BYTES" ] \
+    || fail "${tarball}: index.json is ${idx_bytes} bytes, half-bound ${MAX_INDEX_BYTES}"
+  idx="$(cat "$work/index.json")"
+  case "$idx" in
+    *"$ANNOTATION_CONTAINERD_NAME"*)
+      fail "${tarball}: index.json carries ${ANNOTATION_CONTAINERD_NAME}, which would let the archive choose the imported image's NAME" ;;
+  esac
+  # (6) POSITIVE: the ref images.lock lists is named, exactly once, in the one
+  # annotation containerd reads -- not merely "no placeholder is present".
+  [ "$(count_matches "$idx" "\"${ANNOTATION_REF_NAME}\":")" -eq 1 ] \
+    || fail "${tarball}: index.json must carry exactly one ${ANNOTATION_REF_NAME} annotation"
+  [ "$(count_matches "$idx" '"annotations":[[:space:]]*[{]')" -eq 1 ] \
+    || fail "${tarball}: index.json must carry exactly one annotations object"
+  [[ "$idx" == *"\"annotations\":{\"${ANNOTATION_REF_NAME}\":\"${ref}\"}}]}" ]] \
+    || fail "${tarball}: index.json does not end with exactly {\"${ANNOTATION_REF_NAME}\":\"${ref}\"}"
+  # The descriptor's mediaType: read from the descriptor body, since index.json
+  # carries the index's own mediaType too.
+  idx_body="${idx#*'"manifests":[{'}"
+  idx_mt="$(one_field "$idx_body" '"mediaType":"[^"]+"' | sed -e 's#^"mediaType":"##' -e 's#"$##')" \
+    || fail "${tarball}: index.json must hold exactly one manifest descriptor"
+  case "$idx_mt" in
+    "$MEDIA_TYPE_OCI_MANIFEST" | "$MEDIA_TYPE_DOCKER_MANIFEST") : ;;
+    "$MEDIA_TYPE_OCI_INDEX" | "$MEDIA_TYPE_DOCKER_INDEX")
+      fail "${tarball}: index.json names an INDEX (${idx_mt}); the archive must name one platform manifest" ;;
+    *) fail "${tarball}: index.json descriptor mediaType '${idx_mt}' is not allowed" ;;
+  esac
+  man_bytes="$(awk -v m="blobs/sha256/${mhex}" '$6 == m { print $3 }' "$work/listing")"
+  [[ "$man_bytes" =~ ^[0-9]+$ ]] && [ "$man_bytes" -le "$MAX_MANIFEST_BYTES" ] \
+    || fail "${tarball}: manifest member is '${man_bytes}' bytes, half-bound ${MAX_MANIFEST_BYTES}"
+  render_index "$idx_mt" "$man_bytes" "$manifest_digest" "$img_arch" "$ref" > "$work/index.want"
+  if ! cmp -s "$work/index.want" "$work/index.json"; then
+    printf 'want: ' >&2; cat "$work/index.want" >&2; echo >&2
+    printf 'got:  ' >&2; cat "$work/index.json" >&2; echo >&2
+    fail "${tarball}: index.json is not the canonical compact rendering for ${ref} on linux/${img_arch}"
   fi
-  run_tar "$work/manifest.json" -xOf "$t" manifest.json
-  size="$(stat -c %s "$work/manifest.json")"
-  [ "$size" -le "$MAX_MANIFEST_BYTES" ] || fail "${tarball}: manifest.json is ${size} bytes, half-bound ${MAX_MANIFEST_BYTES}"
-  pre="[{\"Config\":\"${cfg}\",\"RepoTags\":[\"${ref}\"],\"Layers\":["
-  suf=']}]'
-  m="$(cat "$work/manifest.json")"
-  if [[ "$m" != "$pre"*"$suf" ]]; then
-    printf '%s\n' "$m" >&2
-    fail "${tarball}: manifest.json (above) is not exactly ${pre}...${suf}"
+
+  # The manifest blob: bound to its name by sha256, then parsed for the closure.
+  run_tar "$work/manifest" -xOf "$t" "blobs/sha256/${mhex}"
+  [ "$(sha256sum < "$work/manifest" | cut -d' ' -f1)" = "$mhex" ] \
+    || fail "${tarball}: the manifest member's sha256 is not ${mhex}"
+  man_flat="$(tr -d ' \t\n\r' < "$work/manifest")"
+  [ "$(count_matches "$man_flat" '"config":[{]')" -eq 1 ] || fail "${tarball}: manifest needs exactly one config object"
+  [ "$(count_matches "$man_flat" '"layers":[[]')" -eq 1 ] || fail "${tarball}: manifest needs exactly one layers array"
+  man_top="$(sed -e 's#"config":{[^}]*}##' -e 's#"layers":\[[^]]*\]##' <<<"$man_flat")"
+  [[ "$man_top" == *'"schemaVersion":2'* ]] || fail "${tarball}: manifest schemaVersion is not 2"
+  man_mt="$(grep -Eo '"mediaType":"[^"]+"' <<<"$man_top" || true)"
+  if [ -n "$man_mt" ]; then
+    [ "$man_mt" = "\"mediaType\":\"${idx_mt}\"" ] \
+      || fail "${tarball}: manifest mediaType ${man_mt} does not match index.json's '${idx_mt}'"
+  elif [ "$idx_mt" != "$MEDIA_TYPE_OCI_MANIFEST" ]; then
+    fail "${tarball}: manifest omits mediaType but index.json declares '${idx_mt}'"
   fi
-  mid="${m#"$pre"}"
-  mid="${mid%"$suf"}"
-  [[ "$mid" =~ $layers_re ]] || fail "${tarball}: manifest.json Layers is not a plain list of <hex>.tar.gz names"
-  want="$(printf '%s' "${pre}${mid}${suf}" | wc -c)"
-  [ "$size" -eq "$want" ] \
-    || fail "${tarball}: manifest.json has ${size} bytes, want ${want} (trailing or hidden bytes)"
-  [ "$(grep -o '"RepoTags":\[' "$work/manifest.json" | wc -l)" -eq 1 ] \
-    || fail "${tarball}: \"RepoTags\":[ must occur exactly once"
-  diff <(tr ',' '\n' <<<"$mid" | tr -d '"' | sort -u) \
-    <(grep -Ex '[0-9a-f]{64}\.tar\.gz' "$work/names" | sort -u) >/dev/null \
-    || fail "${tarball}: manifest.json Layers != layer members"
-  echo "ok: ${tarball} RepoTags=[\"${ref}\"] members=${members} layers=$(grep -cEx '[0-9a-f]{64}\.tar\.gz' "$work/names") config=${cfg_bytes}B manifest=${size}B"
+  cfg_obj="$(json_slice "$man_flat" config '{' '}')"
+  cfg_digest="$(one_field "$cfg_obj" '"digest":"sha256:[0-9a-f]{64}"' | sed -e 's#^"digest":"##' -e 's#"$##')" \
+    || fail "${tarball}: the manifest config needs exactly one sha256 digest"
+  cfg_bytes="$(one_field "$cfg_obj" '"size":[0-9]+' | sed 's#^"size":##')" \
+    || fail "${tarball}: the manifest config needs exactly one numeric size"
+  [ "$cfg_bytes" -ge 1 ] && [ "$cfg_bytes" -le "$MAX_CONFIG_BYTES" ] \
+    || fail "${tarball}: config is ${cfg_bytes} bytes, half-bound ${MAX_CONFIG_BYTES}"
+  cfg_hex="${cfg_digest#sha256:}"
+  [ "$cfg_hex" != "$mhex" ] || fail "${tarball}: the manifest config is the manifest blob itself"
+
+  # The canonical member list the manifest implies: config first, then each
+  # DISTINCT layer in first-seen order (a repeated layer is stored once, at its
+  # first position). Compared against the archive's listing, which binds the
+  # closure (exactly these blobs), the ORDER and every member's size in one go.
+  {
+    printf 'oci-layout %s\n' "$(printf '%s' "$OCI_LAYOUT_BYTES" | wc -c)"
+    printf 'index.json %s\n' "$(stat -c %s "$work/index.want")"
+    printf 'blobs/sha256/%s %s\n' "$mhex" "$man_bytes"
+    printf 'blobs/sha256/%s %s\n' "$cfg_hex" "$cfg_bytes"
+  } > "$work/pairs.want"
+  layers=0
+  # json_slice prints no trailing newline, so the last element arrives as an
+  # incomplete line: read returns non-zero for it while still setting elem.
+  while IFS= read -r elem || [ -n "$elem" ]; do
+    [ -n "$elem" ] || continue
+    l_hex="$(one_field "$elem" '"digest":"sha256:[0-9a-f]{64}"' | sed -e 's#^"digest":"sha256:##' -e 's#"$##')" \
+      || fail "${tarball}: layer $((layers + 1)) needs exactly one sha256 digest"
+    l_bytes="$(one_field "$elem" '"size":[0-9]+' | sed 's#^"size":##')" \
+      || fail "${tarball}: layer $((layers + 1)) needs exactly one numeric size"
+    layers=$((layers + 1))
+    [ "$l_bytes" -ge 1 ] || fail "${tarball}: layer ${layers} size ${l_bytes} is not positive"
+    if [ "$l_hex" = "$mhex" ] || [ "$l_hex" = "$cfg_hex" ]; then
+      fail "${tarball}: layer ${layers} reuses the manifest or config digest"
+    fi
+    if grep -q "^blobs/sha256/${l_hex} " "$work/pairs.want"; then
+      grep -qx "blobs/sha256/${l_hex} ${l_bytes}" "$work/pairs.want" \
+        || fail "${tarball}: layer ${layers} repeats a digest with a different size"
+      continue
+    fi
+    printf 'blobs/sha256/%s %s\n' "$l_hex" "$l_bytes" >> "$work/pairs.want"
+  done < <(json_slice "$man_flat" layers '[' ']' | sed 's#},{#\n#g')
+  [ "$layers" -ge 1 ] || fail "${tarball}: the manifest names no layers"
+  if ! awk '{ print $6, $3 }' "$work/listing" | cmp -s - "$work/pairs.want"; then
+    awk '{ print $6, $3 }' "$work/listing" > "$work/pairs.got"
+    diff "$work/pairs.got" "$work/pairs.want" >&2 || true
+    fail "${tarball}: members are not exactly oci-layout, index.json, the manifest, its config and its layers, in that order and with those sizes (< archive, > wanted)"
+  fi
+
+  # The config blob: bound to its name, and declaring the image's own platform.
+  run_tar "$work/config" -xOf "$t" "blobs/sha256/${cfg_hex}"
+  [ "$(sha256sum < "$work/config" | cut -d' ' -f1)" = "$cfg_hex" ] \
+    || fail "${tarball}: the config member's sha256 is not ${cfg_hex}"
+  if [ "$(grep -Eo '"architecture":[[:space:]]*"[^"]*"' "$work/config" | grep -c .)" -ne 1 ] \
+    || [ "$(grep -Eo "\"architecture\":[[:space:]]*\"${img_arch}\"" "$work/config" | grep -c .)" -ne 1 ] \
+    || [ "$(grep -Eo '"os":[[:space:]]*"[^"]*"' "$work/config" | grep -c .)" -ne 1 ] \
+    || [ "$(grep -Eo '"os":[[:space:]]*"linux"' "$work/config" | grep -c .)" -ne 1 ]; then
+    grep -Eo '"(architecture|os)":[[:space:]]*"[^"]*"' "$work/config" >&2 || true
+    fail "${tarball}: the image config does not declare exactly linux/${img_arch}"
+  fi
+
+  echo "ok: ${tarball} ${ANNOTATION_REF_NAME}=\"${ref}\" manifest=${manifest_digest} (${man_bytes}B) config=${cfg_digest} (${cfg_bytes}B) members=${members} layers=${layers} platform=linux/${img_arch}"
   n=$((n + 1))
-done < <(jq -r '.images[] | [.ref, .tarball] | @tsv' "$lock")
+done < <(jq -r '.images[] | [.ref, .manifestDigest, .tarball] | @tsv' "$lock")
 [ "$n" -eq "$entries" ] || fail "checked ${n} tarballs, images.lock lists ${entries}"
 
-# (6)
-if grep -rlF i-was-a-digest "$work/images" >&2; then
-  fail "the i-was-a-digest placeholder is still present in the file(s) above"
-fi
+# (6) No docker-save artefact anywhere in the bundle, so a docker-save tarball
+# cannot sneak back in under a passing OCI check: no manifest.json member (each
+# archive's members were allowlisted above, this re-checks the whole directory),
+# no RepoTags bytes, and no "i-was-a-digest" placeholder (the pre-A3 rename's
+# marker, which an OCI layout has no reason to contain).
+for forbidden in RepoTags i-was-a-digest; do
+  if grep -rlF "$forbidden" "$work/images" >&2; then
+    fail "the docker-save marker '${forbidden}' is present in the file(s) above"
+  fi
+done
+echo "ok: no RepoTags or i-was-a-digest bytes anywhere in the bundle"
 
 # (8) The image's own importer, on the image's own filesystem, runs every boot check
 # (walk, owner/mode, filesystem, lock bytes, tarball structure, config digest)

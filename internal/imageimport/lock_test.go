@@ -20,11 +20,12 @@ func validLockDoc() (lock, []byte) {
 		},
 		Images: []lockImage{
 			{
-				Ref:          "registry.k8s.io/pause:3.10.2",
-				Digest:       "sha256:" + strings.Repeat("a", 64),
-				Tarball:      "registry.k8s.io_pause_3.10.2.tar",
-				Verified:     true,
-				VerifyReason: "",
+				Ref:            "registry.k8s.io/pause:3.10.2",
+				Digest:         "sha256:" + strings.Repeat("a", 64),
+				ManifestDigest: "sha256:" + strings.Repeat("e", 64),
+				Tarball:        "registry.k8s.io_pause_3.10.2.tar",
+				Verified:       true,
+				VerifyReason:   "",
 			},
 		},
 	}
@@ -194,6 +195,15 @@ func TestParseLockRejectsBadValues(t *testing.T) {
 		}),
 		"bad digest (missing prefix)": mutate(func(l *lock) {
 			l.Images[0].Digest = strings.Repeat("a", 64)
+		}),
+		"bad manifestDigest (not 64 hex)": mutate(func(l *lock) {
+			l.Images[0].ManifestDigest = "sha256:deadbeef"
+		}),
+		"bad manifestDigest (uppercase hex)": mutate(func(l *lock) {
+			l.Images[0].ManifestDigest = "sha256:" + strings.Repeat("A", 64)
+		}),
+		"bad manifestDigest (empty)": mutate(func(l *lock) {
+			l.Images[0].ManifestDigest = ""
 		}),
 		"tarball does not match ref": mutate(func(l *lock) {
 			l.Images[0].Tarball = "something-else.tar"

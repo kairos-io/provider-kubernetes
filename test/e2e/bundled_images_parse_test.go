@@ -4,13 +4,14 @@ package e2e
 
 // Container-free tests for the pure helpers in bundled_images.go, pinned against
 // the shapes the real tools produce (bundle-images.sh's images.lock, crane's
-// manifest.json, crictl v1.37 inspecti JSON, systemctl show, containerd's
+// index.json and manifest blobs, ctr images check / content ls, crictl v1.37 inspecti JSON, systemctl show, containerd's
 // shipped config.toml, logrus text output of import-images).
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +40,7 @@ func lockJSON(entries ...string) string {
 }
 
 func lockEntry(ref, digest, tarball string) string {
-	return `    {"ref": "` + ref + `", "digest": "` + digest + `", "tarball": "` + tarball + `", "verified": true, "verifyReason": ""}`
+	return `    {"ref": "` + ref + `", "digest": "` + digest + `", "manifestDigest": "sha256:` + hexC + `", "tarball": "` + tarball + `", "verified": true, "verifyReason": ""}`
 }
 
 func TestParseImagesLock(t *testing.T) {
@@ -72,19 +73,21 @@ func TestParseImagesLock(t *testing.T) {
 
 	good := lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexA, "p.tar")
 	bad := map[string]string{
-		"not JSON":          "{",
-		"no images":         lockJSON(),
-		"empty version":     strings.Replace(lockJSON(good), `"v1.37.0"`, `""`, 1),
-		"duplicate ref":     lockJSON(good, lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexB, "q.tar")),
-		"duplicate tarball": lockJSON(good, lockEntry("registry.k8s.io/etcd:3.7.0-0", "sha256:"+hexB, "p.tar")),
-		"empty ref":         lockJSON(lockEntry("", "sha256:"+hexA, "p.tar")),
-		"ref with space":    lockJSON(lockEntry("registry.k8s.io/pause 3", "sha256:"+hexA, "p.tar")),
-		"digest not sha256": lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "md5:abc", "p.tar")),
-		"short digest":      lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "sha256:abc", "p.tar")),
-		"tarball traversal": lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexA, "../p.tar")),
-		"tarball subdir":    lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexA, "a/p.tar")),
-		"tarball not .tar":  lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexA, "p.tgz")),
-		"tarball only .tar": lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexA, ".tar")),
+		"not JSON":               "{",
+		"no images":              lockJSON(),
+		"empty version":          strings.Replace(lockJSON(good), `"v1.37.0"`, `""`, 1),
+		"duplicate ref":          lockJSON(good, lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexB, "q.tar")),
+		"duplicate tarball":      lockJSON(good, lockEntry("registry.k8s.io/etcd:3.7.0-0", "sha256:"+hexB, "p.tar")),
+		"empty ref":              lockJSON(lockEntry("", "sha256:"+hexA, "p.tar")),
+		"ref with space":         lockJSON(lockEntry("registry.k8s.io/pause 3", "sha256:"+hexA, "p.tar")),
+		"digest not sha256":      lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "md5:abc", "p.tar")),
+		"short digest":           lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "sha256:abc", "p.tar")),
+		"missing manifestDigest": strings.Replace(lockJSON(good), `"manifestDigest": "sha256:`+hexC+`", `, "", 1),
+		"short manifestDigest":   strings.Replace(lockJSON(good), `"manifestDigest": "sha256:`+hexC, `"manifestDigest": "sha256:abc`, 1),
+		"tarball traversal":      lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexA, "../p.tar")),
+		"tarball subdir":         lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexA, "a/p.tar")),
+		"tarball not .tar":       lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexA, "p.tgz")),
+		"tarball only .tar":      lockJSON(lockEntry("registry.k8s.io/pause:3.10.2", "sha256:"+hexA, ".tar")),
 	}
 	for name, raw := range bad {
 		if got, err := parseImagesLock(raw); err == nil {
@@ -143,89 +146,286 @@ func TestRenderImagesLockMatchesGoldenLocks(t *testing.T) {
 	}
 }
 
-func TestParseDockerSaveManifest(t *testing.T) {
-	// crane pull of a digest ref (the F-IMPORTREF shape).
-	crane := `[{"Config":"sha256:` + hexA + `","RepoTags":["registry.k8s.io/pause:i-was-a-digest"],"Layers":["` + hexB + `.tar.gz"]}]`
-	id, tags, err := parseDockerSaveManifest(crane)
-	if err != nil || id != "sha256:"+hexA || !reflect.DeepEqual(tags, []string{"registry.k8s.io/pause:i-was-a-digest"}) {
-		t.Errorf("crane manifest: got (%q, %v, %v)", id, tags, err)
-	}
+// ociIndexJSON renders index.json exactly as the build does (compact, one
+// manifest descriptor, one annotation).
+func ociIndexJSON(mediaType, digest, platform, annotations string) string {
+	return `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"` + mediaType +
+		`","size":1234,"digest":"` + digest + `",` + platform + `"annotations":{` + annotations + `}}]}`
+}
 
-	for name, raw := range map[string]string{
-		"docker save legacy": `[{"Config":"` + hexA + `.json","RepoTags":["registry.k8s.io/pause:3.10.2"],"Layers":["` + hexB + `/layer.tar"]}]`,
-		"docker save OCI":    `[{"Config":"blobs/sha256/` + hexA + `","RepoTags":["registry.k8s.io/pause:3.10.2"],"Layers":["blobs/sha256/` + hexB + `"]}]`,
-		"foreign layers":     `[{"Config":"sha256:` + hexA + `","RepoTags":null,"Layers":["x.tar.gz"],"LayerSources":{"sha256:` + hexB + `":{"mediaType":"x"}}}]`,
-	} {
-		if id, _, err := parseDockerSaveManifest(raw); err != nil || id != "sha256:"+hexA {
-			t.Errorf("%s: got (%q, %v), want sha256:%s", name, id, err, hexA)
+const (
+	amd64Platform = `"platform":{"architecture":"amd64","os":"linux"},`
+	refAnnotation = `"org.opencontainers.image.ref.name":"registry.k8s.io/pause:3.10.2"`
+)
+
+func TestParseOCIIndex(t *testing.T) {
+	good := map[string]string{
+		"docker schema 2 manifest": ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, amd64Platform, refAnnotation),
+		"OCI manifest":             ociIndexJSON(ociManifestMediaType, "sha256:"+hexA, amd64Platform, refAnnotation),
+		"platform absent":          ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, "", refAnnotation),
+	}
+	for name, raw := range good {
+		got, err := parseOCIIndex(raw)
+		want := ociIndexInfo{ManifestDigest: "sha256:" + hexA, MediaType: dockerManifestMediaType, RefName: "registry.k8s.io/pause:3.10.2"}
+		if name == "OCI manifest" {
+			want.MediaType = ociManifestMediaType
+		}
+		if err != nil || got != want {
+			t.Errorf("%s: got (%+v, %v), want %+v", name, got, err, want)
 		}
 	}
 
 	bad := map[string]string{
-		"not an array":   `{"Config":"sha256:` + hexA + `","Layers":["x"]}`,
-		"no images":      `[]`,
-		"two images":     `[{"Config":"sha256:` + hexA + `","Layers":["x"]},{"Config":"sha256:` + hexB + `","Layers":["y"]}]`,
-		"unknown field":  `[{"Config":"sha256:` + hexA + `","Layers":["x"],"Platform":"linux/amd64"}]`,
-		"no layers":      `[{"Config":"sha256:` + hexA + `","RepoTags":["r:t"],"Layers":[]}]`,
-		"short config":   `[{"Config":"sha256:abc","Layers":["x"]}]`,
-		"uppercase hex":  `[{"Config":"sha256:` + strings.ToUpper(hexA) + `","Layers":["x"]}]`,
-		"other algo":     `[{"Config":"sha512:` + hexA + `","Layers":["x"]}]`,
-		"trailing data":  `[{"Config":"sha256:` + hexA + `","Layers":["x"]}] []`,
-		"empty document": ``,
+		"index media type":          ociIndexJSON(ociIndexMediaType, "sha256:"+hexA, amd64Platform, refAnnotation),
+		"unknown media type":        ociIndexJSON("text/plain", "sha256:"+hexA, amd64Platform, refAnnotation),
+		"short digest":              ociIndexJSON(dockerManifestMediaType, "sha256:abc", amd64Platform, refAnnotation),
+		"uppercase digest":          ociIndexJSON(dockerManifestMediaType, "sha256:"+strings.ToUpper(hexA), amd64Platform, refAnnotation),
+		"io.containerd.image.name":  ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, amd64Platform, `"io.containerd.image.name":"docker.io/evil/x:1",`+refAnnotation),
+		"containerd name alone":     ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, amd64Platform, `"io.containerd.image.name":"registry.k8s.io/pause:3.10.2"`),
+		"second annotation":         ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, amd64Platform, refAnnotation+`,"a":"b"`),
+		"no annotation":             ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, amd64Platform, ``),
+		"empty ref name":            ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, amd64Platform, `"org.opencontainers.image.ref.name":""`),
+		"non-linux platform":        ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, `"platform":{"architecture":"amd64","os":"windows"},`, refAnnotation),
+		"unknown field":             strings.Replace(ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, amd64Platform, refAnnotation), `"schemaVersion":2,`, `"schemaVersion":2,"x":1,`, 1),
+		"wrong schemaVersion":       strings.Replace(ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, amd64Platform, refAnnotation), `"schemaVersion":2`, `"schemaVersion":1`, 1),
+		"trailing data":             ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, amd64Platform, refAnnotation) + ` {}`,
+		"two manifests":             `{"schemaVersion":2,"mediaType":"` + ociIndexMediaType + `","manifests":[` + manifestDescriptorJSON(hexA) + `,` + manifestDescriptorJSON(hexB) + `]}`,
+		"no manifests":              `{"schemaVersion":2,"mediaType":"` + ociIndexMediaType + `","manifests":[]}`,
+		"docker-save manifest.json": `[{"Config":"sha256:` + hexA + `","RepoTags":["registry.k8s.io/pause:3.10.2"],"Layers":["` + hexB + `.tar.gz"]}]`,
+		"empty document":            ``,
 	}
 	for name, raw := range bad {
-		if id, _, err := parseDockerSaveManifest(raw); err == nil {
-			t.Errorf("%s: got %q, want an error", name, id)
+		if got, err := parseOCIIndex(raw); err == nil {
+			t.Errorf("%s: got %+v, want an error", name, got)
 		}
 	}
 }
 
-func TestRetagDockerSaveManifest(t *testing.T) {
-	const pause = "registry.k8s.io/pause:3.10.2"
-	raw := `[{"Config":"sha256:` + hexA + `","RepoTags":["` + pause + `"],"Layers":["` + hexB + `.tar.gz"]}]`
-	got, err := retagDockerSaveManifest(raw, pause, "registry.k8s.io/pause:e2e-opt-canary")
-	want := `[{"Config":"sha256:` + hexA + `","RepoTags":["registry.k8s.io/pause:e2e-opt-canary"],"Layers":["` + hexB + `.tar.gz"]}]`
-	if err != nil || got != want {
-		t.Errorf("retag: got (%q, %v), want %q", got, err, want)
+func manifestDescriptorJSON(hex string) string {
+	return `{"mediaType":"` + dockerManifestMediaType + `","size":1,"digest":"sha256:` + hex + `","annotations":{` + refAnnotation + `}}`
+}
+
+func TestParseOCIManifest(t *testing.T) {
+	// A registry.k8s.io docker schema 2 manifest has this shape.
+	docker := `{"schemaVersion":2,"mediaType":"` + dockerManifestMediaType + `","config":{"mediaType":"application/vnd.docker.container.image.v1+json","size":10,"digest":"sha256:` + hexA +
+		`"},"layers":[{"mediaType":"application/vnd.docker.image.rootfs.diff.tar.gzip","size":5,"digest":"sha256:` + hexB + `"},{"mediaType":"x","size":5,"digest":"sha256:` + hexC + `"},{"mediaType":"x","size":5,"digest":"sha256:` + hexB + `"}]}`
+	got, err := parseOCIManifest(docker)
+	if want := (ociManifestInfo{ConfigID: "sha256:" + hexA, Layers: []string{"sha256:" + hexB, "sha256:" + hexC, "sha256:" + hexB}}); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("docker manifest: got (%+v, %v), want %+v", got, err, want)
 	}
-	if _, tags, err := parseDockerSaveManifest(got); err != nil || !reflect.DeepEqual(tags, []string{"registry.k8s.io/pause:e2e-opt-canary"}) {
-		t.Errorf("retagged manifest parses to %v, %v", tags, err)
+	oci := `{"schemaVersion":2,"mediaType":"` + ociManifestMediaType + `","config":{"digest":"sha256:` + hexA + `"},"layers":[{"digest":"sha256:` + hexB + `"}],"annotations":{"x":"y"}}`
+	if got, err := parseOCIManifest(oci); err != nil || got.ConfigID != "sha256:"+hexA || len(got.Layers) != 1 {
+		t.Errorf("OCI manifest: got (%+v, %v)", got, err)
+	}
+
+	bad := map[string]string{
+		"wrong schemaVersion": strings.Replace(docker, `"schemaVersion":2`, `"schemaVersion":1`, 1),
+		"short config":        strings.Replace(docker, `sha256:`+hexA, `sha256:abc`, 1),
+		"no layers":           `{"schemaVersion":2,"config":{"digest":"sha256:` + hexA + `"},"layers":[]}`,
+		"bad layer digest":    `{"schemaVersion":2,"config":{"digest":"sha256:` + hexA + `"},"layers":[{"digest":"md5:1"}]}`,
+		"not JSON":            `[]`,
+		"empty":               ``,
+	}
+	for name, raw := range bad {
+		if got, err := parseOCIManifest(raw); err == nil {
+			t.Errorf("%s: got %+v, want an error", name, got)
+		}
+	}
+}
+
+func TestRenderOCIIndexRefName(t *testing.T) {
+	const pause = "registry.k8s.io/pause:3.10.2"
+	raw := ociIndexJSON(dockerManifestMediaType, "sha256:"+hexA, amd64Platform, refAnnotation)
+	got, err := renderOCIIndexRefName(raw, pause, "registry.k8s.io/pause:e2e-opt-canary")
+	want := strings.Replace(raw, pause, "registry.k8s.io/pause:e2e-opt-canary", 1)
+	if err != nil || got != want {
+		t.Errorf("rename: got (%q, %v), want %q", got, err, want)
+	}
+	info, err := parseOCIIndex(got)
+	if err != nil || info.RefName != "registry.k8s.io/pause:e2e-opt-canary" || info.ManifestDigest != "sha256:"+hexA {
+		t.Errorf("renamed index parses to %+v, %v", info, err)
 	}
 
 	bad := map[string][3]string{
 		"old ref absent":      {raw, "registry.k8s.io/pause:3.9", "x/y:z"},
-		"old ref twice":       {raw + `,"RepoTags":["` + pause + `"]`, pause, "x/y:z"},
+		"old ref twice":       {raw + raw, pause, "x/y:z"},
 		"new ref with quote":  {raw, pause, `x/y:"z`},
 		"new ref empty":       {raw, pause, ""},
 		"only a partial name": {raw, "registry.k8s.io/pause", "x/y:z"},
 	}
 	for name, in := range bad {
-		if out, err := retagDockerSaveManifest(in[0], in[1], in[2]); err == nil {
+		if out, err := renderOCIIndexRefName(in[0], in[1], in[2]); err == nil {
 			t.Errorf("%s: got %q, want an error", name, out)
 		}
 	}
 }
 
 func TestParseTarMemberNames(t *testing.T) {
-	cfg := "sha256:" + hexA
-	layer := hexB + ".tar.gz"
-	got, err := parseTarMemberNames(cfg + "\n" + layer + "\n" + hexC + ".tar.gz\nmanifest.json\n")
-	if want := []string{cfg, layer, hexC + ".tar.gz", "manifest.json"}; err != nil || !reflect.DeepEqual(got, want) {
+	m := "blobs/sha256/" + hexA
+	l := "blobs/sha256/" + hexB
+	got, err := parseTarMemberNames("oci-layout\nindex.json\n" + m + "\n" + l + "\nblobs/sha256/" + hexC + "\n")
+	if want := []string{"oci-layout", "index.json", m, l, "blobs/sha256/" + hexC}; err != nil || !reflect.DeepEqual(got, want) {
 		t.Errorf("valid listing: got (%v, %v), want %v", got, err, want)
 	}
 	bad := map[string]string{
-		"empty":             "",
-		"manifest not last": "manifest.json\n" + cfg + "\n" + layer + "\n",
-		"too few members":   cfg + "\nmanifest.json\n",
-		"duplicate member":  cfg + "\n" + layer + "\n" + layer + "\nmanifest.json\n",
-		"traversal":         cfg + "\n../" + layer + "\nmanifest.json\n",
-		"leading slash":     "/" + cfg + "\n" + layer + "\nmanifest.json\n",
-		"option-like name":  "-C\n" + cfg + "\n" + layer + "\nmanifest.json\n",
-		"blank line inside": cfg + "\n\n" + layer + "\nmanifest.json\n",
+		"empty":                 "",
+		"too few members":       "oci-layout\nindex.json\n",
+		"oci-layout not first":  "index.json\noci-layout\n" + m + "\n",
+		"index.json not second": "oci-layout\n" + m + "\nindex.json\n",
+		"docker-save member":    "oci-layout\nindex.json\nmanifest.json\n" + m + "\n",
+		"directory member":      "oci-layout\nindex.json\nblobs/\n" + m + "\n",
+		"directory with slash":  "oci-layout\nindex.json\nblobs/sha256/\n" + m + "\n",
+		"duplicate member":      "oci-layout\nindex.json\n" + m + "\n" + m + "\n",
+		"traversal":             "oci-layout\nindex.json\n../" + m + "\n",
+		"leading slash":         "oci-layout\nindex.json\n/" + m + "\n",
+		"dot-slash":             "oci-layout\nindex.json\n./" + m + "\n",
+		"option-like name":      "oci-layout\nindex.json\n-C\n" + m + "\n",
+		"blank line inside":     "oci-layout\nindex.json\n\n" + m + "\n",
+		"uppercase hex":         "oci-layout\nindex.json\nblobs/sha256/" + strings.ToUpper(hexA) + "\n",
+		"short hex":             "oci-layout\nindex.json\nblobs/sha256/abc\n",
+		"non-blob name last":    "oci-layout\nindex.json\n" + strings.Repeat(m+"\n", 1) + strings.Repeat("blobs/sha256/"+hexB+"\n", 1) + "x\n",
 	}
 	for name, raw := range bad {
 		if got, err := parseTarMemberNames(raw); err == nil {
 			t.Errorf("%s: got %v, want an error", name, got)
+		}
+	}
+	var many strings.Builder
+	many.WriteString("oci-layout\nindex.json\n")
+	for i := 0; i < ociMaxMembers; i++ { // 258 members in all
+		many.WriteString("blobs/sha256/" + strings.Repeat(strconv.FormatInt(int64(i%16), 16), 60) + fmt.Sprintf("%04x", i) + "\n")
+	}
+	if got, err := parseTarMemberNames(many.String()); err == nil {
+		t.Errorf("more than %d members: got %d names, want an error", ociMaxMembers, len(got))
+	}
+}
+
+// ctrCheckSample is `ctr -n k8s.io images check` output in the layout
+// containerd v2.3.5 prints (tabwriter-padded columns), for etcd before and after
+// a pull: the record moves from the amd64 manifest to the registry index.
+const ctrCheckSample = `REF                                                     TYPE                                                 DIGEST                                                                  STATUS         SIZE                  UNPACKED
+registry.k8s.io/etcd:3.7.0-0                            application/vnd.docker.distribution.manifest.v2+json sha256:1f445fa5dd06b08f3c0cf9f46e2891e9bc66cbf7e0b9c66627c40658edf4bc98 complete (19/19) 79.1 MiB/79.1 MiB   true
+registry.k8s.io/pause:3.10.2                            application/vnd.oci.image.index.v1+json              sha256:` + hexA + ` incomplete (1/3) 300.0 KiB/700.0 KiB true
+registry.k8s.io/coredns/coredns:v1.14.6                 application/vnd.docker.distribution.manifest.v2+json sha256:` + hexB + ` unavailable (1/?) 1.0 MiB/?          false
+registry.k8s.io/kube-proxy:v1.37.0                      application/vnd.docker.distribution.manifest.v2+json sha256:` + hexC + ` error          -                     false
+`
+
+func TestParseCtrImagesCheck(t *testing.T) {
+	rows, err := parseCtrImagesCheck(ctrCheckSample)
+	if err != nil || len(rows) != 4 {
+		t.Fatalf("got (%+v, %v), want 4 rows", rows, err)
+	}
+	etcd := rows[0]
+	if etcd.Ref != "registry.k8s.io/etcd:3.7.0-0" || etcd.Status != "complete" || etcd.Present != 19 || etcd.Required != 19 || !etcd.Unpacked ||
+		etcd.Digest != "sha256:1f445fa5dd06b08f3c0cf9f46e2891e9bc66cbf7e0b9c66627c40658edf4bc98" || !etcd.Complete() {
+		t.Errorf("etcd row = %+v", etcd)
+	}
+	if r := rows[1]; r.Status != "incomplete" || r.Present != 1 || r.Required != 3 || r.Complete() {
+		t.Errorf("incomplete row = %+v", r)
+	}
+	if r := rows[2]; r.Status != "unavailable" || r.Present != 1 || r.Required != -1 || r.Complete() || r.Unpacked {
+		t.Errorf("unavailable row = %+v", r)
+	}
+	if r := rows[3]; r.Status != "error" || r.Complete() {
+		t.Errorf("error row = %+v", r)
+	}
+
+	// "complete" with a short count is not complete, whatever the word says.
+	short, err := parseCtrImagesCheck("REF TYPE DIGEST STATUS SIZE UNPACKED\nr:t application/x sha256:" + hexA + " complete (3/5) 1 B/2 B true\n")
+	if err != nil || short[0].Complete() {
+		t.Errorf("complete (3/5): got (%+v, %v), want not Complete", short, err)
+	}
+
+	bad := map[string]string{
+		"empty":          "",
+		"no header":      "r:t application/x sha256:" + hexA + " complete (1/1) 1 B/1 B true\n",
+		"short row":      "REF TYPE DIGEST STATUS SIZE UNPACKED\nr:t application/x sha256:" + hexA + "\n",
+		"bad digest":     "REF TYPE DIGEST STATUS SIZE UNPACKED\nr:t application/x sha256:abc complete (1/1) 1 B/1 B true\n",
+		"unknown status": "REF TYPE DIGEST STATUS SIZE UNPACKED\nr:t application/x sha256:" + hexA + " weird (1/1) 1 B/1 B true\n",
+		"no count":       "REF TYPE DIGEST STATUS SIZE UNPACKED\nr:t application/x sha256:" + hexA + " complete 1 B/1 B 1 B true\n",
+		"bad unpacked":   "REF TYPE DIGEST STATUS SIZE UNPACKED\nr:t application/x sha256:" + hexA + " complete (1/1) 1 B/1 B maybe\n",
+		"repeated ref":   "REF TYPE DIGEST STATUS SIZE UNPACKED\nr:t application/x sha256:" + hexA + " complete (1/1) 1 B/1 B true\nr:t application/x sha256:" + hexA + " complete (1/1) 1 B/1 B true\n",
+	}
+	for name, raw := range bad {
+		if got, err := parseCtrImagesCheck(raw); err == nil {
+			t.Errorf("%s: got %+v, want an error", name, got)
+		}
+	}
+}
+
+// ctrContentSample is `ctr -n k8s.io content ls` output (containerd v2.3.5):
+// padding tabs between columns, AGE with spaces, labels sorted and comma-joined.
+const ctrContentSample = "DIGEST\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\tSIZE\tAGE\t\tLABELS\n" +
+	"sha256:" + hexA + "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t1.2kB\t3 minutes\t\tcontainerd.io/gc.ref.content.config=sha256:" + hexB + ",containerd.io/gc.ref.content.l.0=sha256:" + hexC + "\n" +
+	"sha256:" + hexB + "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t2.3kB\tAbout a minute\t\t-\n"
+
+func TestParseCtrContentLs(t *testing.T) {
+	got, err := parseCtrContentLs(ctrContentSample)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got (%+v, %v), want 2 blobs", got, err)
+	}
+	a := got["sha256:"+hexA]
+	if a.Labels["containerd.io/gc.ref.content.config"] != "sha256:"+hexB || a.Labels["containerd.io/gc.ref.content.l.0"] != "sha256:"+hexC || len(a.Labels) != 2 {
+		t.Errorf("labels of %s = %v", hexA, a.Labels)
+	}
+	if b := got["sha256:"+hexB]; len(b.Labels) != 0 {
+		t.Errorf("a '-' LABELS column must give no labels, got %v", b.Labels)
+	}
+	// Space-padded columns parse the same.
+	spaced := "DIGEST SIZE AGE LABELS\nsha256:" + hexA + "   1.2kB   2 hours   k=v\n"
+	if got, err := parseCtrContentLs(spaced); err != nil || got["sha256:"+hexA].Labels["k"] != "v" {
+		t.Errorf("space-padded: got (%+v, %v)", got, err)
+	}
+
+	bad := map[string]string{
+		"empty":         "",
+		"no header":     "sha256:" + hexA + " 1kB 1 hour -\n",
+		"short row":     "DIGEST SIZE AGE LABELS\nsha256:" + hexA + " 1kB -\n",
+		"bad digest":    "DIGEST SIZE AGE LABELS\nsha256:abc 1kB 1 hour -\n",
+		"bad label":     "DIGEST SIZE AGE LABELS\nsha256:" + hexA + " 1kB 1 hour novalue\n",
+		"empty label k": "DIGEST SIZE AGE LABELS\nsha256:" + hexA + " 1kB 1 hour =v\n",
+		"repeated":      "DIGEST SIZE AGE LABELS\nsha256:" + hexA + " 1kB 1 hour -\nsha256:" + hexA + " 1kB 1 hour -\n",
+	}
+	for name, raw := range bad {
+		if got, err := parseCtrContentLs(raw); err == nil {
+			t.Errorf("%s: got %+v, want an error", name, got)
+		}
+	}
+}
+
+func TestGCRootViolations(t *testing.T) {
+	m := ociManifestInfo{ConfigID: "sha256:" + hexA, Layers: []string{"sha256:" + hexB, "sha256:" + hexC}}
+	full := map[string]string{
+		"containerd.io/gc.ref.content.config": "sha256:" + hexA,
+		"containerd.io/gc.ref.content.l.0":    "sha256:" + hexB,
+		"containerd.io/gc.ref.content.l.1":    "sha256:" + hexC,
+		"containerd.io/distribution.source.x": "extra",
+	}
+	if v := gcRootViolations(m, full); len(v) != 0 {
+		t.Errorf("fully rooted manifest: %v", v)
+	}
+	drop := func(k string) map[string]string {
+		c := map[string]string{}
+		for kk, vv := range full {
+			if kk != k {
+				c[kk] = vv
+			}
+		}
+		return c
+	}
+	wrong := map[string]string{}
+	for k, v := range full {
+		wrong[k] = v
+	}
+	wrong["containerd.io/gc.ref.content.l.1"] = "sha256:" + hexA
+	for name, labels := range map[string]map[string]string{
+		"config label missing": drop("containerd.io/gc.ref.content.config"),
+		"layer label missing":  drop("containerd.io/gc.ref.content.l.1"),
+		"layer label wrong":    wrong,
+		"no labels":            {},
+	} {
+		if v := gcRootViolations(m, labels); len(v) == 0 {
+			t.Errorf("%s: want a violation", name)
 		}
 	}
 }

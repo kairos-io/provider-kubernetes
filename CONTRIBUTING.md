@@ -62,11 +62,14 @@ predicate type, so select it explicitly:
 gh attestation verify \
   oci://ghcr.io/kairos-io/provider-kubernetes@${digest} \
   --repo kairos-io/provider-kubernetes \
-  --predicate-type https://kairos.io/attestations/bundled-control-plane-images/v1
+  --predicate-type https://kairos.io/attestations/bundled-control-plane-images/v2
 ```
 
 The predicate is the image's `/system/provider-kubernetes/images/images.lock`
-(`kubernetesVersion`, `imageRepository`, `verifiedBy`, and `{ref, digest, tarball, verified, verifyReason}` per image). See
+(`kubernetesVersion`, `imageRepository`, `verifiedBy`, and `{ref, digest, manifestDigest, tarball, verified, verifyReason}` per image).
+The predicate type is `/v2` because ADR-16-A3 added `manifestDigest`, the
+resolved per-platform manifest digest the boot-time checker pins each archive
+to; `/v1` lacked it. The lock is therefore architecture-specific. See
 [`docs/testing.md`](./docs/testing.md) for the full supply-chain picture.
 
 ## Releasing (maintainers)

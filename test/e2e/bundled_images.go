@@ -11,14 +11,29 @@ package e2e
 // up by. kubeadm decides whether to pull by asking the CRI for the image status
 // of the exact ref string (kubeadm v1.37.0
 // cmd/kubeadm/app/util/runtime/runtime.go:247-259), and containerd resolves its
-// sandbox_image the same way. `ctr images import` names each image after the
-// RepoTags in the tarball's manifest.json (containerd v2.3.5
-// core/images/archive/importer.go:213-231), or "import-<date>" when there are
-// none (cmd/ctr/commands/images/import.go:131-132). A tarball pulled by digest
-// with crane carries RepoTags "<repo>:i-was-a-digest" (go-containerregistry
-// v0.20.3 pkg/crane/pull.go:33). Imported as is, the images exist but under
-// names nothing asks for, so an air-gapped first boot tries to pull and fails.
-// Counting imported tarballs cannot see that; these checks can.
+// sandbox_image the same way. Each bundled tarball is a canonical OCI image
+// layout (ADR-16-A3): oci-layout, index.json, then the manifest, config and layer
+// blobs under blobs/sha256/. `ctr images import` names the image after the
+// org.opencontainers.image.ref.name annotation on index.json's one manifest
+// descriptor, unless an io.containerd.image.name annotation is present, which
+// takes precedence (containerd v2.3.5 core/images/archive/importer.go
+// imageName()); with no usable name it falls back to "import-<date>"
+// (cmd/ctr/commands/images/import.go:131-132). A tarball pulled by digest with
+// crane carries the placeholder tag "<repo>:i-was-a-digest"
+// (go-containerregistry pkg/crane/pull.go), and bundle-images.sh's pinned crane
+// is CRANE_VERSION=v0.22.1 (Dockerfile:338). Imported as is, the images exist
+// but under names nothing asks for, so an air-gapped first boot tries to pull and
+// fails. Counting imported tarballs cannot see that; these checks can.
+//
+// Why OCI layout and not docker-save: a docker-save tarball carries no manifest
+// document, so containerd re-serializes one at import, and its digest exists in
+// no registry. A later CRI pull of the same ref re-points the image record at the
+// registry's index, orphans the synthesized manifest and lets GC delete it, and
+// CreateContainer then fails with "content digest ...: not found". Under OCI
+// layout the record targets the registry's own manifest, so a later pull finds it
+// already local and nothing is orphaned. IR-9 cannot see that class of defect
+// (it checks right after import, before any pull exists); IR-10
+// (bundled_images_pull_test.go) is the gate that can.
 //
 // ADR-16-A2: the bundle lives in the image-only hostexec.BundleDir, and
 // `import-images` imports only the images.lock entries after checking each one.
@@ -68,11 +83,15 @@ type imagesLockVerifiedBy struct {
 }
 
 type imagesLockItem struct {
-	Ref          string `json:"ref"`
-	Digest       string `json:"digest"`
-	Tarball      string `json:"tarball"`
-	Verified     bool   `json:"verified"`
-	VerifyReason string `json:"verifyReason"`
+	Ref string `json:"ref"`
+	// Digest is the cosign-verified index digest.
+	Digest string `json:"digest"`
+	// ManifestDigest is the per-platform (architecture-specific) manifest digest
+	// the tarball's index.json must name.
+	ManifestDigest string `json:"manifestDigest"`
+	Tarball        string `json:"tarball"`
+	Verified       bool   `json:"verified"`
+	VerifyReason   string `json:"verifyReason"`
 }
 
 // parseImagesLock parses images.lock and rejects entries the checks could not
@@ -102,6 +121,9 @@ func parseImagesLock(raw string) (imagesLock, error) {
 		refs[img.Ref] = true
 		if !lockDigestRE.MatchString(img.Digest) {
 			return imagesLock{}, fmt.Errorf("images.lock entry %s: digest %q is not sha256:<64 hex>", img.Ref, img.Digest)
+		}
+		if !lockDigestRE.MatchString(img.ManifestDigest) {
+			return imagesLock{}, fmt.Errorf("images.lock entry %s: manifestDigest %q is not sha256:<64 hex>", img.Ref, img.ManifestDigest)
 		}
 		if !lockTarballRE.MatchString(img.Tarball) || img.Tarball == ".tar" {
 			return imagesLock{}, fmt.Errorf("images.lock entry %s: tarball %q is not a plain *.tar file name", img.Ref, img.Tarball)
@@ -159,7 +181,7 @@ func plainLockValue(s string) bool {
 func renderImagesLock(l imagesLock) (string, error) {
 	values := []string{l.KubernetesVersion, l.ImageRepository, l.VerifiedBy.Identity, l.VerifiedBy.Issuer}
 	for _, img := range l.Images {
-		values = append(values, img.Ref, img.Digest, img.Tarball, img.VerifyReason)
+		values = append(values, img.Ref, img.Digest, img.ManifestDigest, img.Tarball, img.VerifyReason)
 	}
 	for _, v := range values {
 		if !plainLockValue(v) {
@@ -176,86 +198,170 @@ func renderImagesLock(l imagesLock) (string, error) {
 		if i > 0 {
 			b.WriteString(",\n")
 		}
-		fmt.Fprintf(&b, "    {\"ref\": \"%s\", \"digest\": \"%s\", \"tarball\": \"%s\", \"verified\": %t, \"verifyReason\": \"%s\"}",
-			img.Ref, img.Digest, img.Tarball, img.Verified, img.VerifyReason)
+		fmt.Fprintf(&b, "    {\"ref\": \"%s\", \"digest\": \"%s\", \"manifestDigest\": \"%s\", \"tarball\": \"%s\", \"verified\": %t, \"verifyReason\": \"%s\"}",
+			img.Ref, img.Digest, img.ManifestDigest, img.Tarball, img.Verified, img.VerifyReason)
 	}
 	b.WriteString("\n  ]\n}\n")
 	return b.String(), nil
 }
 
-// dockerSaveEntry is one manifest.json entry of a docker-save tarball as crane
-// writes it (go-containerregistry v0.20.3 pkg/v1/tarball/image.go:124-131).
-type dockerSaveEntry struct {
-	Config       string
-	RepoTags     []string
-	Layers       []string
-	LayerSources map[string]json.RawMessage `json:",omitempty"`
+// Media types and names of the canonical OCI layout (ADR-16-A3).
+const (
+	ociIndexMediaType       = "application/vnd.oci.image.index.v1+json"
+	ociManifestMediaType    = "application/vnd.oci.image.manifest.v1+json"
+	dockerManifestMediaType = "application/vnd.docker.distribution.manifest.v2+json"
+	// ociRefNameAnnotation is the only annotation index.json carries.
+	ociRefNameAnnotation = "org.opencontainers.image.ref.name"
+	ociBlobPrefix        = "blobs/sha256/"
+	ociMaxMembers        = 256
+)
+
+// ociIndexInfo is what IR-9 reads from a bundled tarball's index.json.
+type ociIndexInfo struct {
+	// ManifestDigest is the digest of the one manifest, "sha256:<hex>".
+	ManifestDigest string
+	// MediaType is that manifest's media type.
+	MediaType string
+	// RefName is the image name the import will give the image.
+	RefName string
 }
 
-// parseDockerSaveManifest strictly parses a tarball's manifest.json, which must
-// describe exactly one image, and returns that image's config digest as the CRI
-// reports an image ID ("sha256:<hex>") plus its RepoTags. It accepts the Config
-// spellings the docker-save family uses: "sha256:<hex>" (crane), "<hex>.json"
-// (docker save) and "blobs/sha256/<hex>" (OCI-layout docker save).
-func parseDockerSaveManifest(raw string) (configID string, repoTags []string, err error) {
+// parseOCIIndex strictly parses a bundled tarball's index.json: exactly one
+// manifest descriptor, an allowed manifest media type (never an index), a sha256
+// digest, a platform that is absent or linux, and exactly one annotation,
+// org.opencontainers.image.ref.name. A second annotation is refused because
+// io.containerd.image.name, if present, would override the name.
+func parseOCIIndex(raw string) (ociIndexInfo, error) {
+	var doc struct {
+		SchemaVersion int    `json:"schemaVersion"`
+		MediaType     string `json:"mediaType"`
+		Manifests     []struct {
+			MediaType string `json:"mediaType"`
+			Size      int64  `json:"size"`
+			Digest    string `json:"digest"`
+			Platform  *struct {
+				Architecture string `json:"architecture"`
+				OS           string `json:"os"`
+			} `json:"platform"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"manifests"`
+	}
 	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.DisallowUnknownFields()
-	var entries []dockerSaveEntry
-	if err := dec.Decode(&entries); err != nil {
-		return "", nil, fmt.Errorf("parse manifest.json: %w", err)
+	if err := dec.Decode(&doc); err != nil {
+		return ociIndexInfo{}, fmt.Errorf("parse index.json: %w", err)
 	}
 	if dec.More() {
-		return "", nil, fmt.Errorf("parse manifest.json: trailing data after the manifest array")
+		return ociIndexInfo{}, fmt.Errorf("parse index.json: trailing data")
 	}
-	if len(entries) != 1 {
-		return "", nil, fmt.Errorf("manifest.json describes %d images, want exactly 1", len(entries))
+	if doc.SchemaVersion != 2 || doc.MediaType != ociIndexMediaType {
+		return ociIndexInfo{}, fmt.Errorf("index.json schemaVersion %d mediaType %q, want 2 and %s", doc.SchemaVersion, doc.MediaType, ociIndexMediaType)
 	}
-	e := entries[0]
-	if len(e.Layers) == 0 {
-		return "", nil, fmt.Errorf("manifest.json image has no layers")
+	if len(doc.Manifests) != 1 {
+		return ociIndexInfo{}, fmt.Errorf("index.json has %d manifests, want exactly 1", len(doc.Manifests))
 	}
-	hex := e.Config
-	switch {
-	case strings.HasPrefix(hex, "sha256:"):
-		hex = strings.TrimPrefix(hex, "sha256:")
-	case strings.HasPrefix(hex, "blobs/sha256/"):
-		hex = strings.TrimPrefix(hex, "blobs/sha256/")
-	case strings.HasSuffix(hex, ".json"):
-		hex = strings.TrimSuffix(hex, ".json")
+	m := doc.Manifests[0]
+	if m.MediaType != ociManifestMediaType && m.MediaType != dockerManifestMediaType {
+		return ociIndexInfo{}, fmt.Errorf("index.json manifest mediaType %q is not %s or %s", m.MediaType, ociManifestMediaType, dockerManifestMediaType)
 	}
-	if !sha256HexRE.MatchString(hex) {
-		return "", nil, fmt.Errorf("manifest.json Config %q is not a sha256 config digest", e.Config)
+	if !lockDigestRE.MatchString(m.Digest) {
+		return ociIndexInfo{}, fmt.Errorf("index.json manifest digest %q is not sha256:<64 hex>", m.Digest)
 	}
-	return "sha256:" + hex, e.RepoTags, nil
+	if m.Size < 1 {
+		return ociIndexInfo{}, fmt.Errorf("index.json manifest size %d is not positive", m.Size)
+	}
+	if m.Platform != nil && m.Platform.OS != "linux" {
+		return ociIndexInfo{}, fmt.Errorf("index.json platform os %q, want linux", m.Platform.OS)
+	}
+	if len(m.Annotations) != 1 {
+		return ociIndexInfo{}, fmt.Errorf("index.json manifest has %d annotations, want exactly 1 (%s)", len(m.Annotations), ociRefNameAnnotation)
+	}
+	name, ok := m.Annotations[ociRefNameAnnotation]
+	if !ok || name == "" {
+		return ociIndexInfo{}, fmt.Errorf("index.json manifest lacks the %s annotation", ociRefNameAnnotation)
+	}
+	return ociIndexInfo{ManifestDigest: m.Digest, MediaType: m.MediaType, RefName: name}, nil
 }
 
-// retagDockerSaveManifest replaces the RepoTags of a bundled tarball's
-// manifest.json, `"RepoTags":["<oldRef>"]`, with newRef by exact string
-// replacement, the way bundle-images.sh names a tarball. It fails unless the old
-// RepoTags text occurs exactly once, so the result differs from raw only there.
-func retagDockerSaveManifest(raw, oldRef, newRef string) (string, error) {
-	oldText := `"RepoTags":["` + oldRef + `"]`
+// ociManifestInfo is what IR-9 and IR-10 read from the image manifest blob.
+type ociManifestInfo struct {
+	// ConfigID is the config digest as the CRI reports an image ID ("sha256:<hex>").
+	ConfigID string
+	// Layers are the layer digests in manifest order (a repeat stays repeated:
+	// containerd labels layers by their index in the manifest).
+	Layers []string
+}
+
+// parseOCIManifest parses an image manifest (OCI or docker schema 2) far enough
+// to reach its config and layer digests, which is the second step from
+// index.json to the config digest IR-9 (c) compares to the CRI image ID.
+func parseOCIManifest(raw string) (ociManifestInfo, error) {
+	var doc struct {
+		SchemaVersion int `json:"schemaVersion"`
+		Config        struct {
+			Digest string `json:"digest"`
+		} `json:"config"`
+		Layers []struct {
+			Digest string `json:"digest"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return ociManifestInfo{}, fmt.Errorf("parse image manifest: %w", err)
+	}
+	if doc.SchemaVersion != 2 {
+		return ociManifestInfo{}, fmt.Errorf("image manifest schemaVersion %d, want 2", doc.SchemaVersion)
+	}
+	if !lockDigestRE.MatchString(doc.Config.Digest) {
+		return ociManifestInfo{}, fmt.Errorf("image manifest config digest %q is not sha256:<64 hex>", doc.Config.Digest)
+	}
+	if len(doc.Layers) == 0 {
+		return ociManifestInfo{}, fmt.Errorf("image manifest has no layers")
+	}
+	info := ociManifestInfo{ConfigID: doc.Config.Digest}
+	for i, l := range doc.Layers {
+		if !lockDigestRE.MatchString(l.Digest) {
+			return ociManifestInfo{}, fmt.Errorf("image manifest layers[%d] digest %q is not sha256:<64 hex>", i, l.Digest)
+		}
+		info.Layers = append(info.Layers, l.Digest)
+	}
+	return info, nil
+}
+
+// renderOCIIndexRefName replaces the ref.name annotation of a bundled tarball's
+// compact index.json, `"org.opencontainers.image.ref.name":"<oldRef>"`, with
+// newRef by exact string replacement, the way bundle-images.sh names a tarball.
+// It fails unless that text occurs exactly once, so the result differs from raw
+// only there (the manifest digest, and so the lock pin, is unchanged).
+func renderOCIIndexRefName(raw, oldRef, newRef string) (string, error) {
+	oldText := `"` + ociRefNameAnnotation + `":"` + oldRef + `"`
 	if n := strings.Count(raw, oldText); n != 1 {
-		return "", fmt.Errorf("manifest.json contains %s %d times, want exactly once", oldText, n)
+		return "", fmt.Errorf("index.json contains %s %d times, want exactly once", oldText, n)
 	}
 	if !plainLockValue(newRef) || newRef == "" {
 		return "", fmt.Errorf("new ref %q is not a plain reference", newRef)
 	}
-	return strings.Replace(raw, oldText, `"RepoTags":["`+newRef+`"]`, 1), nil
+	return strings.Replace(raw, oldText, `"`+ociRefNameAnnotation+`":"`+newRef+`"`, 1), nil
 }
 
-// dockerSaveMemberRE is the shape of every member name in a bundled tarball.
-var dockerSaveMemberRE = regexp.MustCompile(`^(manifest\.json|sha256:[0-9a-f]{64}|[0-9a-f]{64}\.tar\.gz)$`)
+// ociBlobMemberRE is the shape of every blob member name in a bundled tarball.
+var ociBlobMemberRE = regexp.MustCompile(`^blobs/sha256/[0-9a-f]{64}$`)
 
-// parseTarMemberNames parses `tar -tf` output of a bundled tarball: one member per
-// line, every name a bundle member name (so it is safe to pass back to tar as an
-// argument), no duplicates, manifest.json last. The order is kept.
+// parseTarMemberNames parses `tar -tf` output of a bundled tarball and enforces
+// the member rule of the canonical layout: oci-layout, then index.json, then
+// blob members, no directory members, no duplicates, 3..256 in all. Every name is
+// a bundle member name, so it is safe to pass back to tar as an argument. The
+// order is kept.
 func parseTarMemberNames(raw string) ([]string, error) {
 	var names []string
 	seen := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSuffix(raw, "\n"), "\n") {
-		if !dockerSaveMemberRE.MatchString(line) {
-			return nil, fmt.Errorf("tar member %q is not a bundle member name", line)
+	for i, line := range strings.Split(strings.TrimSuffix(raw, "\n"), "\n") {
+		switch {
+		case i == 0 && line != "oci-layout":
+			return nil, fmt.Errorf("tar member 1 is %q, want oci-layout", line)
+		case i == 1 && line != "index.json":
+			return nil, fmt.Errorf("tar member 2 is %q, want index.json", line)
+		case i >= 2 && !ociBlobMemberRE.MatchString(line):
+			return nil, fmt.Errorf("tar member %q is not a blob member name (blobs/sha256/<64 hex>)", line)
 		}
 		if seen[line] {
 			return nil, fmt.Errorf("tar member %q appears more than once", line)
@@ -263,10 +369,162 @@ func parseTarMemberNames(raw string) ([]string, error) {
 		seen[line] = true
 		names = append(names, line)
 	}
-	if len(names) < 3 || names[len(names)-1] != "manifest.json" {
-		return nil, fmt.Errorf("tar members %v: want a config, layers and manifest.json last", names)
+	if len(names) < 3 || len(names) > ociMaxMembers {
+		return nil, fmt.Errorf("tar has %d members, want 3..%d", len(names), ociMaxMembers)
 	}
 	return names, nil
+}
+
+// ctrImageCheck is one row of `ctr -n k8s.io images check`.
+type ctrImageCheck struct {
+	Ref string
+	// Type and Digest are the record's target media type and digest.
+	Type   string
+	Digest string
+	// Status is complete, incomplete, unavailable or error.
+	Status string
+	// Present and Required are the N/M of "complete (N/M)"; Required is -1 when
+	// containerd cannot tell ("unavailable (N/?)").
+	Present, Required int
+	Unpacked          bool
+}
+
+// Complete reports whether every blob the record needs is present: status
+// complete with N == M.
+func (c ctrImageCheck) Complete() bool {
+	return c.Status == "complete" && c.Required > 0 && c.Present == c.Required
+}
+
+var ctrCheckCountRE = regexp.MustCompile(`^\(([0-9]+)/([0-9]+|\?)\)$`)
+
+// parseCtrImagesCheck parses `ctr images check` output (containerd v2.3.5
+// cmd/ctr/commands/images/check.go): a REF TYPE DIGEST STATUS SIZE UNPACKED
+// header, then per image
+//
+//	<ref> <type> <digest> complete (18/18) <present>/<required> <unpacked>
+//
+// (the "error" status has no count and a "-" size). Names never contain
+// whitespace. It rejects a missing header, a malformed row and a repeated ref.
+func parseCtrImagesCheck(raw string) ([]ctrImageCheck, error) {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	if len(lines) == 0 || strings.Join(strings.Fields(lines[0]), " ") != "REF TYPE DIGEST STATUS SIZE UNPACKED" {
+		return nil, fmt.Errorf("ctr images check output lacks the REF TYPE DIGEST STATUS SIZE UNPACKED header: %q", trimForLog(raw))
+	}
+	var rows []ctrImageCheck
+	seen := map[string]bool{}
+	for _, line := range lines[1:] {
+		f := strings.Fields(line)
+		if len(f) < 6 {
+			return nil, fmt.Errorf("ctr images check row %q has %d fields, want at least 6", line, len(f))
+		}
+		row := ctrImageCheck{Ref: f[0], Type: f[1], Digest: f[2], Status: f[3], Required: -1}
+		if !lockDigestRE.MatchString(row.Digest) {
+			return nil, fmt.Errorf("ctr images check row %q: digest %q is not sha256:<64 hex>", line, row.Digest)
+		}
+		switch row.Status {
+		case "complete", "incomplete", "unavailable":
+			m := ctrCheckCountRE.FindStringSubmatch(f[4])
+			if m == nil || len(f) < 7 {
+				return nil, fmt.Errorf("ctr images check row %q: want a (N/M) count after %s", line, row.Status)
+			}
+			row.Present, _ = strconv.Atoi(m[1])
+			if m[2] != "?" {
+				row.Required, _ = strconv.Atoi(m[2])
+			}
+		case "error":
+		default:
+			return nil, fmt.Errorf("ctr images check row %q: unknown status %q", line, row.Status)
+		}
+		switch f[len(f)-1] {
+		case "true":
+			row.Unpacked = true
+		case "false":
+		default:
+			return nil, fmt.Errorf("ctr images check row %q: last field %q is not true or false", line, f[len(f)-1])
+		}
+		if seen[row.Ref] {
+			return nil, fmt.Errorf("ctr images check lists %q more than once", row.Ref)
+		}
+		seen[row.Ref] = true
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+// ctrContent is one blob of `ctr -n k8s.io content ls`.
+type ctrContent struct {
+	Digest string
+	Labels map[string]string
+}
+
+// parseCtrContentLs parses `ctr content ls` output (cmd/ctr/commands/content/
+// content.go): a DIGEST SIZE AGE LABELS header, then one blob per line with the
+// digest first and the LABELS column last ("-" for none, else sorted k=v pairs
+// joined by commas). SIZE is one token; AGE may hold spaces ("3 minutes"), so
+// only the first and last fields are used. `ctr content info` does not exist in
+// containerd 2.3.5: this listing is the only way to read a blob's labels. It
+// rejects a missing header, a malformed row and a repeated digest.
+func parseCtrContentLs(raw string) (map[string]ctrContent, error) {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	if len(lines) == 0 || strings.Join(strings.Fields(lines[0]), " ") != "DIGEST SIZE AGE LABELS" {
+		return nil, fmt.Errorf("ctr content ls output lacks the DIGEST SIZE AGE LABELS header: %q", trimForLog(raw))
+	}
+	out := map[string]ctrContent{}
+	for _, line := range lines[1:] {
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			return nil, fmt.Errorf("ctr content ls row %q has %d fields, want at least 4", line, len(f))
+		}
+		c := ctrContent{Digest: f[0], Labels: map[string]string{}}
+		if !lockDigestRE.MatchString(c.Digest) {
+			return nil, fmt.Errorf("ctr content ls row %q: digest %q is not sha256:<64 hex>", line, c.Digest)
+		}
+		if last := f[len(f)-1]; last != "-" {
+			for _, kv := range strings.Split(last, ",") {
+				k, v, ok := strings.Cut(kv, "=")
+				if !ok || k == "" {
+					return nil, fmt.Errorf("ctr content ls row %q: label %q is not key=value", line, kv)
+				}
+				c.Labels[k] = v
+			}
+		}
+		if _, dup := out[c.Digest]; dup {
+			return nil, fmt.Errorf("ctr content ls lists %s more than once", c.Digest)
+		}
+		out[c.Digest] = c
+	}
+	return out, nil
+}
+
+// gcRefLabel is containerd's label prefix that roots a blob's children: without
+// them the config and layers of an imported image are unreferenced and GC may
+// delete them.
+const gcRefLabel = "containerd.io/gc.ref.content."
+
+// gcRootViolations lists how a manifest blob's labels differ from the rooting
+// containerd writes when it walks a manifest on import: .config naming the
+// config digest and .l.<i> naming layer i (by manifest index), nothing missing
+// or wrong. Extra labels are not a violation.
+func gcRootViolations(m ociManifestInfo, labels map[string]string) []string {
+	var v []string
+	want := map[string]string{gcRefLabel + "config": m.ConfigID}
+	for i, l := range m.Layers {
+		want[gcRefLabel+"l."+strconv.Itoa(i)] = l
+	}
+	keys := make([]string, 0, len(want))
+	for k := range want {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		switch got, ok := labels[k]; {
+		case !ok:
+			v = append(v, fmt.Sprintf("label %s is missing (want %s)", k, want[k]))
+		case got != want[k]:
+			v = append(v, fmt.Sprintf("label %s=%s, want %s", k, got, want[k]))
+		}
+	}
+	return v
 }
 
 // crictlImageStatus is the part of `crictl inspecti -o json <one ref>` IR-9

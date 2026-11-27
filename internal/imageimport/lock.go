@@ -24,11 +24,19 @@ const (
 
 // lockImage is one images.lock entry.
 type lockImage struct {
-	Ref          string `json:"ref"`
-	Digest       string `json:"digest"`
-	Tarball      string `json:"tarball"`
-	Verified     bool   `json:"verified"`
-	VerifyReason string `json:"verifyReason"`
+	Ref string `json:"ref"`
+	// Digest is the cosign-verified INDEX (multi-platform) digest.
+	Digest string `json:"digest"`
+	// ManifestDigest is the per-platform manifest digest the bundle was
+	// built from. It is ARCH-SPECIFIC: an amd64 bundle's lock carries the
+	// linux/amd64 child manifest digest, an arm64 bundle's the linux/arm64
+	// one. CheckTarPinned requires the tarball's index.json to name exactly
+	// this manifest, which is the only runtime link between the bundle and
+	// what was verified at build time.
+	ManifestDigest string `json:"manifestDigest"`
+	Tarball        string `json:"tarball"`
+	Verified       bool   `json:"verified"`
+	VerifyReason   string `json:"verifyReason"`
 }
 
 // lockVerifiedBy is the cosign identity that verified the bundle's images.
@@ -133,6 +141,9 @@ func validateLockValues(l lock) error {
 		if !reDigest.MatchString(img.Digest) {
 			return fmt.Errorf("images[%d].digest %q does not match sha256:<64 hex>", i, img.Digest)
 		}
+		if !reDigest.MatchString(img.ManifestDigest) {
+			return fmt.Errorf("images[%d].manifestDigest %q does not match sha256:<64 hex>", i, img.ManifestDigest)
+		}
 		if want := tarballForRef(img.Ref); img.Tarball != want {
 			return fmt.Errorf("images[%d].tarball %q, want %q (derived from ref)", i, img.Tarball, want)
 		}
@@ -198,6 +209,7 @@ func renderLock(l lock) []byte {
 	for i, img := range l.Images {
 		b.WriteString("    {\"ref\": " + jsonString(img.Ref) +
 			", \"digest\": " + jsonString(img.Digest) +
+			", \"manifestDigest\": " + jsonString(img.ManifestDigest) +
 			", \"tarball\": " + jsonString(img.Tarball) +
 			", \"verified\": " + strconv.FormatBool(img.Verified) +
 			", \"verifyReason\": " + jsonString(img.VerifyReason) + "}")

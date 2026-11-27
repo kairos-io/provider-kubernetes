@@ -217,10 +217,8 @@ jobs:
           #   (c) byte-identical to /usr/local/bin/* of the bundled etcd image tarball.
           work="$(mktemp -d)"
           cids=()
-          loaded=""
           cleanup() {
             for c in "${cids[@]}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done
-            if [ -n "$loaded" ]; then docker image rm -f "$loaded" >/dev/null 2>&1 || true; fi
             rm -rf "$work"
           }
           trap cleanup EXIT
@@ -271,44 +269,69 @@ jobs:
             || { echo "unexpected etcd tarball name '${lock_tar}'" >&2; exit 1; }
           docker run --rm --entrypoint cat "$IMG" \
             "/system/provider-kubernetes/images/${lock_tar}" > "$work/etcd.tar"
-          # The build names every bundled tarball's image with its exact ref
-          # (F-IMPORTREF), so docker load creates the image "${lock_ref}" and the trap
-          # removes that name afterwards. Refuse to go on if the name already exists
-          # locally: this step must never delete an image it did not create. The
-          # RepoTags bytes must be exactly ["<lock_ref>"] (the whole manifest.json is
-          # asserted byte-for-byte by the tarball-naming step). A tag (unlike an image
-          # ID) resolves the same on the classic and the containerd image store.
-          if docker image inspect "$lock_ref" >/dev/null 2>&1; then
-            echo "an image named ${lock_ref} already exists locally; refusing to load over it (the cleanup would delete it)" >&2
+          # The archive is a canonical OCI image layout (ADR-16-A3), not a docker-save
+          # tarball: there is no manifest.json member, and `docker load` CANNOT read an
+          # OCI layout on the classic image store the runner uses (it looks for a
+          # blobs/json and fails). So read the tools straight out of the archive's layer
+          # blobs, reaching them ONLY through the manifest images.lock pins. Every blob
+          # is hashed against the digest that named it, so nothing below trusts a tar
+          # member name, and no image is loaded, so nothing local can be clobbered.
+          lock_manifest="$(jq -r "${sel} | .manifestDigest" "$work/images.lock")"
+          [[ "$lock_manifest" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "images.lock etcd manifestDigest '${lock_manifest}' is not sha256:<64 hex>" >&2; exit 1; }
+          tar -xOf "$work/etcd.tar" index.json > "$work/index.json"
+          idx_manifest="$(grep -o '"digest":"sha256:[0-9a-f]\{64\}"' "$work/index.json" \
+            | sed -e 's#^"digest":"##' -e 's#"$##')"
+          if [ "$(grep -c . <<<"$idx_manifest")" -ne 1 ] || [ "$idx_manifest" != "$lock_manifest" ]; then
+            echo "etcd index.json names manifest '${idx_manifest}', images.lock pins ${lock_manifest}" >&2
             exit 1
           fi
-          manifest="$(tar -xOf "$work/etcd.tar" manifest.json)"
-          if [ "$(grep -o '"RepoTags":\[' <<<"$manifest" | wc -l)" -ne 1 ] \
-            || [[ "$manifest" != *"\"RepoTags\":[\"${lock_ref}\"]"* ]]; then
-            echo "etcd tarball RepoTags must be exactly [\"${lock_ref}\"]" >&2
-            exit 1
-          fi
-          loaded="$lock_ref"
-          load_out="$(docker load -i "$work/etcd.tar")"
-          printf '%s\n' "$load_out"
-          grep -qxF "Loaded image: ${loaded}" <<<"$load_out" \
-            || { echo "docker load did not load ${loaded}" >&2; exit 1; }
-          # NEVER docker run the etcd image: docker create only materializes its
+          tar -xOf "$work/etcd.tar" "blobs/sha256/${lock_manifest#sha256:}" > "$work/manifest.blob"
+          [ "$(sha256sum "$work/manifest.blob" | cut -d' ' -f1)" = "${lock_manifest#sha256:}" ] \
+            || { echo "the etcd manifest blob's sha256 is not ${lock_manifest#sha256:}" >&2; exit 1; }
+          layers="$(tr -d ' \t\n\r' < "$work/manifest.blob" \
+            | sed -n 's#.*"layers":\[\([^]]*\)\].*#\1#p' | grep -o 'sha256:[0-9a-f]\{64\}')"
+          [ -n "$layers" ] || { echo "the etcd manifest names no layers" >&2; exit 1; }
+          : > "$work/hits.etcdctl"; : > "$work/hits.etcdutl"
+          i=0
+          # The `|| [ -n ... ]` guard is deliberate: a last line without a trailing
+          # newline would otherwise be dropped silently, leaving a layer unchecked.
+          while IFS= read -r l || [ -n "$l" ]; do
+            [ -n "$l" ] || continue
+            i=$((i + 1))
+            tar -xOf "$work/etcd.tar" "blobs/sha256/${l#sha256:}" > "$work/layer.gz"
+            [ "$(sha256sum "$work/layer.gz" | cut -d' ' -f1)" = "${l#sha256:}" ] \
+              || { echo "etcd layer ${i} blob sha256 != ${l}" >&2; exit 1; }
+            gzip -dc "$work/layer.gz" > "$work/layer.tar"
+            tar -tf "$work/layer.tar" | sed -e 's#^\./##' > "$work/layer.names"
+            for tool in etcdctl etcdutl; do
+              if grep -qx "usr/local/bin/\.wh\.${tool}" "$work/layer.names"; then
+                echo "etcd layer ${i} whiteouts ${tool}; refusing to guess what an overlay would resolve to" >&2
+                exit 1
+              fi
+              if grep -qx "usr/local/bin/${tool}" "$work/layer.names"; then
+                echo "$i" >> "$work/hits.${tool}"
+                tar -xOf "$work/layer.tar" "usr/local/bin/${tool}" > "$work/etcd-image-${tool}"
+              fi
+            done
+          done <<<"$layers"
+          for tool in etcdctl etcdutl; do
+            [ "$(grep -c . "$work/hits.${tool}")" -eq 1 ] \
+              || { echo "usr/local/bin/${tool} is in $(grep -c . "$work/hits.${tool}") etcd layers, want exactly 1" >&2; exit 1; }
+          done
+          # NEVER docker run the shipped image: docker create only materializes its
           # filesystem for docker cp (the command argument is never started), and
-          # --pull never guarantees it is the loaded tarball, not a registry pull.
-          etcd_cid="$(docker create --pull never "$loaded" /usr/local/bin/etcdctl)"
-          cids+=("$etcd_cid")
+          # --pull never reaches a registry.
           final_cid="$(docker create --pull never "$IMG" /usr/bin/etcdctl)"
           cids+=("$final_cid")
           for tool in etcdctl etcdutl; do
-            docker cp "${etcd_cid}:/usr/local/bin/${tool}" "$work/etcd-image-${tool}"
             docker cp "${final_cid}:/usr/bin/${tool}" "$work/final-image-${tool}"
             for f in "$work/etcd-image-${tool}" "$work/final-image-${tool}"; do
               if [ ! -f "$f" ] || [ -L "$f" ]; then echo "${f} is not a regular file" >&2; exit 1; fi
             done
             a="$(sha256sum "$work/etcd-image-${tool}" | cut -d' ' -f1)"
             b="$(sha256sum "$work/final-image-${tool}" | cut -d' ' -f1)"
-            echo "${tool}: ${lock_ref} /usr/local/bin sha256=${a}; ${IMG} /usr/bin sha256=${b}"
+            echo "${tool}: ${lock_ref} archive layer $(cat "$work/hits.${tool}") sha256=${a}; ${IMG} /usr/bin sha256=${b}"
             [ "$a" = "$b" ] || { echo "${tool} in the image is not byte-identical to the verified etcd image's" >&2; exit 1; }
           done
           echo "OK: etcdctl/etcdutl ${want} are the verified ${lock_ref} binaries"

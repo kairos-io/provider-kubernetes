@@ -452,15 +452,36 @@ sudo /usr/bin/crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
 sudo /usr/bin/kubeadm config images list --kubernetes-version <version>
 ```
 
-`crictl inspecti` also succeeds if the image was pulled from the registry. To see
-that containerd holds the bundled image, compare its image ID with the `Config`
-digest in the matching tarball's manifest; they must be equal:
+`crictl inspecti` also succeeds if the image was pulled from the registry. Each
+bundled tarball is a single-platform OCI image layout, so the manifest the node
+should be holding is the one `images.lock` records as that entry's
+`manifestDigest`, and it is also what the tarball's own `index.json` names.
+Compare containerd's record with both; they must be equal:
+
+```sh
+sudo /usr/bin/ctr -n k8s.io images ls name==registry.k8s.io/pause:<tag>
+sudo /usr/bin/grep -o '"ref": "registry.k8s.io/pause:<tag>"[^}]*' \
+  /system/provider-kubernetes/images/images.lock
+sudo /usr/bin/tar -xOf \
+  /system/provider-kubernetes/images/registry.k8s.io_pause_<tag>.tar index.json
+```
+
+A record whose digest is NOT the bundled `manifestDigest` was replaced by a
+registry pull of the same reference (which carries no signature check at run
+time), not imported from the bundle.
+
+The CRI image ID is the image's CONFIG digest, which is identical whether the
+image came from the bundle or the registry, so it identifies the image but does
+not prove where it came from. To read it, and the config digest the bundled
+manifest names:
 
 ```sh
 sudo /usr/bin/crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
   --image-endpoint unix:///run/containerd/containerd.sock \
   inspecti -o go-template --template '{{.status.id}}' registry.k8s.io/pause:<tag>
-sudo /usr/bin/tar -xOf /system/provider-kubernetes/images/registry.k8s.io_pause_<tag>.tar manifest.json
+sudo /usr/bin/tar -xOf \
+  /system/provider-kubernetes/images/registry.k8s.io_pause_<tag>.tar \
+  blobs/sha256/<manifest-digest-hex>
 ```
 
 If the images are missing, check the boot import first (next entry).

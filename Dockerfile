@@ -305,25 +305,31 @@ RUN set -eux; \
 # ----------------------------------------------------------------------------
 # Stage: pre-bundle the control-plane container images (ADR-16). Resolve the EXACT
 # set from the bundled kubeadm (same source as the pause pin, so refs never drift),
-# cosign-VERIFY each against the Kubernetes release identity, and fetch each as a
-# ctr-importable tarball with crane (daemonless). The tarballs + a digest lockfile
+# cosign-VERIFY each against the Kubernetes release identity, and fetch each with
+# crane (daemonless) as a canonical single-platform OCI image LAYOUT archive --
+# never docker-save, which carries no manifest document at all and so makes
+# containerd synthesize one whose digest exists in no registry (ADR-16-A3,
+# F-IMPORTBLOB). The tarballs + a digest lockfile
 # (images.lock) are embedded in the read-only OS image at
 # /system/provider-kubernetes/images and imported into containerd at boot, so a
 # first boot converges with NO registry access (air-gap). Because the images land
 # in the immutable OS with no later admission check, signature verification is done
 # here at BUILD time (P5). CNI is intentionally NOT bundled (operator choice).
 #
-# The boot import is lock-driven and validating (ADR-16-A2): it imports only the
-# images.lock entries, and refuses any directory, lock or tarball that is not
+# The boot import is lock-driven and validating (ADR-16-A2, ADR-16-A3): it imports
+# only the images.lock entries, PINS each archive to that entry's manifestDigest,
+# and refuses any directory, lock or tarball that is not
 # root-owned, is group/other-writable, is not a regular file or sits on another
 # filesystem than the provider binary. The bundle's owner and mode are therefore
 # set HERE (root:root, directory 0755, files 0644): COPY keeps each file's owner and
 # mode from this stage, and fixing them in the final stage would store every
 # tarball a second time in a new layer.
 #
-# The same run then extracts the static etcdctl + etcdutl from the bundled etcd
-# image tarball into /tools (never /images), offline, after the signature floor
-# (etcd MUST verify) and images.lock are settled (ADR-12-A1). Taking them from the
+# The same run then extracts the static etcdctl + etcdutl into /tools (never
+# /images), after the signature floor (etcd MUST verify) and images.lock are
+# settled (ADR-12-A1), pinned to the per-platform MANIFEST digest the bundled etcd
+# archive names and gated on that image's config digest equalling the one the
+# bundled archive carries. Taking them from the
 # verified etcd image rather than a separate download keeps one trust root and
 # guarantees the tools match the etcd version kubeadm deploys for this release.
 # TARGETARCH is passed explicitly: crane pull selects that platform from each
@@ -588,15 +594,16 @@ RUN set -eu; \
     if [ -n "${bad}" ]; then echo "FATAL: want root:root 0755 directories;${bad%,} want directory|0|0|755" >&2; exit 1; fi; \
     echo "daemon exec-path directories: root:root 0755"
 
-# --- Pre-bundled control-plane images (ADR-16, ADR-16-A2) -------------------
+# --- Pre-bundled control-plane images (ADR-16, ADR-16-A2, ADR-16-A3) --------
 # Embed the control-plane image tarballs and images.lock (fetched, verified and
 # named by the image-bundler stage) in /system/provider-kubernetes/images: part of
 # the read-only OS image, on the same filesystem as the provider binary above, in
 # no systemd-sysext hierarchy, and NOT under /opt (persistent on Kairos, so a copy
 # there could be changed on the node and would outlive an image upgrade). The
 # import oneshot runs `agent-provider-kubernetes import-images`, which imports only
-# the images.lock entries after checking owner, mode, file type, filesystem and
-# tarball structure, so a first boot converges with no registry access (air-gap).
+# the images.lock entries after checking owner, mode, file type, filesystem, the
+# canonical OCI-layout structure and the entry's manifestDigest, so a first boot
+# converges with no registry access (air-gap).
 # No chmod/chown here: the image-bundler stage already set root:root 0755/0644, and
 # COPY creates /system/provider-kubernetes and the images directory as root 0755
 # (verified on BuildKit v0.13.2 and v0.32.2). scripts/verify-bundle-refs.sh asserts

@@ -233,7 +233,7 @@ func doImport(ctx context.Context, runner StdinRunner, verifyOnly bool, walk fun
 			continue
 		}
 
-		if checkErr := CheckTar(f, img.Ref); checkErr != nil {
+		if checkErr := CheckTarPinned(f, img.Ref, img.ManifestDigest); checkErr != nil {
 			_ = f.Close()
 			res.Refused++
 			logrus.Errorf("image-import: refused %s ref=%s reason=%s detail=%q",

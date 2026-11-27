@@ -13,7 +13,7 @@ package e2e
 //	globs *.tar instead of reading the lock -> (3) evil.tar is imported
 //	follows symlinks (no O_NOFOLLOW)        -> (4) symlink is imported
 //	opens a FIFO blocking (no O_NONBLOCK)   -> (4) fifo does not return in bound
-//	no structural check                     -> (4) the wrong RepoTag is imported
+//	no structural check                     -> (4) the wrong ref.name is imported
 //	no filesystem (device) check            -> (5) bind-mounted copies used
 //
 // It runs in its own node container and never pre-pulls. It changes the bundle
@@ -102,7 +102,7 @@ func TestBundledImagesLockDrivenImport(t *testing.T) {
 	pauseSHA := sha256InContainer(t, nc, pausePath)
 
 	// Pristine copies on the provider binary's filesystem: the pause tarball, and
-	// the same tarball with a RepoTag that is not its lock ref.
+	// the same tarball with a ref.name that is not its lock ref.
 	if _, err := nc.execErr(binTest, "-e", pristineDir); err == nil {
 		t.Fatalf("%s: %s already exists in the node image", label, pristineDir)
 	}
@@ -129,7 +129,7 @@ func TestBundledImagesLockDrivenImport(t *testing.T) {
 			KubernetesVersion: lock.KubernetesVersion,
 			ImageRepository:   lock.ImageRepository,
 			VerifiedBy:        lock.VerifiedBy,
-			Images:            []imagesLockItem{{Ref: optCanaryRef, Digest: pause.Digest, Tarball: canaryTarball, Verified: true}},
+			Images:            []imagesLockItem{{Ref: optCanaryRef, Digest: pause.Digest, ManifestDigest: pause.ManifestDigest, Tarball: canaryTarball, Verified: true}},
 		})
 		if err != nil {
 			t.Fatalf("render the /opt canary lock: %v", err)
@@ -161,7 +161,7 @@ func TestBundledImagesLockDrivenImport(t *testing.T) {
 	})
 	assertPathAbsentAfterCleanup(t, nc, legacyBundleRoot)
 
-	// (3) A valid docker-save tarball in the bundle directory that images.lock does
+	// (3) A valid OCI-layout tarball in the bundle directory that images.lock does
 	// not list. A *.tar glob would import it; the importer must only report it as
 	// unlisted, without opening it (so it cannot know its ref), and import nothing
 	// else than the lock entries.
@@ -223,8 +223,8 @@ func TestBundledImagesLockDrivenImport(t *testing.T) {
 			took: func(st fileStat) bool { return st.Type == "symbolic link" },
 		},
 		{
-			name: "wrong RepoTag", reason: "manifest",
-			why: "a well-formed, root-owned tarball whose manifest names another ref; only the structural " +
+			name: "wrong ref.name", reason: "manifest",
+			why: "a well-formed, root-owned tarball whose index.json names another ref; only the structural " +
 				"check against the lock ref stops ctr from naming the image " + wrongTagRef,
 			tamper: func(t *testing.T) {
 				execBounded(t, nc, dockerTimeout, binRm, "-f", pausePath)
@@ -522,9 +522,10 @@ func restoreTarball(t *testing.T, nc *nodeContainer, p, pristine, wantSHA string
 }
 
 // buildRetaggedTarball writes dst in the container: the members of src in src's
-// order, with only manifest.json's RepoTags changed from oldRef to newRef, the
-// way bundle-images.sh names a tarball. The result is a structurally valid bundle
-// tarball for newRef (same config and layers), root:root 0644.
+// order, with only index.json's org.opencontainers.image.ref.name changed from
+// oldRef to newRef, the way bundle-images.sh names a tarball. The result is a
+// structurally valid canonical OCI layout for newRef (same manifest, config and
+// layers, so the same manifest digest), root:root 0644.
 func buildRetaggedTarball(t *testing.T, nc *nodeContainer, src, dst, oldRef, newRef string) {
 	t.Helper()
 	listing, stderr, err := nc.ExecStdoutTimeout(tarballReadTimeout, binTar, "-tf", src)
@@ -539,16 +540,16 @@ func buildRetaggedTarball(t *testing.T, nc *nodeContainer, src, dst, oldRef, new
 	defer func() { _, _ = nc.execErr(binRm, "-rf", retagWorkDir) }()
 	execBounded(t, nc, dockerTimeout, binMkdir, "-p", retagWorkDir)
 	execBounded(t, nc, tarballReadTimeout, binTar, "-xf", src, "-C", retagWorkDir)
-	manifest, stderr, err := nc.ExecStdoutTimeout(dockerTimeout, binCat, retagWorkDir+"/manifest.json")
+	index, stderr, err := nc.ExecStdoutTimeout(dockerTimeout, binCat, retagWorkDir+"/index.json")
 	if err != nil {
-		t.Fatalf("read manifest.json of %s: %v\n%s", src, err, stderr)
+		t.Fatalf("read index.json of %s: %v\n%s", src, err, stderr)
 	}
-	retagged, err := retagDockerSaveManifest(manifest, oldRef, newRef)
+	retagged, err := renderOCIIndexRefName(index, oldRef, newRef)
 	if err != nil {
 		t.Fatalf("%s: %v", src, err)
 	}
-	nc.WriteFile(t, retagWorkDir+"/manifest.json", retagged, "0644")
+	nc.WriteFile(t, retagWorkDir+"/index.json", retagged, "0644")
 	execBounded(t, nc, tarballReadTimeout, append([]string{binTar, "-cf", dst, "-C", retagWorkDir}, names...)...)
 	execBounded(t, nc, dockerTimeout, binChmod, "0644", dst)
-	t.Logf("built %s from %s with RepoTags [%s]", dst, src, newRef)
+	t.Logf("built %s from %s with ref.name %s", dst, src, newRef)
 }
