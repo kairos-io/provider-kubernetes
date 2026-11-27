@@ -39,6 +39,16 @@
       "matchStrings": [
         "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s*\\n\\s*(?:ARG\\s+)?[A-Z_]+_VERSION\\s*\\??=\\s*(?<currentValue>\\S+)"
       ]
+    },
+    {
+      "customType": "regex",
+      "description": "syft, which generates the release SBOMs: version and release-tarball sha256 pinned together in scripts/install-syft.sh. The github-release-attachments datasource reads the new sha256 from the release's checksums file, so both lines change in one PR.",
+      "managerFilePatterns": [
+        "/(^|/)scripts/install-syft\\.sh$/"
+      ],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s*\\n[A-Z_]+_VERSION=(?<currentValue>\\S+)\\s*\\n[A-Z0-9_]+_SHA256=(?<currentDigest>[a-f0-9]{64})"
+      ]
     }
   ],
   "packageRules": [
@@ -73,7 +83,8 @@
       "matchDatasources": [
         "go",
         "github-tags",
-        "github-releases"
+        "github-releases",
+        "github-release-attachments"
       ],
       "minimumReleaseAge": "3 days"
     },

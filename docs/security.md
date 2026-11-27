@@ -420,8 +420,9 @@ What this does **not** cover:
   from that verified etcd image, so they come from an attested digest and match
   the etcd version kubeadm deploys. CI checks that the shipped `/usr/bin` binaries
   are byte-identical to the ones inside the bundled etcd image.
-- Base images and workflow actions are digest/SHA-pinned, and released images and
-  binaries carry SLSA build-provenance and SBOM attestations (see
+- Base images and workflow actions are digest/SHA-pinned, the release's SBOM
+  generator (syft) is pinned by sha256, and released images and binaries carry
+  SLSA build-provenance and SBOM attestations (see
   [Testing](./testing.md#release-artifact-provenance)).
 
 To check the etcd tools on an image yourself, compare three copies of `etcdctl`
