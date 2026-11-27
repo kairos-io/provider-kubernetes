@@ -41,7 +41,12 @@ asset="syft_${SYFT_VERSION#v}_linux_amd64.tar.gz"
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
-curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o "${tmp}/${asset}" \
+# --retry covers the transient registry/CDN failures seen in CI (timeouts, 408,
+# 429, 500, 502, 503, 504) with exponential backoff; a 404 is not transient, so a
+# wrong SYFT_VERSION still fails immediately. --retry-max-time bounds the whole
+# attempt. The sha256 check below is unchanged either way.
+curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  --retry 5 --retry-connrefused --retry-max-time 300 -o "${tmp}/${asset}" \
   "https://github.com/anchore/syft/releases/download/${SYFT_VERSION}/${asset}"
 echo "${SYFT_LINUX_AMD64_SHA256}  ${tmp}/${asset}" | sha256sum --check --strict --quiet -
 

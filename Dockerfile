@@ -133,11 +133,20 @@ RUN apk add --no-cache curl ca-certificates
 WORKDIR /bin
 
 # Helper: download <name> and its <name>.sha256, then verify.
+#
+# Every curl here carries `--retry 5 --retry-connrefused --retry-max-time 300`.
+# curl's --retry covers exactly the failures seen in CI: it retries timeouts and
+# HTTP 408, 429, 500, 502, 503 and 504, with exponential backoff. A release asset
+# that is genuinely absent still fails on the first try, because 404 is NOT a
+# transient error -- so this adds patience, never blindness. --retry-max-time
+# bounds the whole attempt so a broken mirror cannot hang the build (principle 4),
+# and the sha256 check after each download is unchanged, so a retried fetch is
+# verified exactly as a first-try fetch is.
 RUN set -eux; \
     for bin in kubeadm kubectl; do \
       base="https://dl.k8s.io/${KUBERNETES_VERSION}/bin/linux/${TARGETARCH}"; \
-      curl -fsSL -o "${bin}" "${base}/${bin}"; \
-      curl -fsSL -o "${bin}.sha256" "${base}/${bin}.sha256"; \
+      curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o "${bin}" "${base}/${bin}"; \
+      curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o "${bin}.sha256" "${base}/${bin}.sha256"; \
       echo "$(cat ${bin}.sha256)  ${bin}" | sha256sum -c -; \
       rm "${bin}.sha256"; \
       chmod 0755 "${bin}"; \
@@ -149,8 +158,8 @@ RUN set -eux; \
 RUN set -eux; \
     base="https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}"; \
     file="crictl-${CRICTL_VERSION}-linux-${TARGETARCH}.tar.gz"; \
-    curl -fsSL -o "${file}" "${base}/${file}"; \
-    curl -fsSL -o "${file}.sha256" "${base}/${file}.sha256"; \
+    curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o "${file}" "${base}/${file}"; \
+    curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o "${file}.sha256" "${base}/${file}.sha256"; \
     echo "$(cat ${file}.sha256)  ${file}" | sha256sum -c -; \
     tar -xzf "${file}"; \
     rm "${file}" "${file}.sha256"; \
@@ -180,8 +189,8 @@ WORKDIR /bin
 # rename to plain "runc" for the final image.
 RUN set -eux; \
     base="https://github.com/opencontainers/runc/releases/download/${RUNC_VERSION}"; \
-    curl -fsSL -o "runc.${TARGETARCH}"      "${base}/runc.${TARGETARCH}"; \
-    curl -fsSL -o runc.sha256sum            "${base}/runc.sha256sum"; \
+    curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o "runc.${TARGETARCH}"      "${base}/runc.${TARGETARCH}"; \
+    curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o runc.sha256sum            "${base}/runc.sha256sum"; \
     grep "  runc.${TARGETARCH}$" runc.sha256sum | sha256sum -c -; \
     rm runc.sha256sum; \
     mv "runc.${TARGETARCH}" runc; \
@@ -193,8 +202,8 @@ RUN set -eux; \
 RUN set -eux; \
     base="https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}"; \
     file="cni-plugins-linux-${TARGETARCH}-${CNI_PLUGINS_VERSION}.tgz"; \
-    curl -fsSL -o "${file}" "${base}/${file}"; \
-    curl -fsSL -o "${file}.sha256" "${base}/${file}.sha256"; \
+    curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o "${file}" "${base}/${file}"; \
+    curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o "${file}.sha256" "${base}/${file}.sha256"; \
     echo "$(awk '{print $1}' ${file}.sha256)  ${file}" | sha256sum -c -; \
     mkdir -p cni && tar -xzf "${file}" -C cni; \
     rm "${file}" "${file}.sha256"; \
@@ -340,8 +349,8 @@ RUN set -eux; \
     esac; \
     base="https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}"; \
     asset="go-containerregistry_Linux_${arch}.tar.gz"; \
-    curl -fsSL -o "${asset}" "${base}/${asset}"; \
-    curl -fsSL -o checksums.txt "${base}/checksums.txt"; \
+    curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o "${asset}" "${base}/${asset}"; \
+    curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o checksums.txt "${base}/checksums.txt"; \
     grep " ${asset}\$" checksums.txt | sha256sum -c -; \
     tar -xzf "${asset}" crane; install -m0755 crane /usr/bin/crane; \
     rm -f "${asset}" checksums.txt crane
@@ -350,8 +359,8 @@ RUN set -eux; \
     case "${TARGETARCH}" in amd64|arm64) : ;; *) echo "unsupported TARGETARCH ${TARGETARCH}" >&2; exit 1 ;; esac; \
     base="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}"; \
     asset="cosign-linux-${TARGETARCH}"; \
-    curl -fsSL -o "${asset}" "${base}/${asset}"; \
-    curl -fsSL -o cosign_checksums.txt "${base}/cosign_checksums.txt"; \
+    curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o "${asset}" "${base}/${asset}"; \
+    curl -fsSL --retry 5 --retry-connrefused --retry-max-time 300 -o cosign_checksums.txt "${base}/cosign_checksums.txt"; \
     grep " ${asset}\$" cosign_checksums.txt | sha256sum -c -; \
     install -m0755 "${asset}" /usr/bin/cosign; \
     rm -f "${asset}" cosign_checksums.txt
