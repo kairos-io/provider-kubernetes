@@ -416,6 +416,46 @@ What this does **not** cover:
   Images already in containerd's persistent store are not re-verified; a layer that
   is already unpacked is reused as is. A node booted from an older image restores
   and imports the old `/opt` copy.
+
+### Runtime image trust (R-IMGPROV)
+
+Be clear about where image trust ends, because it does not extend to runtime.
+
+Verification happens twice, both before anything runs: at **build**, where each
+image's index digest is resolved once and cosign-verified against the Kubernetes
+release signing identity, with the result recorded per image in `images.lock`;
+and at **boot import**, where `CheckTarPinned` requires each bundled archive's
+`index.json` to name exactly the `manifestDigest` that `images.lock` pins. There
+is **no runtime signature verification of a CRI pull.**
+
+The consequence is specific. containerd authenticates bytes to digests
+unconditionally -- content committed under a digest must hash to it -- but it
+never authenticates the *tag to digest* mapping, which it takes from the
+registry's response. So a successful CRI pull of a bundled reference replaces
+verified bundle content with whatever that registry serves under the same name,
+and from that point trust in that content is registry TLS plus the tag, not a
+signature. Nothing on the node re-checks it afterwards: `images.lock` is the only
+runtime link back to what was attested, and the boot import is the only thing
+that consults it.
+
+What reduces the exposure today is that nothing normally pulls. The bundle makes
+every reference resolvable locally, so with the default `IfNotPresent` policy
+kubeadm and the kubelet find each image present and never contact a registry;
+IR-11 gates exactly that, asserting an air-gapped `kubeadm init` converges with
+zero pull attempts. A benign pull on a connected node also no longer changes what
+executes, since the attested content is already local and the pull only re-points
+the name to the signed index.
+
+This is an **accepted, documented risk, not a mitigated one.** The remaining
+triggers are an operator pod referencing a control-plane tag with
+`imagePullPolicy: Always`, and kubelet image garbage collection evicting a
+bundled image under disk pressure (only the sandbox image is pinned by default).
+The e2e suite detects attestation drift (IR-10 (d)) but detection is not
+prevention: it runs in CI, where the registry is trusted, so treat it as a
+regression gate on containerd's resolution semantics rather than as a control.
+Prevention -- pinning the bundled references so image GC cannot evict them, and
+refusing to pull when the bundle already satisfied every reference -- is not
+built yet.
 - **`etcdctl` and `etcdutl`** are not downloaded separately: they are extracted
   from that verified etcd image, so they come from an attested digest and match
   the etcd version kubeadm deploys. CI checks that the shipped `/usr/bin` binaries

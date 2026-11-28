@@ -85,7 +85,7 @@ func TestBundledImagesSurvivePull(t *testing.T) {
 	}
 
 	// Before any pull: every ref intact and rooted.
-	if v := pullIntegrityViolations(t, nc, lock, manifests); len(v) > 0 {
+	if v := pullIntegrityViolations(t, nc, lock, manifests, phaseBeforePull); len(v) > 0 {
 		t.Fatalf("IR-10: before any pull the bundled images are not intact: %s", strings.Join(v, "; "))
 	}
 	t.Logf("IR-10: before the pull all %d images are complete, their targets are in the content store and their manifests are GC-rooted", len(lock.Images))
@@ -115,7 +115,7 @@ func TestBundledImagesSurvivePull(t *testing.T) {
 	deadline := time.Now().Add(gcObservationWindow)
 	ticks := 0
 	for {
-		if v := pullIntegrityViolations(t, nc, lock, manifests); len(v) > 0 {
+		if v := pullIntegrityViolations(t, nc, lock, manifests, phaseAfterPull); len(v) > 0 {
 			t.Fatalf("IR-10: %d tick(s) after the pull the bundled images are no longer intact: %s", ticks, strings.Join(v, "; "))
 		}
 		for _, ref := range pulled {
@@ -135,6 +135,64 @@ func TestBundledImagesSurvivePull(t *testing.T) {
 	}
 	t.Logf("IR-10: over %d assertion round(s) up to %s after pulling %v the images stayed complete and GC-rooted, inspecti succeeded and no import- record appeared",
 		ticks, gcObservationWindow, pulled)
+
+	// (e) POSITIVE CONTROL. Neither detector in (d) means anything until it has
+	// been shown to fire: a gate that cannot fail is indistinguishable from one
+	// that passes for the wrong reason. Rather than stand up a registry serving
+	// substituted content, inject the same end state locally -- re-point one
+	// bundled ref's record at a DIFFERENT bundled image -- and require both
+	// detectors to report it. `ctr images tag --force` deletes the existing
+	// record and recreates it against the donor's target (containerd v2.3.5
+	// cmd/ctr/commands/images/tag.go), which is exactly what a substituted tag
+	// resolve produces: a record under the right name holding the wrong content.
+	//
+	// This runs LAST and leaves the node deliberately inconsistent; it is torn
+	// down immediately after.
+	assertDriftDetectorsFire(t, nc, lock, manifests, pulled)
+}
+
+// assertDriftDetectorsFire is IR-10 (e). It corrupts one ref's name->content
+// binding and requires BOTH (d) detectors to catch it, naming each so a future
+// refactor cannot silently drop one and leave the other carrying the gate.
+func assertDriftDetectorsFire(t *testing.T, nc *nodeContainer, lock imagesLock, manifests map[string]ociManifestInfo, pulled []string) {
+	t.Helper()
+	victim, donor := pulled[0], pulled[1]
+	if _, stderr, err := nc.ExecStdoutTimeout(dockerTimeout, hostexec.CtrPath, "-n", "k8s.io",
+		"images", "tag", "--force", donor, victim); err != nil {
+		t.Fatalf("IR-10 (e): could not re-point %s at %s to test the detectors: %v\n%s",
+			victim, donor, err, strings.TrimSpace(stderr))
+	}
+	t.Logf("IR-10 (e): re-pointed %s at %s's content; both (d) detectors must now fire", victim, donor)
+
+	// The CRI image store updates from containerd events, so poll briefly rather
+	// than assuming the change is visible the instant ctr returns.
+	deadline := time.Now().Add(gcObservationWindow)
+	var last []string
+	for {
+		last = pullIntegrityViolations(t, nc, lock, manifests, phaseAfterPull)
+		var primary, secondary bool
+		for _, v := range last {
+			if !strings.HasPrefix(v, victim+":") {
+				continue
+			}
+			if strings.Contains(v, "no longer resolves to the bundled content") {
+				primary = true
+			}
+			if strings.Contains(v, "is not a digest images.lock") {
+				secondary = true
+			}
+		}
+		if primary && secondary {
+			t.Logf("IR-10 (e): both detectors fired for %s -- the config-digest check and the record-target check", victim)
+			return
+		}
+		if !time.Now().Add(gcObservationTick).Before(deadline) {
+			t.Fatalf("IR-10 (e): after re-pointing %s at %s, primary(config-digest)=%t secondary(record-target)=%t; "+
+				"a detector that does not fire here is vacuous. Violations seen: %s",
+				victim, donor, primary, secondary, strings.Join(last, "; "))
+		}
+		time.Sleep(gcObservationTick)
+	}
 }
 
 // requireRegistryEgress skips the test (never passes silently) when the registry
@@ -186,9 +244,114 @@ func bundledManifest(t *testing.T, nc *nodeContainer, img imagesLockItem) ociMan
 	return m
 }
 
-// pullIntegrityViolations runs the three per-ref assertions for every lock ref
+// pullIntegrityViolations runs the five per-ref assertions for every lock ref
 // against the node's current containerd state and returns every violation.
-func pullIntegrityViolations(t *testing.T, nc *nodeContainer, lock imagesLock, manifests map[string]ociManifestInfo) []string {
+// pullPhase selects which name->content binding IR-10 (d) requires. The two
+// are deliberately NOT interchangeable: set membership cannot tell "never
+// pulled" from "pulled and got exactly what we attested", so the strict form is
+// kept wherever it is still true.
+type pullPhase int
+
+const (
+	// phaseBeforePull: nothing has pulled yet, so the record must still target
+	// the per-platform manifest the boot import pinned. Strict equality.
+	phaseBeforePull pullPhase = iota
+	// phaseAfterPull: a legitimate tag pull re-points the record at the index,
+	// so the target must be one of the digests images.lock attests.
+	phaseAfterPull
+)
+
+// attestedDigests returns the digests images.lock attests for one image, newest
+// relation first: the per-platform manifest the import pins, and the
+// cosign-verified index a tag pull resolves to. Derived from the lock rather
+// than hardcoded as a pair, because two is today's cardinality, not the
+// invariant -- a lock that later attests a third digest must widen this set
+// without touching the assertion.
+func attestedDigests(img imagesLockItem) []string {
+	var d []string
+	for _, c := range []string{img.ManifestDigest, img.Digest} {
+		if c != "" {
+			d = append(d, c)
+		}
+	}
+	return d
+}
+
+// configDigestViolation is IR-10 (d)'s PRIMARY check: the image the CRI resolves
+// this ref to must have the config digest of the manifest images.lock pins.
+//
+// This is a strictly better substitution detector than the record target, and it
+// corrects a premise I had wrong. The config blob is byte-identical from bundle
+// or registry only when the CONTENT is the same and merely the manifest
+// serialization differs -- which is why IR-9 (c) could not see F-IMPORTBLOB. It
+// is NOT identical under substitution: the config carries rootfs.diff_ids, so
+// different layer content gives different diff_ids, hence different config bytes,
+// hence a different digest. containerd then enforces the chain below it,
+// verifying each applied diff against the config's diffIDs and the layer count,
+// so an attacker who keeps the config bytes identical but changes layers fails
+// closed at unpack.
+//
+// One expected value, and it is invariant across both the index re-point a
+// legitimate pull causes AND a mirror that recompresses or converts mediaTypes
+// (neither changes diff_ids). So unlike the record-target check it has no
+// phase and no legitimate drift.
+func configDigestViolation(img imagesLockItem, want ociManifestInfo, criID string) string {
+	if want.ConfigID == "" {
+		return "the bundled manifest for this ref names no config digest, so provenance cannot be checked"
+	}
+	if criID != want.ConfigID {
+		return "the CRI resolves this ref to image id " + criID + ", but the manifest images.lock pins " +
+			"has config digest " + want.ConfigID + "; the name no longer resolves to the bundled content"
+	}
+	return ""
+}
+
+// driftViolation reports the IR-10 (d) violation for one ref, or "" when the
+// record's target is what the phase requires.
+//
+// This is the assertion that makes R-IMGPROV detectable: a successful CRI pull
+// of a bundled ref replaces verified bundle content with registry content under
+// the same name, and nothing else in the suite compares what containerd resolves
+// that name to against what images.lock attests. IR-9 (c) cannot: it compares
+// the CRI image ID, which is the CONFIG digest and is byte-identical whether the
+// bytes came from the bundle or the registry.
+//
+// Two limits, stated so nobody over-reads a pass. It constrains containerd's
+// name->content binding, NOT what running containers were created from: a
+// container started before a pull keeps running the old content. And a target
+// outside the attested set has benign causes as well as hostile ones.
+func driftViolation(img imagesLockItem, target string, phase pullPhase) string {
+	if phase == phaseBeforePull {
+		if target != img.ManifestDigest {
+			return "before any pull the record targets " + target + ", want the manifest digest " +
+				img.ManifestDigest + " that the boot import pins"
+		}
+		return ""
+	}
+	for _, want := range attestedDigests(img) {
+		if target == want {
+			return ""
+		}
+	}
+	// "attests" would be a false claim for an entry the build could not verify:
+	// build/bundle-images.sh records verified:false with a reason (e.g.
+	// no-upstream-signature) and for those `digest` is only the digest the tag
+	// resolved to at build time, i.e. trust-on-first-use, not a signed value.
+	provenance := "images.lock attests"
+	if !img.Verified {
+		provenance = "images.lock records (UNSIGNED"
+		if img.VerifyReason != "" {
+			provenance += ": " + img.VerifyReason
+		}
+		provenance += ")"
+	}
+	return "the record targets " + target + ", which is not a digest " + provenance + " for this ref (" +
+		strings.Join(attestedDigests(img), " or ") + "); investigate rather than assume substitution, " +
+		"since an upstream tag re-push, a pull-through mirror that re-serializes the index, or stale " +
+		"/var/lib/containerd state from before an OS upgrade all land here too"
+}
+
+func pullIntegrityViolations(t *testing.T, nc *nodeContainer, lock imagesLock, manifests map[string]ociManifestInfo, phase pullPhase) []string {
 	t.Helper()
 	var v []string
 
@@ -224,6 +387,33 @@ func pullIntegrityViolations(t *testing.T, nc *nodeContainer, lock imagesLock, m
 		if ok {
 			if _, present := content[row.Digest]; !present {
 				v = append(v, img.Ref+": the record's target "+row.Digest+" is not in ctr content ls")
+			}
+			// (d) secondary, CI-only: the name->content binding containerd
+			// holds must be one images.lock records. Kept out of production
+			// because a mirror re-push makes the legitimate value set
+			// open-ended.
+			if dv := driftViolation(img, row.Digest, phase); dv != "" {
+				v = append(v, img.Ref+": "+dv)
+			}
+		}
+		// (d) PRIMARY: what the CRI actually resolves this ref to. Every lock
+		// ref, not just the pulled pair, and phase-independent. This is the
+		// assertion that makes R-IMGPROV detectable at all.
+		{
+			status, stderr, err := nc.ExecStdoutTimeout(dockerTimeout, binCrictl,
+				"--runtime-endpoint", criEndpoint, "--image-endpoint", criEndpoint,
+				"inspecti", "-o", "json", img.Ref)
+			if err != nil {
+				v = append(v, img.Ref+": crictl inspecti: "+err.Error()+": "+strings.TrimSpace(stderr))
+				continue
+			}
+			criID, _, perr := parseCrictlImageStatus(status)
+			if perr != nil {
+				v = append(v, img.Ref+": "+perr.Error())
+				continue
+			}
+			if cv := configDigestViolation(img, manifests[img.Ref], criID); cv != "" {
+				v = append(v, img.Ref+": "+cv)
 			}
 		}
 		manifest, present := content[img.ManifestDigest]
