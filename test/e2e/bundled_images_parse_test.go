@@ -969,3 +969,136 @@ func TestSetDiff(t *testing.T) {
 		t.Errorf("setDiff(a, a) = %v, want empty", got)
 	}
 }
+
+// --- IR-10 (d): the drift assertion -----------------------------------------
+
+func TestAttestedDigestsComeFromTheLock(t *testing.T) {
+	both := imagesLockItem{ManifestDigest: "sha256:aa", Digest: "sha256:bb"}
+	if got := attestedDigests(both); len(got) != 2 || got[0] != "sha256:aa" || got[1] != "sha256:bb" {
+		t.Fatalf("attestedDigests(both) = %v, want [sha256:aa sha256:bb]", got)
+	}
+	// A lock entry that records no index digest must not contribute an empty
+	// string, or every target would "match" it.
+	onlyManifest := imagesLockItem{ManifestDigest: "sha256:aa"}
+	if got := attestedDigests(onlyManifest); len(got) != 1 || got[0] != "sha256:aa" {
+		t.Fatalf("attestedDigests(onlyManifest) = %v, want [sha256:aa]", got)
+	}
+	if got := attestedDigests(imagesLockItem{}); len(got) != 0 {
+		t.Fatalf("attestedDigests(empty) = %v, want none", got)
+	}
+}
+
+func TestDriftViolationDistinguishesThePhases(t *testing.T) {
+	// The real etcd values: the manifest the import pins, and the
+	// cosign-verified index a legitimate tag pull re-points the record to.
+	// Verified matters: an unverified entry takes the UNSIGNED wording path, and
+	// leaving it at the zero value made this fixture silently exercise that one.
+	img := imagesLockItem{
+		Ref:            "registry.k8s.io/etcd:3.7.0-0",
+		ManifestDigest: "sha256:1f445fa5dd06b08f3c0cf9f46e2891e9bc66cbf7e0b9c66627c40658edf4bc98",
+		Digest:         "sha256:6ecefbe2510c4a30573a62a4d6dd175acf881ca67003fcd91849a16df7a724d5",
+		Verified:       true,
+	}
+	const foreign = "sha256:dead00000000000000000000000000000000000000000000000000000000beef"
+
+	for _, tc := range []struct {
+		name    string
+		target  string
+		phase   pullPhase
+		wantErr bool
+		// contains is a substring the message must carry, so a future reword
+		// cannot quietly drop the operator-facing part.
+		contains string
+	}{
+		{"before: the pinned manifest is the only accepted target",
+			img.ManifestDigest, phaseBeforePull, false, ""},
+		{"before: the index is NOT yet acceptable, nothing has pulled",
+			img.Digest, phaseBeforePull, true, "the boot import pins"},
+		{"before: a foreign digest is drift",
+			foreign, phaseBeforePull, true, "want the manifest digest"},
+		{"after: the pinned manifest is still fine (nothing pulled this ref)",
+			img.ManifestDigest, phaseAfterPull, false, ""},
+		{"after: the verified index is fine (a legitimate pull landed)",
+			img.Digest, phaseAfterPull, false, ""},
+		{"after: a foreign digest is drift, and says so without crying breach",
+			foreign, phaseAfterPull, true, "not a digest images.lock attests"},
+		{"after: the benign causes are named so a mirror is not read as an attack",
+			foreign, phaseAfterPull, true, "pull-through mirror"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := driftViolation(img, tc.target, tc.phase)
+			if tc.wantErr && got == "" {
+				t.Fatalf("driftViolation(%s, phase=%d) = \"\", want a violation", tc.target, tc.phase)
+			}
+			if !tc.wantErr && got != "" {
+				t.Fatalf("driftViolation(%s, phase=%d) = %q, want no violation", tc.target, tc.phase, got)
+			}
+			if tc.contains != "" && !strings.Contains(got, tc.contains) {
+				t.Fatalf("driftViolation message %q does not contain %q", got, tc.contains)
+			}
+			if tc.wantErr && !strings.Contains(got, tc.target) {
+				t.Fatalf("driftViolation message %q does not name the observed digest %q", got, tc.target)
+			}
+		})
+	}
+}
+
+func TestConfigDigestViolationIsThePrimaryDetector(t *testing.T) {
+	const bundled = "sha256:270fbeb69717150d82de2f31e6d6a93a6a60f8843d63df68cebe33c4b59c5f78"
+	const substituted = "sha256:beef00000000000000000000000000000000000000000000000000000000dead"
+	img := imagesLockItem{Ref: "registry.k8s.io/etcd:3.7.0-0"}
+	want := ociManifestInfo{ConfigID: bundled}
+
+	if got := configDigestViolation(img, want, bundled); got != "" {
+		t.Fatalf("matching config digest reported %q, want no violation", got)
+	}
+	// Substitution changes layer content, hence diff_ids, hence the config
+	// digest. This is the case IR-9 (c) is blind to only for benign
+	// re-serialization, not for this.
+	got := configDigestViolation(img, want, substituted)
+	if got == "" {
+		t.Fatal("a differing CRI image id reported no violation, so the primary detector is vacuous")
+	}
+	for _, must := range []string{substituted, bundled, "no longer resolves to the bundled content"} {
+		if !strings.Contains(got, must) {
+			t.Fatalf("violation %q does not contain %q", got, must)
+		}
+	}
+	// A manifest with no config digest must be reported, never silently passed.
+	if got := configDigestViolation(img, ociManifestInfo{}, bundled); got == "" {
+		t.Fatal("an empty expected config digest reported no violation, which would pass anything")
+	}
+}
+
+func TestDriftMessageDoesNotClaimAttestationForAnUnsignedEntry(t *testing.T) {
+	const foreign = "sha256:dead00000000000000000000000000000000000000000000000000000000beef"
+	// build/bundle-images.sh records verified:false with a reason when upstream
+	// has no discoverable signature; for such an entry `digest` is only the
+	// digest the tag resolved to at build time, so the message must not call it
+	// attested.
+	unsigned := imagesLockItem{
+		Ref:            "registry.k8s.io/etcd:3.7.0-0",
+		ManifestDigest: "sha256:aa",
+		Digest:         "sha256:bb",
+		Verified:       false,
+		VerifyReason:   "no-upstream-signature",
+	}
+	got := driftViolation(unsigned, foreign, phaseAfterPull)
+	if got == "" {
+		t.Fatal("drift on an unsigned entry reported nothing")
+	}
+	if strings.Contains(got, "images.lock attests") {
+		t.Fatalf("message claims attestation for an UNSIGNED entry: %q", got)
+	}
+	for _, must := range []string{"UNSIGNED", "no-upstream-signature"} {
+		if !strings.Contains(got, must) {
+			t.Fatalf("message %q does not contain %q", got, must)
+		}
+	}
+	// A verified entry still says "attests".
+	signed := unsigned
+	signed.Verified = true
+	if g := driftViolation(signed, foreign, phaseAfterPull); !strings.Contains(g, "images.lock attests") {
+		t.Fatalf("a verified entry's message should say it attests: %q", g)
+	}
+}
