@@ -144,6 +144,16 @@ func nodeImage(t *testing.T) string {
 // removing live containers started by earlier tests in the same suite invocation.
 func startNode(t *testing.T, name string) *nodeContainer {
 	t.Helper()
+	return startNodeOnNetwork(t, name, "")
+}
+
+// startNodeOnNetwork is startNode with the container joined to a specific docker
+// network. network == "" keeps docker's default bridge, which is what every
+// scenario uses. IR-11 passes an --internal network: the node still gets an IP
+// (kubeadm must advertise one) but has no route off-host, so the air-gapped path
+// is exercised for real rather than simulated.
+func startNodeOnNetwork(t *testing.T, name, network string) *nodeContainer {
+	t.Helper()
 	img := nodeImage(t)
 
 	// The kind node-container run flags. argv only, no shell.
@@ -175,6 +185,9 @@ func startNode(t *testing.T, name string) *nodeContainer {
 		"-v", "/var/lib/containerd",
 		"-v", "/var/lib/kubelet",
 		"-v", "/var/lib/etcd",
+	}
+	if network != "" {
+		args = append(args, "--network", network)
 	}
 	args = append(args, hostKernelMounts()...)
 	args = append(args,
